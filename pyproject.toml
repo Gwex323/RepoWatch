@@ -1,0 +1,31 @@
+[project]
+name = "repowatch"
+version = "0.1.0"
+description = "A local, human-gated Agents SDK workbench"
+requires-python = ">=3.11"
+dependencies = [
+  "openai-agents==0.23.1",
+  "fastapi==0.143.0",
+  "uvicorn==0.54.0",
+]
+
+[build-system]
+requires = ["setuptools>=80"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["repowatch*"]
+
+[project.optional-dependencies]
+dev = ["pytest==9.1.1", "httpx==0.28.1", "ruff==0.16.10"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]

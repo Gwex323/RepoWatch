@@ -1,0 +1,173 @@
+# Multi-Agent GitHub Maintenance System
+
+Status: milestone one and origin-dependent controlled workflows implemented
+Updated: 2026-10-10
+
+## Goal
+
+Design a multi-agent system that analyzes GitHub repositories, identifies
+project problems, opens issues, fixes bugs, and submits pull requests.
+
+## Confirmed Requirements
+
+- Version one accepts a user-provided GitHub repository URL as its entry point.
+  Any repository accessible to the system is eligible, not only repositories
+  owned by the user. Access must be verified using the configured identity.
+- The system downloads repositories into local workspaces on its execution
+  host and runs them as part of analysis. Projects use separate local Docker
+  containers for dependency installation, execution, and testing, with
+  restricted mounts and permissions. Detailed isolation policy remains to
+  be specified; local execution does not imply unrestricted host access.
+- Analysis and finding discovery are automated. Each discovered suspected
+  bug must then be reproduced and confirmed by a human before the system
+  proceeds with issue submission, repair, or a repair PR for that finding.
+- The single user personally operates the local project to reproduce the
+  suspected bug, then records the result in the WebUI. Agent-generated
+  evidence does not replace that user confirmation for system discoveries.
+- Existing GitHub Issues do not require personal reproduction. The system
+  automatically validates the issue at the task revision before repair.
+  Failed validation pauses with a WebUI notification, without switching to a
+  human reproduction requirement. Both origins still require tests and review.
+- Origin is assigned by the trusted intake path and cannot be changed by model
+  output, user-supplied metadata, or later Issue creation. Linking an Issue to a
+  system discovery must not bypass that discovery's human checkpoint.
+- Project containers do not stay running while waiting for the user to
+  reproduce findings. The feedback interface must remain independent of
+  the target project's container lifecycle.
+- After human reproduction confirmation, issue creation, bug fixing,
+  repair-branch pushes, and PR creation do not need separate per-action
+  approval, subject to the remaining quality and permission gates.
+- The project owner reviews and performs the merge. The system does not
+  execute merges, even after owner approval.
+- Automated tests and agent review cannot replace required human reproduction
+  for system discoveries or project-owner review and merge for either origin.
+- The system may automatically fork a selected repository into the configured
+  GitHub account and use that account to submit issues and pull requests,
+  subject to available permissions and repository restrictions.
+- Version one automatically publishes new issues only for human-confirmed
+  discoveries. Repair PRs require the origin-specific reproduction evidence
+  plus passing repair tests and independent review. Refactoring suggestions,
+  style findings, and unverified suspected problems remain in the analysis
+  report.
+- The system supports recurring scheduled repository checks after intake.
+  The default frequency is once per day. The execution time, timezone, and
+  other scheduling rules remain undecided.
+- Version one runs on the user's current Windows host. A later deployment
+  will migrate to a Linux server; portability is a design requirement.
+- The user imposes no model-provider or model-family restriction. Specific
+  models remain architectural choices; this does not
+  establish that any provider credentials are already configured.
+- Implement the agent backend in Python using the Python OpenAI Agents SDK,
+  including native handoffs for responsibility transfers between agents.
+  The exact Python runtime and SDK package versions remain to be pinned.
+- The current budget policy has no daily model-call spending cap across
+  repositories. This is the initial configuration preference, not a permanent
+  requirement to prohibit budget limits.
+- The user-facing interface is a WebUI for repository intake, run progress,
+  and analysis reports.
+- Findings requiring the user's reproduction are announced in the WebUI
+  only. Email and external messaging notifications are not required.
+- Version one serves a single user. Team roles and multi-user collaboration
+  are outside the initial scope; authentication and network exposure still
+  need to be defined.
+- The expected initial workload is three registered repositories checked
+  daily. This is a sizing assumption, not a hard repository-count limit or
+  a decision to execute three runs concurrently.
+- The initial repositories have not been selected. Repository-specific
+  validation is deferred; URL-based intake remains generic.
+- Version one explicitly targets Python, Go, and TypeScript projects.
+  The user's mention of additional languages leaves their exact scope open;
+  universal language or project compatibility is not a confirmed requirement.
+- The system first attempts to discover and execute each project's dependency
+  installation, startup, and test commands. If automatic setup or execution
+  fails, the user supplies or corrects configuration through the WebUI.
+  These commands execute in the project's Docker environment, subject to
+  the detailed isolation policy.
+
+These are requirements for the future system, not authorization to modify
+any particular repository during this design session.
+
+The reproduction checkpoint is mandatory for system discoveries. Existing
+Issues are exempt from human reproduction, not from automatic validation or
+the subsequent test, review, and publication permission gates.
+
+## Workflow Boundary
+
+System discovery: repository URL -> local checkout and execution -> automated analysis and
+finding discovery -> wait for human reproduction confirmation -> issue
+submission -> repair and verification -> PR submission -> project-owner
+review and merge.
+
+Existing Issue: verified Issue intake -> local checkout and automatic validation
+-> repair and verification -> PR submission -> project-owner review and merge.
+No duplicate Issue is created. Unsuccessful automatic validation pauses.
+
+This is a requirements-level sequence, not a finalized implementation state
+machine. Agent-assisted evidence collection is allowed before the human
+checkpoint but cannot satisfy it on its own.
+
+## Open Questions
+
+- What discovery evidence and execution checks should be used for project
+  commands, and how should WebUI overrides be validated and retained?
+- Which runtime versions, package managers, application types, and external
+  service dependencies should version one support?
+- Which additional languages should be supported later, and how should
+  unsupported project environments be reported?
+- Which GitHub identity and authentication method will the system use?
+- What is the fallback when a repository allows analysis but not issue
+  creation, forking, or pull-request submission?
+- What qualifies as sufficient human reproduction evidence for a bug?
+- How should the WebUI handle unsuccessful reproduction, rejection, and
+  findings awaiting user action?
+- What project state must be retained to restart reproduction environments
+  on demand, and how long should retained files and data be kept?
+- How is confirmation tied to the repository revision and finding, and what
+  changes invalidate it?
+- How are project-owner review and merge status displayed without granting
+  the system merge execution responsibility?
+- What verification is required before publishing a finding or a patch?
+- Docker CLI is present on the current host, but its Linux engine was
+  unreachable during the 2026-10-09 readiness check. What setup is needed
+  to make it usable, and what execution resources are available?
+- How should container images, mounts, permissions, network access, resource
+  limits, and credentials be managed?
+- Which Python runtime and Python Agents SDK package versions should be pinned?
+- Which models and provider adapters should be configured, and which provider
+  credentials and capability checks are required?
+- What execution time and timezone should daily checks use?
+- Should unchanged repositories be reanalyzed, and how are overlapping
+  scheduled runs handled?
+- What are the per-repository timeout, retry, and concurrency limits?
+- How should model usage and cost be recorded when no spending cap is set?
+- What authentication and network-access boundaries should protect the
+  single-user WebUI on Windows and after Linux migration?
+- How should the WebUI present failures and offer pause, retry, and stop actions?
+- How are repository code execution, credentials, and untrusted content isolated?
+- How are duplicates, retries, failures, and operator stop requests handled?
+
+## Design Records
+
+- [Proposed architecture](architecture-draft.md)
+- [Implementation plan and host readiness](implementation-plan.md)
+- [ADR 0001: Approval boundary](adr/0001-approval-boundary.md)
+- [ADR 0002: URL-based repository intake](adr/0002-repository-intake.md)
+- [ADR 0003: Automated fork-based contributions](adr/0003-fork-contributions.md)
+- [ADR 0004: Reproducible-bug publication scope](adr/0004-finding-publication-scope.md)
+- [ADR 0005: Scheduled repository checks](adr/0005-scheduled-checks.md)
+- [ADR 0006: Local Windows deployment, later Linux migration](adr/0006-deployment-portability.md)
+- [ADR 0007: Local execution and mandatory human reproduction](adr/0007-human-reproduction-local-execution.md)
+- [ADR 0008: Automatic project setup with WebUI fallback](adr/0008-project-setup.md)
+- [ADR 0009: Local Docker project execution](adr/0009-docker-execution.md)
+- [ADR 0010: Stopped waiting environments and WebUI feedback](adr/0010-reproduction-feedback.md)
+- [ADR 0011: OpenAI Agents SDK and native handoffs](adr/0011-agents-sdk-handoffs.md)
+- [ADR 0012: Shared repository memory](adr/0012-repository-memory.md)
+- [ADR 0013: Origin-dependent reproduction](adr/0013-origin-dependent-reproduction.md)
+- [Domain glossary](glossary.md)
+
+## Interview Workflow
+
+The requested grill-with-docs skill delegates to grilling and domain-modeling.
+Those dependencies were not found in the inspected local skill directories.
+Continue with focused requirements questions and explicit decision records;
+do not treat missing skill instructions as loaded.

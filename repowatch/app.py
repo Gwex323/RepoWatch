@@ -1,0 +1,286 @@
+import asyncio
+import mimetypes
+import os
+import platform
+import re
+import secrets
+import time
+from collections import defaultdict, deque
+from contextlib import asynccontextmanager, suppress
+from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
+
+from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict, Field
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from .memory import Memory
+from .store import SDK_VERSION, Conflict, Missing, Store
+from .workflow import ROLES, Worker
+
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class StrictBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class PasswordBody(StrictBody):
+    password: str = Field(min_length=10, max_length=128)
+
+
+class RepositoryBody(StrictBody):
+    url: str = Field(max_length=300)
+
+
+class ObservationBody(StrictBody):
+    total: int = Field(ge=0, le=10000, strict=True)
+    page: int = Field(ge=1, le=1000, strict=True)
+    size: int = Field(ge=1, le=100, strict=True)
+
+
+class ConfirmationBody(StrictBody):
+    decision: Literal["confirmed", "not_reproduced"]
+    revision: str = Field(min_length=64, max_length=64)
+    personally_reproduced: bool = False
+    note: str = Field(default="", max_length=2000)
+
+
+class MemoryBody(StrictBody):
+    category: Literal["architecture", "setup", "testing"]
+    title: str = Field(min_length=1, max_length=160)
+    content: str = Field(min_length=1, max_length=4000)
+    revision: str = Field(min_length=1, max_length=128)
+
+
+class MemoryEditBody(MemoryBody):
+    version: int = Field(ge=1, strict=True)
+
+
+class MemoryVersionBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+
+
+def create_app(db_path: Path | None = None, *, start_worker=True) -> FastAPI:
+    # Windows registry MIME mappings may label .js as text/plain.
+    mimetypes.add_type("text/javascript", ".js")
+    mimetypes.add_type("text/css", ".css")
+    store = Store(db_path or Path(os.getenv("REPOWATCH_DB", str(ROOT / "data/repowatch.db"))))
+    memory = Memory(store)
+    login_attempts: dict[str, deque] = defaultdict(deque)
+
+    @asynccontextmanager
+    async def lifespan(app):
+        worker = asyncio.create_task(Worker(store).run()) if start_worker else None
+        yield
+        if worker:
+            worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await worker
+
+    app = FastAPI(title="RepoWatch", lifespan=lifespan, docs_url=None, redoc_url=None)
+    app.state.store = store
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
+
+    @app.middleware("http")
+    async def security(request: Request, call_next):
+        path = request.url.path
+        if request.method not in ("GET", "HEAD", "OPTIONS"):
+            origin = request.headers.get("origin")
+            if origin and origin != f"{request.url.scheme}://{request.headers.get('host')}":
+                return JSONResponse({"detail": "Cross-origin requests are not allowed."}, 403)
+        public = path in ("/api/session", "/api/setup", "/api/login")
+        session = store.session(request.cookies.get("rw_session", ""))
+        if path.startswith("/api/") and not public:
+            if not session:
+                return JSONResponse({"detail": "Owner login is required."}, 401)
+            if request.method not in ("GET", "HEAD", "OPTIONS") and not secrets.compare_digest(
+                request.headers.get("x-csrf-token", ""), session["csrf"]
+            ):
+                return JSONResponse({"detail": "Invalid confirmation session."}, 403)
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
+            "base-uri 'self'; form-action 'self'"
+        )
+        if path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store"
+        return response
+
+    @app.exception_handler(Conflict)
+    async def conflict_handler(request, exc):
+        return JSONResponse({"detail": str(exc)}, 409)
+
+    @app.exception_handler(Missing)
+    async def missing_handler(request, exc):
+        return JSONResponse({"detail": str(exc)}, 404)
+
+    @app.get("/api/session")
+    async def session(request: Request):
+        current = store.session(request.cookies.get("rw_session", ""))
+        return {
+            "setup_required": store.setting("password") is None,
+            "authenticated": bool(current),
+            "csrf": current["csrf"] if current else None,
+        }
+
+    def session_response(response: Response):
+        token, csrf = store.create_session()
+        response.set_cookie("rw_session", token, httponly=True, samesite="strict", max_age=43200)
+        return {"authenticated": True, "csrf": csrf, "setup_required": False}
+
+    @app.post("/api/setup")
+    async def setup(body: PasswordBody, response: Response):
+        store.setup_password(body.password)
+        return session_response(response)
+
+    @app.post("/api/login")
+    async def login(body: PasswordBody, request: Request, response: Response):
+        key = request.client.host if request.client else "local"
+        attempts = login_attempts[key]
+        now = time.monotonic()
+        while attempts and attempts[0] < now - 60:
+            attempts.popleft()
+        if len(attempts) >= 10:
+            raise HTTPException(429, "Too many login attempts. Please wait one minute.")
+        attempts.append(now)
+        if not store.check_password(body.password):
+            raise HTTPException(401, "The owner password is incorrect.")
+        attempts.clear()
+        return session_response(response)
+
+    @app.post("/api/logout")
+    async def logout(request: Request, response: Response):
+        store.logout(request.cookies.get("rw_session", ""))
+        response.delete_cookie("rw_session")
+        return {"ok": True}
+
+    @app.get("/api/dashboard")
+    async def dashboard():
+        return store.dashboard()
+
+    @app.get("/api/system")
+    async def system():
+        return {
+            "phase": 1,
+            "sdk_version": SDK_VERSION,
+            "roles": ROLES,
+            "model_mode": "deterministic_fixture",
+            "external_model_calls": False,
+            "github_publication": False,
+            "external_repository_execution": False,
+            "existing_issue_intake": False,
+            "reproduction_policy": {
+                "discovered": "human", "existing_issue": "automatic", "merge": "owner_only",
+            },
+            "schedule": {"frequency": "daily", "enabled": False},
+            "tracing_export": False,
+            "storage": "SQLite",
+            "runtime": "Python",
+            "platform": platform.system(),
+            "max_turns": 24,
+            "max_attempts": 3,
+            "memory": {"enabled": True, "scope": "repository_and_exact_revision",
+                       "retrieval": "role_categories", "semantic_search": False},
+        }
+
+    @app.post("/api/repositories", status_code=201)
+    async def add_repository(body: RepositoryBody):
+        parts = urlsplit(body.url.strip())
+        if parts.scheme != "https" or parts.netloc != "github.com" or parts.query or parts.fragment:
+            raise HTTPException(422, "Provide an HTTPS github.com repository URL.")
+        path = parts.path.rstrip("/")
+        if path.endswith(".git"):
+            path = path[:-4]
+        if not re.fullmatch(r"/[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}", path):
+            raise HTTPException(422, "Provide a repository URL, not a branch or file URL.")
+        if path.split("/")[-1] in (".", ".."):
+            raise HTTPException(422, "Invalid repository name.")
+        return store.add_repository(path[1:], "https://github.com" + path)
+
+    @app.post("/api/repositories/{repo_id}/runs")
+    async def start_run(repo_id: str, body: StrictBody | None = None):
+        return {"run_id": store.start_run(repo_id)}
+
+    @app.post("/api/samples/existing-issue/runs")
+    async def start_issue_sample(body: StrictBody | None = None):
+        return {"run_id": store.start_issue_sample()}
+
+    @app.get("/api/repositories/{repo_id}/memories")
+    async def memories(
+        repo_id: str,
+        revision: str = Query(default="", max_length=128),
+        query: str = Query(default="", max_length=200),
+        category: Literal[
+            "", "architecture", "setup", "testing", "bug", "fix", "investigation"
+        ] = "",
+        status: Literal["active", "archived"] = "active",
+        limit: int = Query(default=50, ge=1, le=100),
+        offset: int = Query(default=0, ge=0, le=100000),
+    ):
+        return memory.list(repo_id, revision=revision, query=query, category=category,
+                           status=status, limit=limit, offset=offset)
+
+    @app.post("/api/repositories/{repo_id}/memories", status_code=201)
+    async def add_memory(repo_id: str, body: MemoryBody):
+        return memory.create(repo_id, **body.model_dump())
+
+    @app.post("/api/repositories/{repo_id}/memories/{memory_id}")
+    async def edit_memory(repo_id: str, memory_id: str, body: MemoryEditBody):
+        return memory.update(repo_id, memory_id, **body.model_dump())
+
+    @app.post("/api/repositories/{repo_id}/memories/{memory_id}/archive")
+    async def archive_memory(repo_id: str, memory_id: str, body: MemoryVersionBody):
+        return memory.archive(repo_id, memory_id, version=body.version)
+
+    @app.post("/api/repositories/{repo_id}/memories/{memory_id}/restore")
+    async def restore_memory(repo_id: str, memory_id: str, body: MemoryVersionBody):
+        return memory.restore(repo_id, memory_id, version=body.version)
+
+    @app.get("/api/repositories/{repo_id}/memories/{memory_id}/history")
+    async def memory_history(repo_id: str, memory_id: str):
+        return memory.history(repo_id, memory_id)
+
+    @app.get("/api/runs/{run_id}/memories")
+    async def memory_reads(run_id: str):
+        return memory.reads(run_id)
+
+    @app.get("/api/runs/{run_id}")
+    async def run_detail(run_id: str):
+        return store.details(run_id)
+
+    @app.post("/api/runs/{run_id}/experiment")
+    async def observe(run_id: str, body: ObservationBody):
+        return store.observe(run_id, body.total, body.page, body.size)
+
+    @app.post("/api/runs/{run_id}/confirmation")
+    async def confirm(run_id: str, body: ConfirmationBody):
+        if body.decision == "confirmed" and not body.personally_reproduced:
+            raise HTTPException(422, "Personal reproduction must be explicitly confirmed.")
+        changed = store.confirm(run_id, body.decision, body.revision, body.note.strip())
+        return {"accepted": True, "changed": changed, "run": store.run(run_id)}
+
+    @app.post("/api/runs/{run_id}/retry")
+    async def retry(run_id: str):
+        store.retry(run_id)
+        return {"queued": True}
+
+    assets = ROOT / "dist/assets"
+    if assets.exists():
+        app.mount("/assets", StaticFiles(directory=assets), name="assets")
+
+    @app.get("/")
+    async def index():
+        file = ROOT / "dist/index.html"
+        if not file.exists():
+            raise HTTPException(503, "Build the WebUI with npm run build first.")
+        return FileResponse(file)
+
+    return app
