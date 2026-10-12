@@ -145,6 +145,9 @@ class Store:
             from .memory import initialize
 
             initialize(db)
+            from .github_accounts import initialize as initialize_github
+
+            initialize_github(db)
 
     @contextmanager
     def connection(self):

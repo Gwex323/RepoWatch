@@ -7,6 +7,9 @@ dependencies = [
   "openai-agents==0.23.1",
   "fastapi==0.143.0",
   "uvicorn==0.54.0",
+  "httpx==0.28.1",
+  "keyring==25.6.0",
+  "cryptography==50.0.2",
 ]
 
 [build-system]
@@ -17,7 +20,7 @@ build-backend = "setuptools.build_meta"
 include = ["repowatch*"]
 
 [project.optional-dependencies]
-dev = ["pytest==9.1.1", "httpx==0.28.1", "ruff==0.16.10"]
+dev = ["pytest==9.1.1", "ruff==0.16.10"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

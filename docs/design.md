@@ -1,7 +1,7 @@
 # Multi-Agent GitHub Maintenance System
 
 Status: milestone one and origin-dependent controlled workflows implemented
-Updated: 2026-10-10
+Updated: 2026-10-12
 
 ## Goal
 
@@ -65,6 +65,10 @@ project problems, opens issues, fixes bugs, and submits pull requests.
   requirement to prohibit budget limits.
 - The user-facing interface is a WebUI for repository intake, run progress,
   and analysis reports.
+- The WebUI supports multiple saved GitHub personal-account connections with one
+  explicitly selected current account. Identity is verified against GitHub.
+  Tokens are encrypted and kept outside model context, memory, and API responses.
+  This connection identity is independent of the developer's GitHub CLI login.
 - Findings requiring the user's reproduction are announced in the WebUI
   only. Email and external messaging notifications are not required.
 - Version one serves a single user. Team roles and multi-user collaboration
@@ -163,6 +167,7 @@ checkpoint but cannot satisfy it on its own.
 - [ADR 0011: OpenAI Agents SDK and native handoffs](adr/0011-agents-sdk-handoffs.md)
 - [ADR 0012: Shared repository memory](adr/0012-repository-memory.md)
 - [ADR 0013: Origin-dependent reproduction](adr/0013-origin-dependent-reproduction.md)
+- [ADR 0014: GitHub account binding](adr/0014-github-account-binding.md)
 - [Domain glossary](glossary.md)
 
 ## Interview Workflow

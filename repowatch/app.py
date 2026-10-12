@@ -12,11 +12,14 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 from fastapi import FastAPI, HTTPException, Query, Request, Response
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .github_accounts import GitHubAccounts, GitHubError
 from .memory import Memory
 from .store import SDK_VERSION, Conflict, Missing, Store
 from .workflow import ROLES, Worker
@@ -64,12 +67,28 @@ class MemoryVersionBody(StrictBody):
     version: int = Field(ge=1, strict=True)
 
 
-def create_app(db_path: Path | None = None, *, start_worker=True) -> FastAPI:
+class GitHubConnectBody(StrictBody):
+    username: str = Field(min_length=1, max_length=39, pattern=r"^[A-Za-z0-9][A-Za-z0-9-]*$")
+    token: SecretStr = Field(min_length=20, max_length=512)
+
+
+class GitHubVersionBody(StrictBody):
+    version: int = Field(ge=1, le=2**63 - 1, strict=True)
+
+
+class GitHubRepositoryBody(GitHubVersionBody):
+    repo_id: str = Field(min_length=1, max_length=100)
+
+
+def create_app(
+    db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
+) -> FastAPI:
     # Windows registry MIME mappings may label .js as text/plain.
     mimetypes.add_type("text/javascript", ".js")
     mimetypes.add_type("text/css", ".css")
     store = Store(db_path or Path(os.getenv("REPOWATCH_DB", str(ROOT / "data/repowatch.db"))))
     memory = Memory(store)
+    github = GitHubAccounts(store, client=github_client, vault=credential_vault)
     login_attempts: dict[str, deque] = defaultdict(deque)
 
     @asynccontextmanager
@@ -121,6 +140,17 @@ def create_app(db_path: Path | None = None, *, start_worker=True) -> FastAPI:
     @app.exception_handler(Missing)
     async def missing_handler(request, exc):
         return JSONResponse({"detail": str(exc)}, 404)
+
+    @app.exception_handler(GitHubError)
+    async def github_error_handler(request, exc):
+        return JSONResponse({"detail": exc.code}, exc.status)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(request, exc):
+        # Pydantic's default error payload can echo rejected secret input.
+        if request.url.path.startswith("/api/github/"):
+            return JSONResponse({"detail": "github_invalid_input"}, 422)
+        return await request_validation_exception_handler(request, exc)
 
     @app.get("/api/session")
     async def session(request: Request):
@@ -175,6 +205,7 @@ def create_app(db_path: Path | None = None, *, start_worker=True) -> FastAPI:
             "model_mode": "deterministic_fixture",
             "external_model_calls": False,
             "github_publication": False,
+            "github_account_binding": True,
             "external_repository_execution": False,
             "existing_issue_intake": False,
             "reproduction_policy": {
@@ -190,6 +221,30 @@ def create_app(db_path: Path | None = None, *, start_worker=True) -> FastAPI:
             "memory": {"enabled": True, "scope": "repository_and_exact_revision",
                        "retrieval": "role_categories", "semantic_search": False},
         }
+
+    @app.get("/api/github/accounts")
+    def github_accounts():
+        return github.list()
+
+    @app.post("/api/github/accounts")
+    def github_connect(body: GitHubConnectBody):
+        return github.connect(body.username, body.token.get_secret_value())
+
+    @app.post("/api/github/accounts/{account_id}/verify")
+    def github_verify(account_id: int, body: GitHubVersionBody):
+        return github.verify(account_id, body.version)
+
+    @app.post("/api/github/accounts/{account_id}/activate")
+    def github_activate(account_id: int, body: GitHubVersionBody):
+        return github.verify(account_id, body.version, activate=True)
+
+    @app.post("/api/github/accounts/{account_id}/disconnect")
+    def github_disconnect(account_id: int, body: GitHubVersionBody):
+        return github.disconnect(account_id, body.version)
+
+    @app.post("/api/github/accounts/{account_id}/repository-access")
+    def github_repository_access(account_id: int, body: GitHubRepositoryBody):
+        return github.check_repository(account_id, body.version, body.repo_id)
 
     @app.post("/api/repositories", status_code=201)
     async def add_repository(body: RepositoryBody):

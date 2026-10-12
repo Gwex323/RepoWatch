@@ -60,6 +60,20 @@ findings, and preserve the original gate when a discovered finding gains an Issu
 Model output or a browser-provided origin is never sufficient provenance.
 See ADR 0013, which supersedes universal human-reproduction wording below.
 
+## GitHub Account Binding Increment (2026-10-12)
+
+Implemented on `codex/github-account-binding`: PAT-based account connections,
+GitHub-verified user identity, multiple saved identities with one active account,
+revalidation on switch, token rotation, optimistic-version protected changes,
+and local disconnect. Read-only checks verify access to registered repositories
+without claiming Issue/PR write permission.
+
+Tokens are encrypted in SQLite using a per-installation key kept in the operating
+system credential vault. The UI and API never return tokens, ciphertext, or keys.
+Mock HTTP integration and browser tests do not use personal credentials.
+This does not add OAuth, automatic CLI-account import, repository execution,
+or publication. See ADR 0014 for storage and migration contracts.
+
 ## Initial Read-Only Host Check
 
 Observed on 2026-10-09 without installing software or starting containers:

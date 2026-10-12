@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import './styles.css';
 import { MemoryReads, MemoryView, type MemoryRead } from './memory';
+import { GitHubAccounts } from './github';
 
 type View = 'overview' | 'repositories' | 'findings' | 'memory' | 'activity' | 'settings';
 type Session = { authenticated: boolean; setup_required: boolean; csrf: string | null };
@@ -479,6 +480,7 @@ function App() {
           {view === 'memory' && <MemoryView repositories={data.repositories} api={api} onRun={selectRun}
             revisions={Object.fromEntries([...data.runs].reverse().map(run => [run.repo_id, run.revision]))} />}
           {view === 'settings' && <section className="settings-page">
+            <GitHubAccounts api={api} repositories={data.repositories} />
             <div className="section-heading"><h2>运行环境</h2><span className="tag neutral">阶段 01</span></div>
             <dl className="settings-list">
               {[['Agent 框架', `OpenAI Agents SDK ${system?.sdk_version}`], ['后端', 'Python · FastAPI'],
