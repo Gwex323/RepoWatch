@@ -417,6 +417,38 @@ pre { margin: 0; }
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 .memory-page { max-width: 1040px; }
+.github-settings { margin-bottom: 34px; padding-bottom: 24px; border-bottom: 1px solid var(--line); }
+.github-settings .section-heading { gap: 12px; flex-wrap: wrap; }
+.github-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.github-summary { display: flex; flex-wrap: wrap; gap: 10px 20px; padding: 2px 0 14px; color: #677587; font-size: 11px; }
+.github-summary > span, .github-message { display: flex; align-items: center; gap: 6px; }
+.github-message { color: var(--green); margin: 14px 0; line-height: 1.7; }
+.github-account { padding: 18px 0; border-bottom: 1px solid var(--line); }
+.github-account-row { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.github-account-row > .github-actions { margin-left: auto; }
+.github-account-choice { display: flex; align-items: center; gap: 10px; min-width: 0; max-width: 100%; }
+.github-account-choice strong { overflow-wrap: anywhere; min-width: 0; }
+.github-account-choice input { width: 16px !important; height: 16px; margin: 0 !important; accent-color: var(--green); flex-shrink: 0; }
+.github-account-meta { display: flex; flex-wrap: wrap; gap: 8px 20px; color: #77818d; font-size: 11px; margin-top: 12px; line-height: 1.7; overflow-wrap: anywhere; }
+.github-form { padding: 22px 0; border-bottom: 1px solid var(--line); }
+.github-form-fields { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 18px; }
+.github-form-footer { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 16px; margin-top: 18px; }
+.github-disconnect { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-top: 16px; color: #a15443; }
+.github-disconnect > span { overflow-wrap: anywhere; }
+.github-access { padding-top: 22px; }
+.github-access-controls { display: flex; align-items: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 16px; }
+.github-access-controls label { flex: 1; min-width: 0; }
+.github-access select { display: block; width: 100%; min-width: 0; margin-top: 8px; height: 39px; border: 1px solid #dce3de; border-radius: 5px; padding: 8px; background: white; color: #283b32; font: inherit; }
+.github-access select:focus-visible { outline: 3px solid #89c4a9; }
+.github-access-result { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 16px; font-size: 12px; color: var(--green); }
+.github-access-result strong { overflow-wrap: anywhere; min-width: 0; }
+@media (max-width: 760px) {
+  .github-form-fields { grid-template-columns: minmax(0, 1fr); }
+  .github-account-row > .github-actions { width: 100%; margin-left: 0; }
+  .github-account-choice { flex-basis: 100%; }
+  .github-access-controls label { flex-basis: 100%; }
+  .github-form-footer > .github-actions { margin-left: auto; }
+}
 .heading-actions { flex-wrap: wrap; }
 .detail-meta { flex-wrap: wrap; }
 .issue-reference { overflow-wrap: anywhere; }
