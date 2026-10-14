@@ -1,0 +1,9 @@
+{
+  "name": "repowatch-typescript-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.ts",
+    "test": "node --test sample.test.ts"
+  }
+}

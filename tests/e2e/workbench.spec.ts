@@ -62,7 +62,7 @@ test('mobile: negative result, repository registration and no overflow', async (
   await page.getByRole('dialog').getByRole('button', { name: '添加仓库', exact: true }).click();
   await expect(page.getByText('openai/openai-agents-python', { exact: true })).toBeVisible();
   await expect(page.locator('.repository-row').filter({ hasText: 'openai/openai-agents-python' })
-    .getByRole('button', { name: '外部仓库执行尚未接入' })).toBeDisabled();
+    .getByRole('button', { name: '管理运行环境' })).toBeEnabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   await page.getByRole('button', { name: '打开导航' }).click();
   await page.getByRole('button', { name: '运行配置', exact: true }).click();

@@ -1,6 +1,6 @@
 # Multi-Agent GitHub Maintenance System
 
-Status: milestone one and origin-dependent controlled workflows implemented
+Status: milestones one and two and origin-dependent controlled workflows implemented
 Updated: 2026-10-12
 
 ## Goal
@@ -168,6 +168,9 @@ checkpoint but cannot satisfy it on its own.
 - [ADR 0012: Shared repository memory](adr/0012-repository-memory.md)
 - [ADR 0013: Origin-dependent reproduction](adr/0013-origin-dependent-reproduction.md)
 - [ADR 0014: GitHub account binding](adr/0014-github-account-binding.md)
+- [ADR 0015: Fixed-revision repository environments](adr/0015-repository-execution.md)
+- [ADR 0016: Execution failure diagnosis](adr/0016-execution-diagnosis.md)
+- [ADR 0017: Automatic repository analysis](adr/0017-repository-analysis.md)
 - [Domain glossary](glossary.md)
 
 ## Interview Workflow
