@@ -148,6 +148,16 @@ class Store:
             from .github_accounts import initialize as initialize_github
 
             initialize_github(db)
+            db.commit()
+            from .execution import initialize as initialize_execution
+
+            initialize_execution(db)
+            db.commit()
+            from .analysis_model import initialize as initialize_model
+            from .repository_analysis import initialize as initialize_analysis
+
+            initialize_analysis(db)
+            initialize_model(db)
 
     @contextmanager
     def connection(self):

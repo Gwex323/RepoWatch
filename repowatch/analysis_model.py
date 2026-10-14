@@ -1,0 +1,256 @@
+"""Owner-configured analysis provider; credentials never enter repository containers."""
+
+import json
+from dataclasses import replace
+from urllib.parse import urlsplit
+
+import httpx
+from agents import Model, OpenAIChatCompletionsModel, OpenAIResponsesModel
+from agents.exceptions import ModelBehaviorError
+from cryptography.fernet import InvalidToken
+from openai import AsyncOpenAI
+
+from .store import Conflict
+
+REQUEST_TIMEOUT_SECONDS = 120
+REQUEST_TIMEOUT = httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=10, write=30, pool=10)
+REASONING_EFFORTS = {"auto", "default", "low", "medium", "high", "max"}
+
+
+def effective_reasoning(config):
+    effort = config.get("reasoning_effort", "auto")
+    if effort == "auto":
+        return "low" if config["model"].lower() == "glm-5.3" else None
+    return None if effort == "default" else effort
+
+
+def output_protocol(config):
+    if (config["api"] == "chat_completions" and config["model"].lower() == "glm-4.7"
+            and urlsplit(config["base_url"]).hostname in ("open.bigmodel.cn", "api.z.ai")):
+        return "json_object"
+    return "json_schema"
+
+
+def finalization_mode(config):
+    if (output_protocol(config) == "json_object"
+            and config.get("reasoning_effort", "auto") == "auto"):
+        return "glm47_direct"
+    return "provider_default"
+
+
+class JsonObjectChatModel(OpenAIChatCompletionsModel):
+    """Use provider JSON mode while retaining the SDK's strict output schema."""
+
+    def __init__(self, model, client, *, fast_finalization=False, event=lambda *_: None):
+        super().__init__(model, client)
+        self.fast_finalization, self.event = fast_finalization, event
+
+    async def get_response(self, *args, **kwargs):
+        schema = kwargs.get("output_schema")
+        if schema is not None and not schema.is_plain_text():
+            settings = kwargs["model_settings"]
+            if (self.fast_finalization and not kwargs.get("tools") and not kwargs.get("handoffs")
+                    and settings.tool_choice == "none" and settings.reasoning is None
+                    and "thinking" not in (settings.extra_body or {})):
+                settings = replace(
+                    settings, extra_body={**(settings.extra_body or {}),
+                                          "thinking": {"type": "disabled"}},
+                )
+                self.event("finalization_thinking", "disabled")
+            kwargs["model_settings"] = replace(
+                settings, extra_args={**(settings.extra_args or {}),
+                                      "response_format": {"type": "json_object"}},
+            )
+            # Let the provider enforce JSON syntax while the runner performs the
+            # canonical Pydantic validation after receiving the text.
+            kwargs["output_schema"] = None
+        return await super().get_response(*args, **kwargs)
+
+
+class OutputTruncated(ModelBehaviorError):
+    """The provider explicitly ended generation at its output-token limit."""
+
+
+class ObservedModel(Model):
+    """Observe safe completion metadata before accepting SDK-decoded output."""
+
+    def __init__(self, delegate, observation):
+        self.delegate, self.observation = delegate, observation
+
+    async def get_response(self, *args, **kwargs):
+        self.observation.clear()
+        try:
+            result = await self.delegate.get_response(*args, **kwargs)
+        except ModelBehaviorError:
+            if self.observation.get("truncated"):
+                raise OutputTruncated("analysis_output_truncated") from None
+            raise
+        if self.observation.get("truncated"):
+            raise OutputTruncated("analysis_output_truncated")
+        return result
+
+    async def stream_response(self, *args, **kwargs):
+        raise NotImplementedError("Repository analysis uses non-streaming calls.")
+        yield
+
+
+async def observe_response(response, observation, event):
+    """Never retain model text, reasoning text, tool arguments or provider errors."""
+    if not response.is_success:
+        return
+    await response.aread()
+    try:
+        body = response.json()
+    except ValueError:
+        event("provider_response", json.dumps({"reason": "non_json"}))
+        return
+    if not isinstance(body, dict):
+        event("provider_response", json.dumps({"reason": "invalid_envelope"}))
+        return
+    choices = body.get("choices")
+    first = choices[0] if isinstance(choices, list) and choices else {}
+    if not isinstance(first, dict):
+        first = {}
+    finish = first.get("finish_reason")
+    allowed = {"stop", "length", "tool_calls", "function_call", "content_filter"}
+    finish = finish if isinstance(finish, str) and finish in allowed else "unknown"
+    incomplete = body.get("incomplete_details")
+    truncated = finish == "length" or (
+        body.get("status") == "incomplete" and isinstance(incomplete, dict)
+        and incomplete.get("reason") == "max_output_tokens"
+    )
+    observation["truncated"] = truncated
+    details = {"finish_reason": finish, "truncated": truncated}
+    usage = body.get("usage")
+    if isinstance(usage, dict):
+        tokens = usage.get("completion_tokens", usage.get("output_tokens"))
+        token_details = usage.get("completion_tokens_details", usage.get("output_tokens_details"))
+        if type(tokens) is int and 0 <= tokens <= 10000000:
+            details["output_tokens"] = tokens
+        if isinstance(token_details, dict):
+            reasoning = token_details.get("reasoning_tokens")
+            if type(reasoning) is int and 0 <= reasoning <= 10000000:
+                details["reasoning_tokens"] = reasoning
+    event("provider_response", json.dumps(details))
+
+
+def initialize(db):
+    db.execute("""
+        CREATE TABLE IF NOT EXISTS analysis_model (
+            id INTEGER PRIMARY KEY CHECK(id=1), config TEXT NOT NULL,
+            encrypted_key TEXT NOT NULL, version INTEGER NOT NULL
+        )
+    """)
+
+
+class AnalysisModel:
+    def __init__(self, store, credentials):
+        self.store, self.credentials = store, credentials
+
+    def status(self):
+        with self.store.connection() as db:
+            row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
+        if not row:
+            return {"enabled": False, "model": "", "base_url": "https://api.openai.com/v1",
+                    "api": "responses", "has_key": False, "version": 0,
+                    "reasoning_effort": "auto", "effective_reasoning_effort": None,
+                    "output_protocol": "json_schema", "finalization_mode": "provider_default"}
+        config = json.loads(row["config"])
+        return {**config, "reasoning_effort": config.get("reasoning_effort", "auto"),
+                "effective_reasoning_effort": effective_reasoning(config),
+                "output_protocol": output_protocol(config),
+                "finalization_mode": finalization_mode(config),
+                "has_key": bool(row["encrypted_key"]),
+                "version": row["version"]}
+
+    def save(self, *, version, enabled, model, base_url, api, api_key, reasoning_effort="auto"):
+        model, base_url, api_key = model.strip(), base_url.strip().rstrip("/"), api_key.strip()
+        try:
+            url = urlsplit(base_url)
+            valid = (
+                bool(url.hostname) and not url.username and not url.password
+                and not url.query and not url.fragment
+                and (url.port is None or 1 <= url.port <= 65535)
+                and (url.scheme == "https" or url.scheme == "http"
+                     and url.hostname in ("localhost", "127.0.0.1", "::1"))
+            )
+        except ValueError:
+            valid = False
+        if (not valid or not model or api not in ("responses", "chat_completions")
+                or reasoning_effort not in REASONING_EFFORTS
+                or model.lower() == "glm-5.3" and reasoning_effort == "medium"):
+            raise Conflict("analysis_model_invalid")
+        config = {"enabled": enabled, "model": model, "base_url": base_url, "api": api,
+                  "reasoning_effort": reasoning_effort}
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
+            if version != (row["version"] if row else 0):
+                raise Conflict("analysis_model_changed")
+            if row and json.loads(row["config"])["base_url"] != base_url and not api_key:
+                raise Conflict("analysis_model_new_key_required")
+            if api_key:
+                cipher = self.credentials.cipher(db, create=True)
+                encrypted = cipher.encrypt(api_key.encode()).decode()
+            else:
+                encrypted = row["encrypted_key"] if row else ""
+            if enabled and not encrypted:
+                raise Conflict("analysis_model_key_required")
+            db.execute(
+                "INSERT INTO analysis_model VALUES(1,?,?,?) ON CONFLICT(id) DO UPDATE SET "
+                "config=excluded.config,encrypted_key=excluded.encrypted_key,"
+                "version=excluded.version",
+                (json.dumps(config), encrypted, version + 1),
+            )
+        return self.status()
+
+    async def analyze(self, context, event):
+        from .repository_analysis import run_analysis
+
+        with self.store.connection() as db:
+            row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
+            if not row or not json.loads(row["config"])["enabled"]:
+                raise Conflict("analysis_model_required")
+            cipher = self.credentials.cipher(db)
+            if cipher is None:
+                raise Conflict("analysis_model_key_unavailable")
+            try:
+                secret = cipher.decrypt(row["encrypted_key"].encode()).decode()
+            except (InvalidToken, UnicodeError):
+                raise Conflict("analysis_model_key_unavailable") from None
+        config = json.loads(row["config"])
+        observation = {}
+
+        async def observe(response):
+            await observe_response(response, observation, event)
+
+        # A separate transport prevents ambient credentials/proxies and cross-host redirects.
+        async with AsyncOpenAI(
+            api_key=secret, base_url=config["base_url"], max_retries=0, timeout=REQUEST_TIMEOUT,
+            http_client=httpx.AsyncClient(
+                trust_env=False, follow_redirects=False, event_hooks={"response": [observe]},
+            ),
+        ) as client:
+            protocol = output_protocol(config)
+            event("output_protocol", protocol)
+            if protocol == "json_object":
+                delegate = JsonObjectChatModel(
+                    config["model"], client,
+                    fast_finalization=finalization_mode(config) == "glm47_direct", event=event,
+                )
+            else:
+                adapter = (
+                    OpenAIResponsesModel if config["api"] == "responses"
+                    else OpenAIChatCompletionsModel
+                )
+                delegate = adapter(config["model"], client)
+            model = ObservedModel(delegate, observation)
+            result = await run_analysis(
+                model, context, event, reasoning_effort=effective_reasoning(config),
+            )
+        # The key is not part of the prompt, but never persist a provider-echoed credential.
+        result = json.loads(json.dumps(result).replace(secret, "[REDACTED]"))
+        result["model"] = config["model"]
+        result["model_version"] = row["version"]
+        result["reasoning_effort"] = effective_reasoning(config)
+        return result

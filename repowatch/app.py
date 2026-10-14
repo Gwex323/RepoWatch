@@ -19,8 +19,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .analysis_model import AnalysisModel
+from .execution import Execution
 from .github_accounts import GitHubAccounts, GitHubError
 from .memory import Memory
+from .repository_analysis import Analyses
+from .repository_source import ExecutionError
 from .store import SDK_VERSION, Conflict, Missing, Store
 from .workflow import ROLES, Worker
 
@@ -80,8 +84,36 @@ class GitHubRepositoryBody(GitHubVersionBody):
     repo_id: str = Field(min_length=1, max_length=100)
 
 
+class ExecutionConfigBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    language: Literal["python", "go", "typescript"]
+    install: str = Field(max_length=4000)
+    test: str = Field(max_length=4000)
+    start: str = Field(max_length=4000)
+    port: int = Field(ge=1024, le=65535, strict=True)
+    install_network: bool = False
+
+
+class AnalysisModelBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+    enabled: bool
+    model: str = Field(min_length=1, max_length=200)
+    base_url: str = Field(min_length=1, max_length=500)
+    api: Literal["responses", "chat_completions"]
+    reasoning_effort: Literal["auto", "default", "low", "medium", "high", "max"] = "auto"
+    api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+
+
+class FindingFeedbackBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    decision: Literal["confirmed", "not_reproduced"]
+    personally_reproduced: bool = False
+    note: str = Field(default="", max_length=2000)
+
+
 def create_app(
     db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
+    execution_runtime=None, repository_source=None, execution_diagnoser=None, analysis_engine=None,
 ) -> FastAPI:
     # Windows registry MIME mappings may label .js as text/plain.
     mimetypes.add_type("text/javascript", ".js")
@@ -89,12 +121,26 @@ def create_app(
     store = Store(db_path or Path(os.getenv("REPOWATCH_DB", str(ROOT / "data/repowatch.db"))))
     memory = Memory(store)
     github = GitHubAccounts(store, client=github_client, vault=credential_vault)
+    execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
+                          diagnoser=execution_diagnoser)
+    analysis_model = AnalysisModel(store, github)
+    analyses = Analyses(execution, analysis_engine or analysis_model)
     login_attempts: dict[str, deque] = defaultdict(deque)
 
     @asynccontextmanager
     async def lifespan(app):
         worker = asyncio.create_task(Worker(store).run()) if start_worker else None
+        executor = asyncio.create_task(execution.run()) if start_worker else None
+        diagnostics = asyncio.create_task(execution.diagnoses.run()) if start_worker else None
+        analyst = asyncio.create_task(analyses.run()) if start_worker else None
         yield
+        execution.closing.set()
+        if analyst:
+            await analyst
+        if diagnostics:
+            await diagnostics
+        if executor:
+            await executor
         if worker:
             worker.cancel()
             with suppress(asyncio.CancelledError):
@@ -102,6 +148,9 @@ def create_app(
 
     app = FastAPI(title="RepoWatch", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.store = store
+    app.state.execution = execution
+    app.state.analyses = analyses
+    app.state.analysis_model = analysis_model
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
     @app.middleware("http")
@@ -145,11 +194,17 @@ def create_app(
     async def github_error_handler(request, exc):
         return JSONResponse({"detail": exc.code}, exc.status)
 
+    @app.exception_handler(ExecutionError)
+    async def execution_error_handler(request, exc):
+        return JSONResponse({"detail": str(exc)}, 503)
+
     @app.exception_handler(RequestValidationError)
     async def validation_handler(request, exc):
         # Pydantic's default error payload can echo rejected secret input.
         if request.url.path.startswith("/api/github/"):
             return JSONResponse({"detail": "github_invalid_input"}, 422)
+        if request.url.path.startswith("/api/analysis-model"):
+            return JSONResponse({"detail": "model_invalid_input"}, 422)
         return await request_validation_exception_handler(request, exc)
 
     @app.get("/api/session")
@@ -199,14 +254,17 @@ def create_app(
     @app.get("/api/system")
     async def system():
         return {
-            "phase": 1,
+            "phase": 3,
             "sdk_version": SDK_VERSION,
             "roles": ROLES,
             "model_mode": "deterministic_fixture",
-            "external_model_calls": False,
+            "external_model_calls": (execution.diagnoses.engine.status()["enabled"]
+                                     or analyses.engine.status()["enabled"]),
+            "repository_analysis": analyses.engine.status(),
+            "execution_diagnosis": execution.diagnoses.engine.status(),
             "github_publication": False,
             "github_account_binding": True,
-            "external_repository_execution": False,
+            "external_repository_execution": True,
             "existing_issue_intake": False,
             "reproduction_policy": {
                 "discovered": "human", "existing_issue": "automatic", "merge": "owner_only",
@@ -225,6 +283,28 @@ def create_app(
     @app.get("/api/github/accounts")
     def github_accounts():
         return github.list()
+
+    @app.get("/api/analysis-model")
+    def analysis_model_status():
+        return analysis_model.status()
+
+    @app.post("/api/analysis-model")
+    def configure_analysis_model(body: AnalysisModelBody):
+        values = body.model_dump(exclude={"api_key"})
+        return analysis_model.save(**values, api_key=body.api_key.get_secret_value())
+
+    @app.get("/api/analysis-notifications")
+    def analysis_notifications():
+        with store.connection() as db:
+            return [dict(row) for row in db.execute(
+                "SELECT a.repo_id,r.name AS repository,a.status,"
+                "(SELECT count(*) FROM analysis_findings f WHERE f.analysis_id=a.id "
+                "AND f.status='waiting_reproduction') AS waiting "
+                "FROM repository_analyses a JOIN repositories r ON r.id=a.repo_id "
+                "WHERE a.id=(SELECT id FROM repository_analyses WHERE repo_id=a.repo_id "
+                "ORDER BY created DESC LIMIT 1) "
+                "AND a.status IN ('waiting_model','running','completed','failed','interrupted')"
+            )]
 
     @app.post("/api/github/accounts")
     def github_connect(body: GitHubConnectBody):
@@ -245,6 +325,56 @@ def create_app(
     @app.post("/api/github/accounts/{account_id}/repository-access")
     def github_repository_access(account_id: int, body: GitHubRepositoryBody):
         return github.check_repository(account_id, body.version, body.repo_id)
+
+    @app.get("/api/execution/readiness")
+    def execution_readiness():
+        return {**execution.runtime.readiness(),
+                "diagnosis_model": execution.diagnoses.engine.status()}
+
+    @app.get("/api/repositories/{repo_id}/environments")
+    def environments(repo_id: str):
+        return execution.list(repo_id)
+
+    @app.post("/api/repositories/{repo_id}/environments", status_code=202)
+    def download_repository(repo_id: str, body: StrictBody):
+        return execution.create(repo_id)
+
+    @app.get("/api/environments/{env_id}")
+    def environment(env_id: str):
+        return execution.get(env_id)
+
+    @app.post("/api/environments/{env_id}/configuration")
+    def configure_environment(env_id: str, body: ExecutionConfigBody):
+        config = body.model_dump()
+        version = config.pop("version")
+        return execution.configure(env_id, version, config)
+
+    @app.get("/api/environments/{env_id}/analyses")
+    def environment_analyses(env_id: str):
+        return analyses.list(env_id)
+
+    @app.post("/api/environments/{env_id}/analyses", status_code=202)
+    def start_analysis(env_id: str, body: GitHubVersionBody):
+        return analyses.get(analyses.enqueue(env_id, body.version))
+
+    @app.post("/api/analyses/{analysis_id}/retry")
+    def retry_analysis(analysis_id: str, body: GitHubVersionBody):
+        return analyses.retry(analysis_id, body.version)
+
+    @app.post("/api/analyses/{analysis_id}/findings/{finding_id}/feedback")
+    def finding_feedback(analysis_id: str, finding_id: str, body: FindingFeedbackBody):
+        return analyses.feedback(analysis_id, finding_id, **body.model_dump())
+
+    @app.post("/api/environments/{env_id}/{action}", status_code=202)
+    def environment_action(
+        env_id: str, action: Literal["setup", "test", "start", "stop", "delete"],
+        body: GitHubVersionBody,
+    ):
+        return execution.action(env_id, body.version, action)
+
+    @app.post("/api/environments/{env_id}/diagnoses/{job_id}/apply", status_code=202)
+    def apply_environment_diagnosis(env_id: str, job_id: str, body: GitHubVersionBody):
+        return execution.apply_diagnosis(env_id, job_id, body.version)
 
     @app.post("/api/repositories", status_code=201)
     async def add_repository(body: RepositoryBody):

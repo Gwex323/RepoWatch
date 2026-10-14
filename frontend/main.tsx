@@ -10,6 +10,8 @@ import {
 import './styles.css';
 import { MemoryReads, MemoryView, type MemoryRead } from './memory';
 import { GitHubAccounts } from './github';
+import { ExecutionPanel } from './execution';
+import { AnalysisModelSettings } from './analysis';
 
 type View = 'overview' | 'repositories' | 'findings' | 'memory' | 'activity' | 'settings';
 type Session = { authenticated: boolean; setup_required: boolean; csrf: string | null };
@@ -32,7 +34,12 @@ type Run = {
   memory_reads?: MemoryRead[];
 };
 type Dashboard = { repositories: Repo[]; runs: Run[]; events: Event[] };
-type System = { sdk_version: string; platform: string; roles: string[]; max_turns: number; max_attempts: number };
+type AnalysisNotice = { repo_id: string; repository: string; status: string; waiting: number };
+type System = {
+  sdk_version: string; platform: string; roles: string[]; max_turns: number; max_attempts: number;
+  external_model_calls: boolean; execution_diagnosis?: { enabled: boolean; model: string | null };
+  repository_analysis?: { enabled: boolean; model: string };
+};
 const roles = [
   ['repository_analyst', '仓库分析', FolderGit2],
   ['problem_investigator', '问题发现', Search],
@@ -106,7 +113,7 @@ function Login({ session, onLogin }: { session: Session; onLogin: (s: Session) =
         {busy ? <Loader2 size={16} className="spin" /> : <ArrowRight size={16} />}
         {session.setup_required ? '创建并进入' : '进入工作空间'}
       </button>
-      <div className="login-meta"><span className="live-dot" />本地实例<span>阶段 01</span></div>
+      <div className="login-meta"><span className="live-dot" />本地实例<span>阶段 03</span></div>
     </form>
     <div className="login-footer">RepoWatch · Agents SDK workbench</div>
   </div>;
@@ -281,7 +288,9 @@ function App() {
   const [session, setSession] = useState<Session | null>(null);
   const [data, setData] = useState<Dashboard>({ repositories: [], runs: [], events: [] });
   const [system, setSystem] = useState<System | null>(null);
+  const [analysisNotices, setAnalysisNotices] = useState<AnalysisNotice[]>([]);
   const [view, setView] = useState<View>('overview');
+  const [executionRepo, setExecutionRepo] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [detail, setDetail] = useState<Run | null>(null);
   const [filter, setFilter] = useState('all');
@@ -295,8 +304,12 @@ function App() {
   useEffect(() => { void api<Session>('/session').then(s => { csrf = s.csrf; setSession(s); })
     .catch(e => setError(e.message)); }, []);
   const refresh = useCallback(async () => {
-    const [dashboard, config] = await Promise.all([api<Dashboard>('/dashboard'), api<System>('/system')]);
+    const [dashboard, config, notices] = await Promise.all([
+      api<Dashboard>('/dashboard'), api<System>('/system'),
+      api<AnalysisNotice[]>('/analysis-notifications'),
+    ]);
     setData(dashboard); setSystem(config); setLoaded(true);
+    setAnalysisNotices(notices);
     if (selected) setDetail(await api<Run>(`/runs/${selected}`));
   }, [selected]);
   useEffect(() => {
@@ -352,7 +365,7 @@ function App() {
         {key === 'findings' && attention.length > 0 && <b>{attention.length}</b>}</button>)}</nav>
       <div className="sidebar-bottom">
         <div className="environment-state"><span className="live-dot" /><span>本地服务在线</span></div>
-        <div className="sidebar-version">阶段 01 <span>SDK {system?.sdk_version ?? '—'}</span></div>
+        <div className="sidebar-version">阶段 03 <span>SDK {system?.sdk_version ?? '—'}</span></div>
         <div className="owner"><span className="owner-avatar">你</span><div><strong>本地所有者</strong><small>单用户工作空间</small></div>
           <button className="icon-button" title="退出登录" onClick={async () => {
             try {
@@ -381,7 +394,7 @@ function App() {
             <h1>{nav.find(n => n[0] === view)?.[1]}{view === 'findings' && <span className="heading-count">{data.runs.length}</span>}</h1>
           </div>
           <div className="heading-actions">
-            <span className="mode-label"><span />受控样例模式</span>
+            <span className="mode-label"><span />{system?.repository_analysis?.enabled ? '仓库自动分析已启用' : '仓库分析待配置'}</span>
             <button className="button secondary" onClick={() => setAdding(true)}><Plus size={16} />添加仓库</button>
             <button className="button secondary" disabled={busy} onClick={startIssue}>
               <Play size={15} />已有 Issue 样例</button>
@@ -390,6 +403,18 @@ function App() {
           </div>
         </div>
         {!loaded ? <div className="loading"><Loader2 className="spin" size={22} />正在载入工作空间</div> : <>
+          {view !== 'settings' && analysisNotices.map(notice => <div className="analysis-notice" key={notice.repo_id}>
+            <FileCode2 size={17} /><span><strong>{notice.repository}</strong> · {
+              notice.status === 'waiting_model' ? '分析已排队，等待模型配置' :
+              notice.status === 'running' ? 'Agent 正在自动分析' :
+              notice.waiting > 0 ? `${notice.waiting} 个疑似问题待人工复现` :
+              notice.status === 'completed' ? '源码分析已完成' : '分析需要处理'
+            }</span>
+            <button className="text-link" onClick={() => {
+              if (notice.status === 'waiting_model') navigate('settings');
+              else { setExecutionRepo(notice.repo_id); navigate('repositories'); }
+            }}>{notice.status === 'waiting_model' ? '配置模型' : '查看分析'}<ArrowRight size={14} /></button>
+          </div>)}
           {view === 'overview' && <>
             <div className="metrics">
               {[
@@ -428,9 +453,10 @@ function App() {
                     <span className={`repo-icon ${repo.kind}`}><FolderGit2 size={20} /></span><div><strong>{repo.name}</strong>
                       <span><i className={`language-dot ${repo.language}`} />{repo.language === 'Unknown' ? '待识别' : repo.language}
                         <i>·</i>{repo.kind === 'fixture' ? '本地样例' : 'GitHub'}</span></div>
-                    <span className={`tag ${repo.kind === 'fixture' ? 'green' : 'neutral'}`}>{repo.kind === 'fixture' ? '可运行' : '仅登记'}</span>
-                    <button className="icon-button" title={repo.kind === 'fixture' ? '运行样例' : '外部仓库执行尚未接入'}
-                      disabled={repo.kind !== 'fixture' || busy} onClick={() => start(repo.id)}><Play size={15} /></button>
+                    <span className={`tag ${repo.kind === 'fixture' ? 'green' : 'neutral'}`}>{repo.kind === 'fixture' ? '可运行' : '项目环境'}</span>
+                    <button className="icon-button" title={repo.kind === 'fixture' ? '运行样例' : '管理运行环境'}
+                      disabled={busy} onClick={() => repo.kind === 'fixture' ? start(repo.id) :
+                        (setExecutionRepo(repo.id), navigate('repositories'))}><Play size={15} /></button>
                   </div>)}</div>
                 </section>
               </div>
@@ -439,7 +465,7 @@ function App() {
                   <dl className="boundary-list"><div><dt>系统发现</dt><dd className="green-text"><LockKeyhole size={13} />人工复现</dd></div>
                     <div><dt>已有 Issue</dt><dd>自动验证</dd></div>
                     <div><dt>GitHub 发布</dt><dd>未启用</dd></div><div><dt>自动合并</dt><dd className="red-text">禁止</dd></div>
-                    <div><dt>外部模型调用</dt><dd>关闭</dd></div><div><dt>每日调度</dt><dd>未启用</dd></div></dl>
+                    <div><dt>外部模型调用</dt><dd>{system?.external_model_calls ? '已启用' : '关闭'}</dd></div><div><dt>每日调度</dt><dd>未启用</dd></div></dl>
                 </section>
                 <section className="recent-section"><div className="section-heading"><h2><Activity size={18} />最近活动</h2></div>
                   <EventFeed events={data.events.slice(0, 5)} onSelect={selectRun} /></section>
@@ -451,11 +477,13 @@ function App() {
             {data.repositories.filter(r => r.name.toLowerCase().includes(query.toLowerCase())).map(repo =>
               <div className="repository-row large" key={repo.id}><span className={`repo-icon ${repo.kind}`}><FolderGit2 size={23} /></span>
                 <div><strong>{repo.name}</strong><span>{repo.url ?? 'fixture://page-window'}<i>·</i>{repo.language}</span></div>
-                <span className={`tag ${repo.kind === 'fixture' ? 'green' : 'neutral'}`}>{repo.kind === 'fixture' ? '受控样例' : '执行未接入'}</span>
+                <span className={`tag ${repo.kind === 'fixture' ? 'green' : 'neutral'}`}>{repo.kind === 'fixture' ? '受控样例' : 'GitHub'}</span>
                 {repo.url && <a className="icon-button" title="在 GitHub 打开" href={repo.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a>}
-                <button className="icon-button" title={repo.kind === 'fixture' ? '运行样例' : '外部仓库执行尚未接入'}
-                  disabled={repo.kind !== 'fixture' || busy} onClick={() => start(repo.id)}><Play size={17} /></button>
+                <button className="icon-button" title={repo.kind === 'fixture' ? '运行样例' : '管理运行环境'}
+                  disabled={busy} onClick={() => repo.kind === 'fixture' ? start(repo.id) : setExecutionRepo(repo.id)}><Play size={17} /></button>
               </div>)}
+            {data.repositories.filter(repo => repo.id === executionRepo && repo.kind === 'github').map(repo =>
+              <ExecutionPanel key={repo.id} repo={repo} api={api} />)}
           </section>}
           {view === 'findings' && <div className={`findings-layout ${selected ? 'has-selection' : ''}`}>
             <aside className="findings-list"><div className="segmented">
@@ -480,22 +508,25 @@ function App() {
           {view === 'memory' && <MemoryView repositories={data.repositories} api={api} onRun={selectRun}
             revisions={Object.fromEntries([...data.runs].reverse().map(run => [run.repo_id, run.revision]))} />}
           {view === 'settings' && <section className="settings-page">
+            <AnalysisModelSettings api={api} />
             <GitHubAccounts api={api} repositories={data.repositories} />
-            <div className="section-heading"><h2>运行环境</h2><span className="tag neutral">阶段 01</span></div>
+            <div className="section-heading"><h2>运行环境</h2><span className="tag neutral">阶段 03 · 分析</span></div>
             <dl className="settings-list">
               {[['Agent 框架', `OpenAI Agents SDK ${system?.sdk_version}`], ['后端', 'Python · FastAPI'],
                 ['状态存储', 'SQLite'], ['仓库记忆', '共享 · 仓库与版本隔离'],
-                ['模型模式', '受控响应 · 不调用外部模型'], ['GitHub 写入', '禁用'],
+                ['样例模型', '受控响应'], ['GitHub 写入', '禁用'],
+                ['仓库分析模型', system?.repository_analysis?.enabled ? system.repository_analysis.model : '等待配置'],
+                ['环境诊断模型', system?.execution_diagnosis?.enabled ? system.execution_diagnosis.model ?? '已启用' : '未配置 · 使用本地规则'],
                 ['系统发现问题', '人工复现确认'], ['已有 Issue', '自动验证（仅样例）'],
                 ['真实 Issue 接入', '未接入'],
-                ['外部仓库执行', '未接入'], ['每日检查', '未启用'], ['自动合并', '禁止'],
+                ['外部仓库执行', '本机 Docker · 按需启动'], ['每日检查', '未启用'], ['自动合并', '禁止'],
                 ['每次任务最大轮数', String(system?.max_turns)], ['任务最大尝试次数', String(system?.max_attempts)],
                 ['外部 Trace 上传', '关闭'], ['访问范围', '本机 · 所有者登录'],
               ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
             </dl>
             <div className="section-heading role-config-heading"><h2>Agent 角色</h2><span className="section-meta">6 个已注册角色</span></div>
             <div className="roles-list">{roles.map(([key, name, Icon]) => <div key={key}><Icon size={19} /><strong>{name}</strong>
-              <code>{key}</code><span className="tag neutral">受控模型</span></div>)}</div>
+              <code>{key}</code><span className="tag neutral">{key === 'repair_agent' || key === 'pr_author' ? '仅样例' : '源码分析与样例'}</span></div>)}</div>
           </section>}
         </>}
         <footer className="page-footer"><span><ShieldCheck size={13} />所有合并由项目拥有者执行</span><span>RepoWatch / 0.1.0</span></footer>

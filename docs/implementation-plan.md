@@ -1,7 +1,7 @@
 # Implementation Plan
 
 Date: 2026-10-09
-Status: milestone one implemented; later milestones remain planned
+Status: milestones one and two implemented; later milestones remain planned
 
 ## Milestone-One Delivery
 
@@ -121,6 +121,17 @@ no real GitHub write is needed to establish these boundaries.
 
 ## Milestone 2: Local Project Execution And Personal Reproduction
 
+Implemented on `feature/repository-execution` (2026-10-12): exact-commit source
+archives, authenticated downloads, durable environment operations, restricted
+Docker execution, Python/Go/npm command discovery, WebUI command overrides,
+on-demand isolated preview, stop/restart and explicit cleanup. Docker Desktop's
+Linux engine was started for authored-fixture validation. See ADR 0015 for
+network, credential, runtime, retention and source-format limits.
+
+This supplies environments for personal operation. Real findings and their
+revision-bound confirmation workflow remain milestone three; the existing
+fixture confirmation flows are unchanged.
+
 - Verify Docker engine readiness and implement the restricted execution policy.
 - Check out an authorized repository revision into a task-specific workspace.
 - Add Python, Go, and TypeScript command discovery and runtime support.
@@ -136,6 +147,19 @@ Completion checks:
 - Project code cannot obtain publishing credentials or Docker management access.
 
 ## Milestone 3: Discovery, Repair, And Independent Review
+
+Analysis increment (2026-10-12): automatic queueing after test/start results,
+encrypted WebUI provider settings, immutable bounded source/record snapshots,
+four native SDK roles with read-only tools, evidence-checked findings, repository
+memory references, WebUI notices and personal reproduction feedback are implemented.
+Live provider acceptance awaits model configuration. Real repairs and publication
+remain planned. See ADR 0017.
+
+Environment-diagnosis increment (2026-10-12): failure snapshots, local rules,
+optional live-model diagnosis with three native SDK roles, evidence validation,
+and an explicit version-bound configuration-apply/reinstall action are implemented.
+This diagnoses environment failures only; discovery and repair below remain
+planned. See ADR 0016 for provider configuration and data boundaries.
 
 - Produce structured findings and evidence with revision identifiers.
 - Deduplicate findings against prior runs and known work.
