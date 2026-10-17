@@ -14,13 +14,14 @@ from .store import Conflict
 
 REQUEST_TIMEOUT_SECONDS = 120
 REQUEST_TIMEOUT = httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=10, write=30, pool=10)
+REPAIR_REQUEST_TIMEOUT_SECONDS = 450
 REASONING_EFFORTS = {"auto", "default", "low", "medium", "high", "max"}
 
 
 def effective_reasoning(config):
     effort = config.get("reasoning_effort", "auto")
     if effort == "auto":
-        return "low" if config["model"].lower() == "glm-5.3" else None
+        return "low" if config["model"].lower() in {"glm-5.3", "glm-5.3-flash"} else None
     return None if effort == "default" else effort
 
 
@@ -207,6 +208,18 @@ class AnalysisModel:
     async def analyze(self, context, event):
         from .repository_analysis import run_analysis
 
+        return await self._run(run_analysis, context, event)
+
+    async def repair(self, context, event, *, workspace):
+        from .repair_model import run_repair
+
+        return await self._run(
+            run_repair, context, event, workspace=workspace,
+            request_timeout_seconds=REPAIR_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    async def _run(self, runner, context, event, *,
+                   request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
         with self.store.connection() as db:
             row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
             if not row or not json.loads(row["config"])["enabled"]:
@@ -226,7 +239,8 @@ class AnalysisModel:
 
         # A separate transport prevents ambient credentials/proxies and cross-host redirects.
         async with AsyncOpenAI(
-            api_key=secret, base_url=config["base_url"], max_retries=0, timeout=REQUEST_TIMEOUT,
+            api_key=secret, base_url=config["base_url"], max_retries=0,
+            timeout=httpx.Timeout(request_timeout_seconds, connect=10, write=30, pool=10),
             http_client=httpx.AsyncClient(
                 trust_env=False, follow_redirects=False, event_hooks={"response": [observe]},
             ),
@@ -245,8 +259,9 @@ class AnalysisModel:
                 )
                 delegate = adapter(config["model"], client)
             model = ObservedModel(delegate, observation)
-            result = await run_analysis(
+            result = await runner(
                 model, context, event, reasoning_effort=effective_reasoning(config),
+                **options,
             )
         # The key is not part of the prompt, but never persist a provider-echoed credential.
         result = json.loads(json.dumps(result).replace(secret, "[REDACTED]"))

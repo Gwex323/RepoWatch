@@ -8,6 +8,7 @@ import subprocess
 import tarfile
 import threading
 import time
+from uuid import uuid4
 
 from .preview_proxy import SCRIPT
 from .repository_source import IMAGES, ExecutionError
@@ -77,8 +78,11 @@ class DockerRuntime:
         return base, base + "-data", base + "-net"
 
     def labels(self, env):
-        return ["--label", f"repowatch.instance={self.namespace}",
-                "--label", f"repowatch.environment={env['id']}"]
+        labels = ["--label", f"repowatch.instance={self.namespace}",
+                  "--label", f"repowatch.environment={env['id']}"]
+        if env["id"].startswith("cache_"):
+            labels.extend(["--label", f"repowatch.image={env['image_id']}"])
+        return labels
 
     def image(self, language, check):
         image = IMAGES[language]
@@ -110,6 +114,7 @@ class DockerRuntime:
         name, volume, _ = self.names(env)
         self.remove(env)
         self.command(["volume", "create", *self.labels(env), volume], check=check)
+        self._owned_volume(env)  # volume create can return an existing, foreign-named volume.
         self.command(self.create_args(env, "setup", "true", network="none"), check=check)
         try:
             # Docker cp reads trusted tar metadata; no host directory is mounted into the project.
@@ -120,7 +125,7 @@ class DockerRuntime:
                         info.type, info.mode = tarfile.DIRTYPE, 0o755
                         info.uid = info.gid = 1000
                         archive.addfile(info)
-                    for file in sorted(source.rglob("*")):
+                    for file in (sorted(source.rglob("*")) if source is not None else ()):
                         check()
                         if file.is_symlink():
                             raise ExecutionError("unsafe_archive")
@@ -140,6 +145,61 @@ class DockerRuntime:
                              check=check, stdin=payload)
         finally:
             self.remove(env)
+
+    @staticmethod
+    def _cache_env(env, cache_id):
+        if not re.fullmatch(r"cache_[a-f0-9]{16}", cache_id):
+            raise ExecutionError("dependency_cache_unavailable")
+        return {**env, "id": cache_id}
+
+    def _owned_volume(self, env):
+        _, volume, _ = self.names(env)
+        _, raw = self.command(["volume", "inspect", volume])
+        try:
+            labels = json.loads(raw)[0].get("Labels") or {}
+            valid = (labels.get("repowatch.instance") == self.namespace
+                     and labels.get("repowatch.environment") == env["id"])
+            if env["id"].startswith("cache_"):
+                valid = valid and labels.get("repowatch.image") == env["image_id"]
+            if not valid:
+                raise ExecutionError("docker_resource_mismatch")
+        except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+            raise ExecutionError("dependency_cache_unavailable") from None
+        return volume
+
+    def _copy_dependencies(self, source_env, target_env, check):
+        source_volume = self._owned_volume(source_env)
+        target_volume = self._owned_volume(target_env)
+        name = self.names(target_env)[0] + "-copy-" + uuid4().hex[:8]
+        self.command([
+            "create", "--name", name, *self.labels(target_env), *self.policy(),
+            "--network", "none", "--mount",
+            f"type=volume,src={source_volume},dst=/from,readonly", "--mount",
+            f"type=volume,src={target_volume},dst=/workspace", target_env["image_id"],
+            "/bin/sh", "-c", "cp -a /from/home/. /workspace/home/ && "
+            "if [ -d /from/project/node_modules ]; then "
+            "cp -a /from/project/node_modules /workspace/project/; fi",
+        ], check=check)
+        try:
+            self.command(["start", "--attach", name], timeout=120, check=check)
+        finally:
+            self.command(["rm", "-f", name], allow_failure=True)
+
+    def snapshot_dependencies(self, env, cache_id, check):
+        cache_env = self._cache_env(env, cache_id)
+        self.seed(cache_env, None, check)
+        self._copy_dependencies(env, cache_env, check)
+
+    def restore_dependencies(self, env, source, cache_id, check):
+        cache_env = self._cache_env(env, cache_id)
+        self._owned_volume(cache_env)  # Refuse missing or foreign cache before touching the target.
+        self.seed(env, source, check)
+        self._copy_dependencies(cache_env, env, check)
+
+    def delete_dependencies(self, env, cache_id):
+        cache_env = self._cache_env(env, cache_id)
+        self._owned_volume(cache_env)
+        self.cleanup(cache_env)
 
     @staticmethod
     def policy():

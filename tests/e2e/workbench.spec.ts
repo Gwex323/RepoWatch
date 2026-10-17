@@ -164,3 +164,34 @@ test('existing Issue sample: automatic validation without human confirmation', a
   await page.screenshot({ path: 'test-results/mobile-existing-issue.png', fullPage: true, animations: 'disabled' });
   expect(errors).toEqual([]);
 });
+
+
+test('sample-free workspace keeps real repositories and hides all sample launchers', async ({ page }) => {
+  await page.route('**/api/dashboard', route => route.fulfill({ json: {
+    repositories: [{ id: 'repo_real_only', name: 'owner / real-project',
+      url: 'https://github.com/owner/real-project', kind: 'github', language: 'Python' }],
+    runs: [], events: [],
+  } }));
+  await page.route('**/api/analysis-notifications', route => route.fulfill({ json: [{
+    repo_id: 'repo_real_only', repository: 'owner / real-project', status: 'completed', waiting: 0,
+    repair_published: 2,
+  }] }));
+  await enter(page);
+  await expect(page.getByRole('button', { name: '运行样例', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '已有 Issue 样例', exact: true })).toHaveCount(0);
+  await expect(page.getByText('含本地受控样例', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('已完成样例', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.metric.done strong')).toHaveText('2');
+  await expect(page.locator('.repository-table').getByText('owner / real-project', { exact: true })).toBeVisible();
+  await page.screenshot({ path: 'test-results/sample-free-desktop.png', fullPage: true, animations: 'disabled' });
+  await page.getByRole('button', { name: '运行配置', exact: true }).click();
+  await expect(page.getByText('样例模型', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('自动验证（仅样例）', { exact: true })).toHaveCount(0);
+  await expect(page.locator('.roles-list')).not.toContainText('样例');
+  await page.getByRole('button', { name: '仓库', exact: true }).click();
+  await expect(page.locator('.repo-page .repository-row').getByText('owner / real-project', { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect.poll(() => page.locator('.sidebar').evaluate(el => el.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await page.screenshot({ path: 'test-results/sample-free-mobile.png', fullPage: true, animations: 'disabled' });
+});

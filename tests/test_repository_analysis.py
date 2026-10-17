@@ -72,9 +72,9 @@ class ReviewModel(Model):
         self.calls += 1
         identity = f"analysis_call_{self.calls}"
         if self.calls == 1:
-            name, args = "read_source_file", {"path": "app.py", "start_line": 1, "end_line": 3}
-        elif self.calls == 2:
             name, args = "read_execution_records", {}
+        elif self.calls == 2:
+            name, args = "read_source_file", {"path": "app.py", "start_line": 1, "end_line": 3}
         elif kwargs["handoffs"] and not self.skip_review:
             name, args = kwargs["handoffs"][0].tool_name, {}
         else:
@@ -137,8 +137,14 @@ class BrowsingModel(ReviewModel):
                 }), annotations=[])],
             )], usage=Usage(requests=1), response_id=None)
         if choice and not self.ignore_choice and not (choice == "none" and self.ignore_final):
-            assert not kwargs["tools"]
-            calls = [(choice, {})]
+            if choice == "read_source_file":
+                calls = [(choice, {"path": "large.py" if self.oversized else "app.py",
+                                   "start_line": 1, "end_line": 120})]
+            elif choice == "read_execution_records":
+                calls = [(choice, {})]
+            else:
+                assert not kwargs["tools"]
+                calls = [(choice, {})]
         elif self.calls == 1:
             calls = [("read_execution_records", {})]
         else:
@@ -183,15 +189,20 @@ def test_chat_adapter_truncation_recovers_before_executing_tools_and_keeps_hando
             successful["calls"] += 1
             turn = successful["calls"]
             if turn == 1:
-                name, args = "read_source_file", {"path": "app.py", "start_line": 1, "end_line": 1}
-            elif turn == 2:
                 name, args = "read_execution_records", {}
+            elif turn == 2:
+                name, args = "read_source_file", {"path": "app.py", "start_line": 1, "end_line": 1}
             elif turn <= 5:
                 name = next(tool["function"]["name"] for tool in payload["tools"]
                             if tool["function"]["name"].startswith("transfer_to_"))
                 args = {}
             else:
                 name = None
+            if turn <= 2:
+                assert payload["tool_choice"] == {
+                    "type": "function", "function": {"name": name},
+                }
+                assert [tool["function"]["name"] for tool in payload["tools"]] == [name]
             if name:
                 message = {"role": "assistant", "content": None, "tool_calls": [{
                     "id": f"call_{turn}", "type": "function",
@@ -270,6 +281,10 @@ def test_chat_adapter_truncation_recovers_before_executing_tools_and_keeps_hando
 def test_reasoning_defaults_are_targeted_and_owner_can_restore_provider_default():
     assert effective_reasoning({"model": "glm-5.3"}) == "low"
     assert effective_reasoning({"model": "GLM-5.3"}) == "low"
+    assert effective_reasoning({"model": "glm-5.3-flash"}) == "low"
+    assert effective_reasoning({"model": "GLM-5.3-FLASH", "reasoning_effort": "auto"}) == "low"
+    assert effective_reasoning({"model": "glm-5.3-flash", "reasoning_effort": "default"}) is None
+    assert effective_reasoning({"model": "glm-5.3-flash", "reasoning_effort": "high"}) == "high"
     assert effective_reasoning({"model": "other-provider-model"}) is None
     assert effective_reasoning({"model": "glm-5.3", "reasoning_effort": "default"}) is None
     assert effective_reasoning({"model": "glm-5.3", "reasoning_effort": "high"}) == "high"
@@ -1124,9 +1139,10 @@ def test_native_source_tools_handoffs_and_evidence_validation():
     assert len(report["handoffs"]) == 3
     assert ("source", "app.py") in events
     assert report["findings"][0]["evidence"][0]["quote"] == "print('ok')"
-    for flags in ({"invented": True}, {"skip_review": True}):
-        with pytest.raises(ValueError):
-            asyncio.run(run_analysis(ReviewModel(**flags), context))
+    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+        asyncio.run(run_analysis(ReviewModel(invented=True), context))
+    with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
+        asyncio.run(run_analysis(ReviewModel(skip_review=True), context))
     empty = asyncio.run(run_analysis(ReviewModel(findings=False), context))
     assert empty["findings"] == []
 

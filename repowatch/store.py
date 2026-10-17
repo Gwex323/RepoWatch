@@ -117,10 +117,14 @@ class Store:
                     PRIMARY KEY(run_id, kind)
                 );
             """)
-            db.execute(
-                "INSERT OR IGNORE INTO repositories VALUES (?, ?, NULL, ?, ?, 0, ?)",
-                ("repo_fixture", "samples / page-window", "fixture", "Python", time.time()),
-            )
+            samples = db.execute(
+                "SELECT value FROM settings WHERE key='samples_enabled'",
+            ).fetchone()
+            if samples is None or samples["value"] != "false":
+                db.execute(
+                    "INSERT OR IGNORE INTO repositories VALUES (?, ?, NULL, ?, ?, 0, ?)",
+                    ("repo_fixture", "samples / page-window", "fixture", "Python", time.time()),
+                )
             db.commit()
             db.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in db.execute("PRAGMA table_info(runs)")}
@@ -158,6 +162,9 @@ class Store:
 
             initialize_analysis(db)
             initialize_model(db)
+            from .repairs import initialize as initialize_repair
+
+            initialize_repair(db)
 
     @contextmanager
     def connection(self):
@@ -244,6 +251,55 @@ class Store:
             )
             return dict(db.execute("SELECT * FROM repositories WHERE id=?", (repo_id,)).fetchone())
 
+    def remove_samples(self):
+        """Explicit local maintenance: remove fixture-only data and prevent reseeding."""
+        repos = "SELECT id FROM repositories WHERE kind='fixture'"
+        runs = f"SELECT id FROM runs WHERE repo_id IN ({repos})"
+        memories = f"SELECT id FROM memories WHERE repo_id IN ({repos})"
+        with self.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute(
+                f"SELECT 1 FROM jobs WHERE run_id IN ({runs}) AND status='running' LIMIT 1",
+            ).fetchone():
+                raise Conflict("sample_busy")
+            # Never silently delete owner-authored knowledge or real execution data.
+            if db.execute(
+                f"SELECT 1 FROM memories WHERE repo_id IN ({repos}) AND source='owner' LIMIT 1",
+            ).fetchone():
+                raise Conflict("sample_has_owner_memory")
+            if db.execute(
+                f"SELECT 1 FROM environments WHERE repo_id IN ({repos}) LIMIT 1",
+            ).fetchone():
+                raise Conflict("sample_has_execution_data")
+            if db.execute(
+                f"SELECT 1 FROM memories WHERE source_run_id IN ({runs}) "
+                f"AND repo_id NOT IN ({repos}) LIMIT 1",
+            ).fetchone() or db.execute(
+                f"SELECT 1 FROM memory_reads WHERE memory_id IN ({memories}) "
+                f"AND run_id NOT IN ({runs}) LIMIT 1",
+            ).fetchone():
+                raise Conflict("sample_has_external_references")
+            db.execute(f"DELETE FROM memory_reads WHERE run_id IN ({runs})")
+            db.execute(f"DELETE FROM memory_history WHERE memory_id IN ({memories})")
+            counts = {"memories": db.execute(
+                f"DELETE FROM memories WHERE repo_id IN ({repos})",
+            ).rowcount}
+            for table in ("artifacts", "events", "jobs"):
+                counts[table] = db.execute(
+                    f"DELETE FROM {table} WHERE run_id IN ({runs})",
+                ).rowcount
+            counts["runs"] = db.execute(
+                f"DELETE FROM runs WHERE repo_id IN ({repos})",
+            ).rowcount
+            counts["repositories"] = db.execute(
+                "DELETE FROM repositories WHERE kind='fixture'",
+            ).rowcount
+            db.execute(
+                "INSERT INTO settings(key,value) VALUES('samples_enabled','false') "
+                "ON CONFLICT(key) DO UPDATE SET value='false'",
+            )
+        return counts
+
     def start_run(self, repo_id: str, *, reuse: bool = True) -> str:
         return self._start_fixture(repo_id, source_kind="discovered", reuse=reuse)
 
@@ -253,6 +309,10 @@ class Store:
     def _start_fixture(self, repo_id: str, *, source_kind: str, reuse: bool) -> str:
         with self.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if db.execute(
+                "SELECT 1 FROM settings WHERE key='samples_enabled' AND value='false'",
+            ).fetchone():
+                raise Conflict("samples_disabled")
             repo = db.execute("SELECT * FROM repositories WHERE id=?", (repo_id,)).fetchone()
             if not repo:
                 raise Missing("Repository not found.")

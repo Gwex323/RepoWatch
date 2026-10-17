@@ -10,21 +10,33 @@ test('repository execution: download, configure, setup, test, start, stop and mo
     expires: null as number | null, test_result: null as { exit_code: number; revision: string } | null,
     config: { language: 'python', install: 'python -m venv /workspace/home/venv', test: 'python -m unittest',
       start: 'python app.py', port: 8000, install_network: false, detected: true },
+    preparation: null as string | null,
+    reused_environment_id: null as string | null,
     jobs: [] as { id: string; action: string; state: string; log: string; error: string | null; cancel: number }[],
   };
   let downloaded = false;
+  let reusedDownload = false;
+  const reuseAlias = { ...env, id: 'env_reuse_alias', state: 'reused',
+    reused_environment_id: env.id, preparation: 'same_version' };
   await page.route('**/api/execution/readiness', route => route.fulfill({ json: { ready: true, reason: '' } }));
   await page.route('**/api/environments/env_fixture', route => route.fulfill({ json: env }));
+  await page.route('**/api/environments/env_reuse_alias', route => route.fulfill({ json: reuseAlias }));
   await page.route('**/api/**/environments', async route => {
     if (route.request().method() === 'POST') {
       downloaded = true;
+      if (reusedDownload) {
+        await route.fulfill({ status: 202, json: reuseAlias });
+        return;
+      }
       env.jobs.unshift({ id: 'download', action: 'download', state: 'completed', log: '', error: null, cancel: 0 });
       await route.fulfill({ status: 202, json: env });
-    } else await route.fulfill({ json: downloaded ? [env] : [] });
+    } else await route.fulfill({ json: downloaded ? reusedDownload ? [reuseAlias, env] : [env] : [] });
   });
   await page.route('**/api/environments/env_fixture/**', async route => {
     const action = new URL(route.request().url()).pathname.split('/').pop()!;
-    if (action === 'analyses') { await route.fulfill({ json: [] }); return; }
+    if (action === 'analyses' || action === 'repairs') {
+      await route.fulfill({ json: [] }); return;
+    }
     const body = route.request().postDataJSON();
     expect(body.version).toBe(env.version);
     env.version++;
@@ -75,6 +87,13 @@ test('repository execution: download, configure, setup, test, start, stop and mo
   await panel.getByRole('button', { name: '停止项目或任务' }).click();
   await expect(panel.getByText('已停止', { exact: true })).toBeVisible();
   await expect(panel.getByRole('link', { name: '打开项目' })).toHaveCount(0);
+  env.preparation = 'dependencies_reused';
+  await expect(panel.getByRole('status').filter({ hasText: '依赖未变化' })).toBeVisible();
+  await page.screenshot({ path: 'test-results/execution-dependency-reuse-desktop.png', fullPage: true });
+  reusedDownload = true;
+  await panel.getByRole('button', { name: '下载最新版本' }).click();
+  await expect(panel.getByRole('status').filter({ hasText: '源码版本未变化' })).toBeVisible();
+  await expect(panel.getByLabel('环境版本')).toHaveValue('env_fixture');
   await page.reload();
   await page.getByRole('button', { name: '仓库', exact: true }).click();
   await page.locator('.repository-row').filter({ hasText: 'fixture/execution' })
@@ -89,13 +108,15 @@ test('repository execution: download, configure, setup, test, start, stop and mo
   expect(errors).toEqual([]);
 });
 
-test('installation diagnosis shows evidence and applies the saved proposal explicitly', async ({ page }) => {
+test('installation diagnosis hides stale failures after recovery but keeps current test failures visible', async ({ page }) => {
+  test.setTimeout(90_000);
   const browserErrors: string[] = [];
   page.on('pageerror', error => browserErrors.push(error.message));
   const env = {
     id: 'env_diagnosis', revision: 'b'.repeat(40), version: 5, state: 'setup_failed',
     installed: false, busy: false, url: null, error: 'setup_failed' as string | null,
-    created: Date.now() / 1000, expires: null, test_result: null,
+    created: Date.now() / 1000, expires: null,
+    test_result: null as { exit_code: number; revision: string } | null,
     config: { language: 'python', install: 'python -m pip install -r requirements.txt',
       test: '', start: '', port: 8000, install_network: false, detected: true },
     jobs: [{ id: 'job_failed', action: 'setup', state: 'failed', log: "Failed to resolve 'pypi.org'",
@@ -107,7 +128,7 @@ test('installation diagnosis shows evidence and applies the saved proposal expli
         summary: '安装命令需要下载依赖，但本次安装关闭了联网，依赖源无法访问。',
         evidence: ["NameResolutionError: Failed to resolve 'pypi.org'", '本次执行配置：install_network=false'],
         steps: ['开启“安装时允许联网”，保存后重新安装。', '若开启后仍失败，再检查 Docker 的 DNS、代理和依赖源连通性。'],
-        patch: { install_network: true }, handoffs: [], model_status: 'not_needed',
+        patch: { install_network: true } as { install_network?: boolean }, handoffs: [], model_status: 'not_needed',
       },
     },
   };
@@ -148,8 +169,42 @@ test('installation diagnosis shows evidence and applies the saved proposal expli
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await diagnosis.getByRole('button', { name: '应用建议并重新安装' }).click();
   await expect.poll(() => applied).toBe(true);
-  await expect(diagnosis.getByRole('button', { name: '应用建议并重新安装' })).toBeDisabled();
-  await expect(diagnosis.getByText('历史记录')).toBeVisible();
+  await expect(diagnosis).toHaveCount(0);
+  const history = panel.getByLabel('历史失败诊断', { exact: true });
+  await expect(history).toBeVisible();
+  expect(await history.evaluate(el => (el as HTMLDetailsElement).open)).toBe(false);
+  await expect(history.getByText(env.diagnosis.report.summary)).not.toBeVisible();
   await expect(panel.getByText('安装中', { exact: true })).toBeVisible();
+  await history.locator('summary').click();
+  await expect(history.getByText('历史记录 · 仅供回看')).toBeVisible();
+  await expect(history.getByRole('button', { name: '应用建议并重新安装' })).toHaveCount(0);
+  await expect(history.getByText('建议尚未经过重试验证', { exact: false })).toHaveCount(0);
+  await history.locator('summary').click();
+  env.version++; env.state = 'ready'; env.busy = false; env.installed = true;
+  env.test_result = { exit_code: 0, revision: env.revision };
+  // A late old model result must not resurrect a foreground error or spinner.
+  env.diagnosis.state = 'running';
+  await expect(panel.getByText('依赖已准备', { exact: true })).toBeVisible();
+  await expect(panel.getByText('最近测试：通过', { exact: true })).toBeVisible();
+  await expect(diagnosis).toHaveCount(0);
+  await expect(history.locator('.diagnosis-progress')).toHaveCount(0);
+  expect(await history.evaluate(el => (el as HTMLDetailsElement).open)).toBe(false);
+  for (const state of ['running', 'stopped']) {
+    env.state = state; env.version++;
+    await expect(panel.locator('.execution-facts .tag')).toHaveText(state === 'running' ? '项目运行中' : '已停止');
+    await expect(diagnosis).toHaveCount(0);
+  }
+  await panel.screenshot({ path: 'test-results/mobile-diagnosis-recovered.png', animations: 'disabled' });
+  // Installed dependencies do NOT mean a later real test failure can be hidden.
+  env.state = 'test_failed'; env.error = 'test_failed'; env.version++;
+  env.test_result = { exit_code: 1, revision: env.revision };
+  env.diagnosis.job_id = 'job_test_failed'; env.diagnosis.current = true;
+  env.diagnosis.state = 'complete'; env.diagnosis.applicable = false;
+  env.diagnosis.report.summary = '当前测试失败，与早期依赖安装失败无关。';
+  env.diagnosis.report.patch = {};
+  await expect(diagnosis).toBeVisible();
+  await expect(diagnosis.getByText('当前测试失败，与早期依赖安装失败无关。')).toBeVisible();
+  await expect(panel.getByText('依赖已准备', { exact: true })).toBeVisible();
+  await expect(history).toHaveCount(0);
   expect(browserErrors).toEqual([]);
 });

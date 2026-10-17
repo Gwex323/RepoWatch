@@ -17,6 +17,9 @@ const errors: Record<string, string> = {
   github_invalid_token: '访问令牌无效、已过期或已撤销，请更新令牌。',
   github_unreachable: '暂时无法连接 GitHub，请检查网络后重试。',
   github_unavailable: 'GitHub 暂时不可用，请稍后重试。',
+  github_permission_denied: 'GitHub 令牌无法访问所需资源，请检查目标仓库的读取授权和组织策略。',
+  github_forbidden: 'GitHub 拒绝访问。请检查令牌权限、组织授权及仓库策略；这不一定是限流。',
+  github_rate_limited: 'GitHub 请求已被限流，请稍后重试，避免连续重复请求。',
   github_denied_or_rate_limited: 'GitHub 拒绝了请求或触发访问频率限制，请检查权限或稍后重试。',
   github_repository_unavailable: '仓库不存在，或当前令牌无法访问此仓库。',
   github_repository_required: '请先选择已登记的 GitHub 仓库。',
@@ -35,7 +38,9 @@ const checkedTime = (value: number) => new Date(value * 1000).toLocaleString('zh
   timeZone: 'Asia/Shanghai', hour12: false,
 });
 
-export function GitHubAccounts({ api, repositories }: { api: Api; repositories: Repo[] }) {
+export function GitHubAccounts({ api, repositories, publicationEnabled = false }: {
+  api: Api; repositories: Repo[]; publicationEnabled?: boolean;
+}) {
   const [data, setData] = useState<Connections | null>(null);
   const [editing, setEditing] = useState(false);
   const [username, setUsername] = useState('');
@@ -78,7 +83,8 @@ export function GitHubAccounts({ api, repositories }: { api: Api; repositories: 
     {!data ? <div className="loading"><Loader2 size={18} className="spin" />正在读取账号</div> : <>
       <div className="github-summary">
         <span><ShieldCheck size={14} />{data.secure_storage === 'available' ? '系统凭据库可用' : '凭据库不可用'}</span>
-        <span>当前账号：{active?.login ?? '未选择'}</span><span>Issue / PR 发布：未启用</span>
+        <span>当前账号：{active?.login ?? '未选择'}</span>
+        <span>Issue / PR 发布：{publicationEnabled ? '已启用' : '未启用'}</span>
         {busy && <span role="status"><Loader2 size={14} className="spin" />正在处理</span>}
       </div>
       {!data.accounts.length && !editing && <div className="empty"><Github size={28} /><p>尚未连接 GitHub 账号</p></div>}

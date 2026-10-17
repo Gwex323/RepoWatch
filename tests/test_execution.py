@@ -282,7 +282,7 @@ def test_failures_configuration_and_cancellation(service):
         execution.configure(env["id"], 1, env["config"])
     config = {**env["config"], "test": "echo changed"}
     env = execution.configure(env["id"], env["version"], config)
-    assert env["test_result"] is None and not env["installed"]
+    assert env["test_result"] is None and env["installed"]
     execution.action(env["id"], env["version"], "setup")
     env = execution.get(env["id"])
     with pytest.raises(Conflict, match="environment_busy"):

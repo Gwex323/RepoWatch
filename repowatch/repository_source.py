@@ -1,5 +1,6 @@
 """Download a fixed GitHub revision without executing repository code on the host."""
 
+import ast
 import gzip
 import io
 import json
@@ -11,6 +12,8 @@ from pathlib import PurePosixPath
 from urllib.parse import urlsplit
 
 import httpx
+
+from .desktop_projects import desktop_config
 
 MAX_ARCHIVE = 32 * 1024 * 1024
 MAX_SOURCE = 128 * 1024 * 1024
@@ -165,6 +168,32 @@ def uses_pytest(manifests):
     ) for item in dependencies)
 
 
+def python_service_entry(source):
+    """Inspect declarations only: never import or execute downloaded Python."""
+    for name in ("app.py", "main.py", "backend/main.py", "backend/app.py", "src/main.py"):
+        path = source / name
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > 256000:
+            continue
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except (SyntaxError, UnicodeError, OSError):
+            continue
+        constructors = {"FastAPI"}
+        for node in tree.body:
+            if isinstance(node, ast.ImportFrom) and node.module == "fastapi":
+                constructors.update(alias.asname or alias.name for alias in node.names
+                                    if alias.name == "FastAPI")
+        for node in tree.body:
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                call = node.value.func
+                is_app = (isinstance(call, ast.Name) and call.id in constructors
+                          or isinstance(call, ast.Attribute) and call.attr == "FastAPI")
+                if is_app and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                    module = name[:-3].replace("/", ".")
+                    return f"{module}:{node.targets[0].id}"
+    return None
+
+
 def discover(source):
     def text(name):
         file = source / name
@@ -180,6 +209,10 @@ def discover(source):
         ("python", ("pyproject.toml", "requirements.txt", "setup.py")),
         ("go", ("go.mod",)), ("typescript", ("package.json",)),
     ) if any((source / marker).is_file() for marker in markers)]
+    if not languages:
+        desktop = desktop_config(source, config)
+        if desktop:
+            return desktop
     if len(languages) != 1:
         return {**config, "detected": False, "reason": "ambiguous_or_unsupported"}
     language = languages[0]
@@ -204,7 +237,11 @@ def discover(source):
                 config["test"] = "/workspace/home/venv/bin/python -m pytest"
             elif (source / "tests").is_dir():
                 config["test"] = "/workspace/home/venv/bin/python -m unittest discover -s tests"
-            if (source / "app.py").is_file():
+            entry = python_service_entry(source)
+            if entry:
+                config["start"] = ("/workspace/home/venv/bin/python -m uvicorn " + entry
+                                   + " --host 0.0.0.0 --port 8000")
+            elif (source / "app.py").is_file():
                 config["start"] = "/workspace/home/venv/bin/python app.py"
         elif language == "go":
             config.update(install="go mod download", test="go test ./...", start="go run .")
@@ -224,4 +261,8 @@ def discover(source):
             )
     except (ValueError, UnicodeError, AttributeError):
         return {**config, "detected": False, "reason": "invalid_manifest"}
+    if language == "python":
+        desktop = desktop_config(source, config)
+        if desktop:
+            return desktop
     return {**config, "detected": True, "reason": ""}

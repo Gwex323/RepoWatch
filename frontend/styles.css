@@ -474,6 +474,21 @@ pre { margin: 0; }
 .status-validation_blocked { color: #9a512d; background: #fff0e5; }
 .status-validation_blocked > span { background: #bc652f; }
 .execution-panel { border-top: 1px solid var(--line); margin-top: 28px; padding-top: 24px; min-width: 0; }
+.repair-settings, .repository-repairs { border-top: 1px solid var(--line); padding: 24px 0; margin-top: 24px; min-width: 0; }
+.repair-settings h2, .repository-repairs h3 { display: flex; align-items: center; gap: 8px; }
+.repair-facts { margin: 16px 0 0; font-size: 12px; }
+.repair-facts > div { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 8px 0; }
+.repair-facts dt { color: #738392; }
+.repair-facts dd { margin: 0; overflow-wrap: anywhere; }
+.repair-task { padding: 20px 0; border-bottom: 1px solid var(--line); min-width: 0; }
+.repair-task h4 { font-size: 14px; line-height: 1.7; overflow-wrap: anywhere; }
+.repair-task p, .repair-task li, .repair-task code { overflow-wrap: anywhere; line-height: 1.8; }
+.repair-task details { padding: 12px 0; }
+.repair-task summary { cursor: pointer; color: #536475; font-size: 12px; }
+.repair-task details code { display: block; padding: 10px 0; }
+.repair-task pre { max-height: 320px; overflow: auto; padding: 12px; margin-top: 10px;
+  background: #eff3f6; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 11px; }
+.repair-task .execution-actions code { min-width: 0; max-width: 100%; }
 .execution-panel .section-heading { flex-wrap: wrap; gap: 12px; }
 .execution-panel h2 { overflow-wrap: anywhere; min-width: 0; }
 .execution-engine, .execution-facts, .execution-actions, .execution-access {
@@ -557,3 +572,20 @@ pre { margin: 0; }
   .memory-entry-heading { flex-wrap: wrap; }
   .tabs { gap: 15px; flex-wrap: wrap; }
 }
+
+/* Historical model opinions remain visually separate from human feedback controls. */
+.historical-review { min-width: 0; margin: 20px 0; }
+.historical-review .section-heading { flex-wrap: wrap; }
+.historical-review h4 { min-width: 0; overflow-wrap: anywhere; line-height: 1.6; }
+.historical-review .section-heading h4 { flex: 1 1 180px; margin: 0; }
+.historical-review summary { overflow-wrap: anywhere; cursor: pointer; line-height: 1.7; }
+.historical-review pre { white-space: pre-wrap; overflow-wrap: anywhere;
+  background: #eff3f6; border-radius: 4px; padding: 12px; margin-top: 8px; }
+
+.diagnosis-history > summary { cursor: pointer; color: #738392;
+  font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.diagnosis-history[open] > summary { margin-bottom: 16px; }
+
+.desktop-coverage p, .desktop-coverage li, .desktop-coverage summary {
+  overflow-wrap: anywhere; line-height: 1.8; }
+.desktop-coverage summary { cursor: pointer; padding: 6px 0; }

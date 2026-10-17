@@ -311,7 +311,7 @@ def test_apply_api_requires_csrf_version_and_server_saved_patch(tmp_path):
         repo = client.post("/api/repositories", headers=headers,
                            json={"url": "https://github.com/alice/project"}).json()
         env = client.post(f"/api/repositories/{repo['id']}/environments",
-                          headers=headers, json={}).json()
+                          headers=headers, json={"auto_run": False}).json()
         execution = app.state.execution
         execution.tick()
         env = execution.get(env["id"])
