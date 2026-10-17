@@ -12,6 +12,7 @@ import { MemoryReads, MemoryView, type MemoryRead } from './memory';
 import { GitHubAccounts } from './github';
 import { ExecutionPanel } from './execution';
 import { AnalysisModelSettings } from './analysis';
+import { RepairSettings } from './repair';
 
 type View = 'overview' | 'repositories' | 'findings' | 'memory' | 'activity' | 'settings';
 type Session = { authenticated: boolean; setup_required: boolean; csrf: string | null };
@@ -34,11 +35,16 @@ type Run = {
   memory_reads?: MemoryRead[];
 };
 type Dashboard = { repositories: Repo[]; runs: Run[]; events: Event[] };
-type AnalysisNotice = { repo_id: string; repository: string; status: string; waiting: number };
+type AnalysisNotice = {
+  repo_id: string; repository: string; status: string; waiting: number;
+  repairs_enabled?: boolean; repair_queued?: number; repair_running?: number;
+  repair_failed?: number; repair_published?: number;
+};
 type System = {
   sdk_version: string; platform: string; roles: string[]; max_turns: number; max_attempts: number;
   external_model_calls: boolean; execution_diagnosis?: { enabled: boolean; model: string | null };
   repository_analysis?: { enabled: boolean; model: string };
+  automatic_repair?: { enabled: boolean };
 };
 const roles = [
   ['repository_analyst', '仓库分析', FolderGit2],
@@ -335,6 +341,8 @@ function App() {
     selectRun(result.run_id);
   });
   const navigate = (next: View) => { setView(next); setMenuOpen(false); };
+  const hasSamples = data.repositories.some(repo => repo.kind === 'fixture');
+  const publishedPRs = analysisNotices.reduce((count, item) => count + (item.repair_published ?? 0), 0);
   const waiting = data.runs.filter(r => r.status === 'waiting');
   const attention = data.runs.filter(r => ['waiting', 'validation_blocked', 'failed'].includes(r.status));
   const activeRuns = data.runs.filter(r => ['running', 'queued', 'confirmed'].includes(r.status));
@@ -396,10 +404,12 @@ function App() {
           <div className="heading-actions">
             <span className="mode-label"><span />{system?.repository_analysis?.enabled ? '仓库自动分析已启用' : '仓库分析待配置'}</span>
             <button className="button secondary" onClick={() => setAdding(true)}><Plus size={16} />添加仓库</button>
-            <button className="button secondary" disabled={busy} onClick={startIssue}>
-              <Play size={15} />已有 Issue 样例</button>
-            <button className="button primary" disabled={busy} onClick={() => start()}>
-              {busy ? <Loader2 size={16} className="spin" /> : <Play size={15} />}运行样例</button>
+            {hasSamples && <>
+              <button className="button secondary" disabled={busy} onClick={startIssue}>
+                <Play size={15} />已有 Issue 样例</button>
+              <button className="button primary" disabled={busy} onClick={() => start()}>
+                {busy ? <Loader2 size={16} className="spin" /> : <Play size={15} />}运行样例</button>
+            </>}
           </div>
         </div>
         {!loaded ? <div className="loading"><Loader2 className="spin" size={22} />正在载入工作空间</div> : <>
@@ -408,26 +418,34 @@ function App() {
               notice.status === 'waiting_model' ? '分析已排队，等待模型配置' :
               notice.status === 'running' ? 'Agent 正在自动分析' :
               notice.waiting > 0 ? `${notice.waiting} 个疑似问题待人工复现` :
+              notice.repair_running ? `${notice.repair_running} 个问题正在自动修复` :
+              notice.repair_failed ? `${notice.repair_failed} 个修复任务需要处理` :
+              notice.repair_queued ? (notice.repairs_enabled ? '已确认问题等待自动修复' : '已确认问题等待启用自动修复') :
+              notice.repair_published ? `${notice.repair_published} 个 PR 已提交，等待仓库拥有者审核` :
               notice.status === 'completed' ? '源码分析已完成' : '分析需要处理'
             }</span>
             <button className="text-link" onClick={() => {
               if (notice.status === 'waiting_model') navigate('settings');
               else { setExecutionRepo(notice.repo_id); navigate('repositories'); }
-            }}>{notice.status === 'waiting_model' ? '配置模型' : '查看分析'}<ArrowRight size={14} /></button>
+            }}>{notice.status === 'waiting_model' ? '配置模型' :
+              notice.repair_queued || notice.repair_running || notice.repair_failed || notice.repair_published
+                ? '查看修复' : '查看分析'}<ArrowRight size={14} /></button>
           </div>)}
           {view === 'overview' && <>
             <div className="metrics">
               {[
                 ['待人工复现', waiting.length, 'waiting', Clock3],
                 ['运行中', activeRuns.length, 'running', Workflow],
-                ['已完成样例', data.runs.filter(r => r.status === 'demo_completed').length, 'done', CheckCircle2],
+                [hasSamples ? '已完成样例' : '已提交 PR', hasSamples
+                  ? data.runs.filter(r => r.status === 'demo_completed').length : publishedPRs, 'done', CheckCircle2],
                 ['已登记仓库', data.repositories.length, 'repos', FolderGit2],
               ].map(([label, count, cls, Icon]) => {
                 const MetricIcon = Icon as typeof Clock3;
                 return <div className={`metric ${cls}`} key={String(label)}>
                   <div className="metric-label">{String(label)}<MetricIcon size={17} /></div>
-                  <strong>{String(count)}</strong><span>{cls === 'repos' ? '含本地受控样例' :
-                    cls === 'waiting' ? '等待你的复现结果' : cls === 'running' ? '当前执行队列' : '仅本地草稿'}</span>
+                  <strong>{String(count)}</strong><span>{cls === 'repos' ? (hasSamples ? '含本地受控样例' : '已登记 GitHub 仓库') :
+                    cls === 'waiting' ? '等待你的复现结果' : cls === 'running' ? '当前执行队列'
+                      : hasSamples ? '仅本地草稿' : '等待仓库拥有者审核'}</span>
                 </div>;
               })}
             </div>
@@ -509,12 +527,14 @@ function App() {
             revisions={Object.fromEntries([...data.runs].reverse().map(run => [run.repo_id, run.revision]))} />}
           {view === 'settings' && <section className="settings-page">
             <AnalysisModelSettings api={api} />
-            <GitHubAccounts api={api} repositories={data.repositories} />
-            <div className="section-heading"><h2>运行环境</h2><span className="tag neutral">阶段 03 · 分析</span></div>
+            <RepairSettings api={api} />
+            <GitHubAccounts api={api} repositories={data.repositories}
+              publicationEnabled={system?.automatic_repair?.enabled} />
+            <div className="section-heading"><h2>运行环境</h2><span className="tag neutral">阶段 03 / 04 · 修复与发布</span></div>
             <dl className="settings-list">
               {[['Agent 框架', `OpenAI Agents SDK ${system?.sdk_version}`], ['后端', 'Python · FastAPI'],
                 ['状态存储', 'SQLite'], ['仓库记忆', '共享 · 仓库与版本隔离'],
-                ['样例模型', '受控响应'], ['GitHub 写入', '禁用'],
+                ['样例模型', '受控响应'], ['GitHub 写入', system?.automatic_repair?.enabled ? '已启用 · 测试与审查通过后提交' : '自动修复开关未启用'],
                 ['仓库分析模型', system?.repository_analysis?.enabled ? system.repository_analysis.model : '等待配置'],
                 ['环境诊断模型', system?.execution_diagnosis?.enabled ? system.execution_diagnosis.model ?? '已启用' : '未配置 · 使用本地规则'],
                 ['系统发现问题', '人工复现确认'], ['已有 Issue', '自动验证（仅样例）'],
@@ -522,11 +542,14 @@ function App() {
                 ['外部仓库执行', '本机 Docker · 按需启动'], ['每日检查', '未启用'], ['自动合并', '禁止'],
                 ['每次任务最大轮数', String(system?.max_turns)], ['任务最大尝试次数', String(system?.max_attempts)],
                 ['外部 Trace 上传', '关闭'], ['访问范围', '本机 · 所有者登录'],
-              ].map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
+              ].filter(([label]) => hasSamples || !['样例模型', '已有 Issue'].includes(label))
+                .map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
             </dl>
             <div className="section-heading role-config-heading"><h2>Agent 角色</h2><span className="section-meta">6 个已注册角色</span></div>
             <div className="roles-list">{roles.map(([key, name, Icon]) => <div key={key}><Icon size={19} /><strong>{name}</strong>
-              <code>{key}</code><span className="tag neutral">{key === 'repair_agent' || key === 'pr_author' ? '仅样例' : '源码分析与样例'}</span></div>)}</div>
+              <code>{key}</code><span className="tag neutral">{key === 'pr_author' ? (hasSamples ? '仅样例 · 真实发布由后端执行' : '真实发布由后端执行') :
+                key === 'repair_agent' ? (hasSamples ? '真实修复与样例' : '真实代码修复')
+                  : hasSamples ? '源码分析与样例' : '真实源码分析'}</span></div>)}</div>
           </section>}
         </>}
         <footer className="page-footer"><span><ShieldCheck size={13} />所有合并由项目拥有者执行</span><span>RepoWatch / 0.1.0</span></footer>

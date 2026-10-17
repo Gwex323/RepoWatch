@@ -1,7 +1,7 @@
 import { test, expect } from '@playwright/test';
 
 for (const feedback of [
-  { decision: 'confirmed', note: '', button: '复现成功', status: '已确认 · 待接入修复' },
+  { decision: 'confirmed', note: '', button: '复现成功', status: '复现成功' },
   { decision: 'not_reproduced', note: '按步骤操作后未观察到异常。', button: '未能复现', status: '未能复现' },
 ]) {
 test(`analysis settings, automatic status, evidence and human reproduction on mobile (${feedback.decision})`, async ({ page }) => {
@@ -13,6 +13,8 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   let formatFailure = false;
   let timeoutFailure = false;
   let evidenceFailure = false;
+  let prerequisiteFailure = false;
+  let recoveringHandoff = false;
   const provider = { enabled: false, model: '', base_url: 'https://api.openai.com/v1',
     api: 'responses', has_key: false, version: 0, output_protocol: 'json_schema',
     finalization_mode: 'provider_default' };
@@ -21,6 +23,20 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
     current: true, created: Date.now() / 1000, error: null,
     report: { summary: '发现一个需要人工复现的疑似边界问题。', limitations: ['仅分析当前快照。'],
       files_read: ['app.py'], model: 'test-only' },
+    historical_review: {
+      total: 10, included: 8, omitted: 2,
+      items: Array.from({ length: 8 }, (_, index) => ({
+        finding_id: `finding_history_${index}`, version: 2, human_status: 'confirmed',
+        analysis_id: 'analysis_previous', revision: 'b'.repeat(40), content_clipped: index === 0,
+        data: { title: index === 2 ? '历史 JWT 校验疑似问题' : `历史问题 ${index + 1}` },
+        result: {
+          outcome: ['still_present', 'fixed', 'suspected_false_positive', 'not_covered'][index % 4],
+          rationale: index === 2 ? '旧复现中的空白密钥被正确拒绝，不足以证明校验绕过。' : '模拟的当前版本复核意见。',
+          evidence: index % 4 === 3 ? [] : [{ path: 'app.py', start_line: 1, end_line: 1,
+            quote: 'return previous_page' }],
+        },
+      })),
+    },
     coverage: { captured: 1, eligible: 1, complete: true },
     events: [{ kind: 'handoff', agent: 'repository_analyst -> problem_investigator', created: 1 }],
     findings: [{ id: 'finding_fixture', version: 1, status: 'waiting_reproduction', data: {
@@ -50,8 +66,9 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await page.route('**/api/**/environments', route => route.fulfill({ json: [env] }));
   await page.route('**/api/environments/env_analysis', route => route.fulfill({ json: env }));
   await page.route('**/api/environments/env_analysis/analyses', route => route.fulfill({
-    json: [{ ...analysis, status: enabled ? (retried ? 'completed' : 'failed') : 'waiting_model',
-      error: enabled && !retried ? (evidenceFailure ? 'analysis_evidence_unverified'
+    json: [{ ...analysis, status: enabled ? (retried ? 'completed' : recoveringHandoff ? 'running' : 'failed') : 'waiting_model',
+      error: enabled && !retried && !recoveringHandoff ? (prerequisiteFailure ? 'analysis_execution_unread'
+        : evidenceFailure ? 'analysis_evidence_unverified'
         : timeoutFailure ? 'analysis_provider_timeout_exhausted'
         : formatFailure ? 'analysis_json_invalid' : 'analysis_output_truncated') : null,
       failure_details: enabled && !retried ? {
@@ -62,7 +79,12 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
         finish_reason: formatFailure ? 'stop' : 'length', output_tokens: formatFailure ? 31 : 6000,
         reasoning_tokens: formatFailure ? 1 : 5999, truncated: !formatFailure,
       } : null,
-      events: evidenceFailure ? [...analysis.events,
+      events: prerequisiteFailure ? [...analysis.events,
+        { kind: 'required_read', agent: 'read_execution_records', created: 2 },
+        { kind: 'required_read', agent: 'read_source_file', created: 3 },
+        { kind: 'required_read_validation', agent: JSON.stringify({ required: 'source',
+          calls: 2, matching: 2, other: 0, allowed: 10, messages: 0 }), created: 4 },
+        { kind: 'handoff_recovery', agent: 'problem_investigator', created: 5 }] : evidenceFailure ? [...analysis.events,
         { kind: 'evidence_normalized', agent: '1', created: 2 },
         { kind: 'evidence_validation', agent: JSON.stringify({
           finding: 1, evidence: 2, reason: 'quote_mismatch',
@@ -153,9 +175,31 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await expect(panel.getByText('源码引用已去除显示行号：1 处', { exact: false })).toBeVisible();
   await panel.screenshot({ path: 'test-results/analysis-evidence-mobile.png', animations: 'disabled' });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  prerequisiteFailure = true;
+  await expect(panel.getByRole('alert')).toContainText('Agent 未读取已保存的测试／启动记录');
+  await expect(panel.getByText('必读检查：先读取已保存的测试／启动记录', { exact: false })).toBeVisible();
+  await expect(panel.getByText('必读检查：先读取当前源码', { exact: false })).toBeVisible();
+  await expect(panel.getByText('必读请求检查（源码）：2 条调用 · 匹配 2 · 其他 0 · 上限 10 · 正文 0', { exact: false })).toBeVisible();
+  await expect(panel.getByText('问题调查 · 提前结束，保留本轮证据并补一次真实交接', { exact: false })).toBeVisible();
+  recoveringHandoff = true;
+  await expect(panel.getByRole('status')).toContainText('当前角色提前结束，正在尝试补齐交接；本轮已读取的证据保留。');
+  await expect(panel.getByText('正在重试当前模型请求，已完成的阶段保留。')).toHaveCount(0);
+  recoveringHandoff = false;
+
   await panel.getByRole('button', { name: '重试分析', exact: true }).click();
   await page.setViewportSize({ width: 1440, height: 1080 });
   await expect(panel.getByText('分析已完成', { exact: true })).toBeVisible();
+  const historical = panel.getByLabel('旧问题逐条复核');
+  await expect(historical).toBeVisible();
+  for (const outcome of ['仍存在', '已修复', '疑似误报', '本轮未覆盖']) {
+    await expect(historical.locator('.tag').filter({ hasText: outcome })).toHaveCount(2);
+  }
+  await expect(historical.getByText('旧复现中的空白密钥被正确拒绝，不足以证明校验绕过。')).toBeVisible();
+  await expect(historical.getByText('另有 2 项受本轮数量限制未带入，均未覆盖，不能认定已修复。')).toBeVisible();
+  await expect(historical.getByText(/原人工状态：复现成功/)).toHaveCount(8);
+  await expect(historical.getByRole('button')).toHaveCount(0);
+  await historical.getByText('当前源码证据：app.py:1–1').first().click();
+  await expect(historical.locator('pre').first()).toHaveText('return previous_page');
   await expect(panel.getByRole('button', { name: '复现成功', exact: true })).toBeEnabled();
   await expect(panel.getByLabel('复现说明（选填）')).toHaveValue('');
   await expect(panel.getByRole('checkbox')).toHaveCount(0);
@@ -166,7 +210,7 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   if (feedback.note) await panel.getByLabel('复现说明（选填）').fill(feedback.note);
   await panel.getByRole('button', { name: feedback.button, exact: true }).click();
-  await expect(panel.locator('.analysis-finding .tag')).toHaveText(feedback.status);
+  await expect(panel.locator(':scope > .analysis-finding .tag')).toHaveText(feedback.status);
   await expect(panel.getByLabel('复现说明（选填）')).toHaveCount(0);
   expect(errors).toEqual([]);
 });

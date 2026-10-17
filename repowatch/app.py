@@ -23,6 +23,7 @@ from .analysis_model import AnalysisModel
 from .execution import Execution
 from .github_accounts import GitHubAccounts, GitHubError
 from .memory import Memory
+from .repairs import Repairs
 from .repository_analysis import Analyses
 from .repository_source import ExecutionError
 from .store import SDK_VERSION, Conflict, Missing, Store
@@ -84,6 +85,10 @@ class GitHubRepositoryBody(GitHubVersionBody):
     repo_id: str = Field(min_length=1, max_length=100)
 
 
+class DownloadBody(StrictBody):
+    auto_run: bool = Field(default=True, strict=True)
+
+
 class ExecutionConfigBody(StrictBody):
     version: int = Field(ge=1, strict=True)
     language: Literal["python", "go", "typescript"]
@@ -92,6 +97,9 @@ class ExecutionConfigBody(StrictBody):
     start: str = Field(max_length=4000)
     port: int = Field(ge=1024, le=65535, strict=True)
     install_network: bool = False
+    run_mode: Literal["service", "test_only"] = "service"
+    continue_pipeline: bool = Field(default=False, strict=True)
+    desktop_offline_confirmed: bool = Field(default=False, strict=True)
 
 
 class AnalysisModelBody(StrictBody):
@@ -111,9 +119,15 @@ class FindingFeedbackBody(StrictBody):
     note: str = Field(default="", max_length=2000)
 
 
+class RepairSettingsBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    enabled: bool = Field(strict=True)
+
+
 def create_app(
     db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
     execution_runtime=None, repository_source=None, execution_diagnoser=None, analysis_engine=None,
+    repair_engine=None, repair_publisher=None,
 ) -> FastAPI:
     # Windows registry MIME mappings may label .js as text/plain.
     mimetypes.add_type("text/javascript", ".js")
@@ -124,7 +138,11 @@ def create_app(
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
                           diagnoser=execution_diagnoser)
     analysis_model = AnalysisModel(store, github)
-    analyses = Analyses(execution, analysis_engine or analysis_model)
+    repairs = Repairs(
+        execution, repair_engine or analysis_model, github, publisher=repair_publisher,
+    )
+    analyses = Analyses(execution, analysis_engine or analysis_model, repairs)
+    repairs.analyses = analyses
     login_attempts: dict[str, deque] = defaultdict(deque)
 
     @asynccontextmanager
@@ -133,10 +151,14 @@ def create_app(
         executor = asyncio.create_task(execution.run()) if start_worker else None
         diagnostics = asyncio.create_task(execution.diagnoses.run()) if start_worker else None
         analyst = asyncio.create_task(analyses.run()) if start_worker else None
+        repair_worker = asyncio.create_task(repairs.run()) if start_worker else None
         yield
         execution.closing.set()
         if analyst:
             await analyst
+        repairs.closing.set()
+        if repair_worker:
+            await repair_worker
         if diagnostics:
             await diagnostics
         if executor:
@@ -151,6 +173,7 @@ def create_app(
     app.state.execution = execution
     app.state.analyses = analyses
     app.state.analysis_model = analysis_model
+    app.state.repairs = repairs
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
     @app.middleware("http")
@@ -262,7 +285,8 @@ def create_app(
                                      or analyses.engine.status()["enabled"]),
             "repository_analysis": analyses.engine.status(),
             "execution_diagnosis": execution.diagnoses.engine.status(),
-            "github_publication": False,
+            "github_publication": repairs.settings()["enabled"],
+            "automatic_repair": repairs.settings(),
             "github_account_binding": True,
             "external_repository_execution": True,
             "existing_issue_intake": False,
@@ -293,13 +317,30 @@ def create_app(
         values = body.model_dump(exclude={"api_key"})
         return analysis_model.save(**values, api_key=body.api_key.get_secret_value())
 
+    @app.get("/api/repair-settings")
+    def repair_settings():
+        return repairs.settings()
+
+    @app.post("/api/repair-settings")
+    def configure_repairs(body: RepairSettingsBody):
+        return repairs.configure(body.version, body.enabled)
+
     @app.get("/api/analysis-notifications")
     def analysis_notifications():
+        enabled = repairs.settings()["enabled"]
         with store.connection() as db:
-            return [dict(row) for row in db.execute(
+            return [{**dict(row), "repairs_enabled": enabled} for row in db.execute(
                 "SELECT a.repo_id,r.name AS repository,a.status,"
                 "(SELECT count(*) FROM analysis_findings f WHERE f.analysis_id=a.id "
-                "AND f.status='waiting_reproduction') AS waiting "
+                "AND f.status='waiting_reproduction') AS waiting,"
+                "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
+                "AND t.status='queued') AS repair_queued,"
+                "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
+                "AND t.status='running') AS repair_running,"
+                "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
+                "AND t.status IN ('failed','interrupted')) AS repair_failed,"
+                "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
+                "AND t.status='pr_created') AS repair_published "
                 "FROM repository_analyses a JOIN repositories r ON r.id=a.repo_id "
                 "WHERE a.id=(SELECT id FROM repository_analyses WHERE repo_id=a.repo_id "
                 "ORDER BY created DESC LIMIT 1) "
@@ -336,26 +377,49 @@ def create_app(
         return execution.list(repo_id)
 
     @app.post("/api/repositories/{repo_id}/environments", status_code=202)
-    def download_repository(repo_id: str, body: StrictBody):
-        return execution.create(repo_id)
+    def download_repository(repo_id: str, body: DownloadBody):
+        return execution.create(repo_id, auto_run=body.auto_run)
 
     @app.get("/api/environments/{env_id}")
     def environment(env_id: str):
         return execution.get(env_id)
 
+    @app.post("/api/environments/{env_id}/configuration/detect")
+    def detect_environment_configuration(env_id: str, body: GitHubVersionBody):
+        return execution.detect_configuration(env_id, body.version)
+
     @app.post("/api/environments/{env_id}/configuration")
     def configure_environment(env_id: str, body: ExecutionConfigBody):
         config = body.model_dump()
         version = config.pop("version")
-        return execution.configure(env_id, version, config)
+        continue_pipeline = config.pop("continue_pipeline")
+        confirmed = config.pop("desktop_offline_confirmed")
+        return execution.configure(env_id, version, config, continue_pipeline=continue_pipeline,
+                                   desktop_offline_confirmed=confirmed)
+
+    @app.post("/api/environments/{env_id}/pipeline", status_code=202)
+    def continue_environment_pipeline(env_id: str, body: GitHubVersionBody):
+        return execution.continue_pipeline(env_id, body.version)
 
     @app.get("/api/environments/{env_id}/analyses")
     def environment_analyses(env_id: str):
         return analyses.list(env_id)
 
+    @app.get("/api/environments/{env_id}/repairs")
+    def environment_repairs(env_id: str):
+        return repairs.list(env_id)
+
+    @app.get("/api/repairs/{repair_id}")
+    def repair_detail(repair_id: str):
+        return repairs.get(repair_id)
+
+    @app.post("/api/repairs/{repair_id}/retry")
+    def retry_repair(repair_id: str, body: GitHubVersionBody):
+        return repairs.retry(repair_id, body.version)
+
     @app.post("/api/environments/{env_id}/analyses", status_code=202)
     def start_analysis(env_id: str, body: GitHubVersionBody):
-        return analyses.get(analyses.enqueue(env_id, body.version))
+        return analyses.get(analyses.enqueue(env_id, body.version, manual=True))
 
     @app.post("/api/analyses/{analysis_id}/retry")
     def retry_analysis(analysis_id: str, body: GitHubVersionBody):

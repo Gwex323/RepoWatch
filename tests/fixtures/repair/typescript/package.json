@@ -1,0 +1,6 @@
+{
+  "name": "repowatch-repair-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test *.test.ts" }
+}

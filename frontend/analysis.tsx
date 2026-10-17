@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Check, FileSearch, Loader2, RefreshCw, Save, X } from 'lucide-react';
+import { RepairPanel } from './repair';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Provider = {
@@ -15,10 +16,26 @@ type Finding = {
     reproduction: string[]; evidence: { path: string; start_line: number; end_line: number; quote: string }[];
   };
 };
+type HistoricalOutcome = 'still_present' | 'fixed' | 'suspected_false_positive' | 'not_covered';
+type HistoricalReview = {
+  total: number; included: number; omitted: number;
+  items: {
+    finding_id: string; version: number; human_status: string; analysis_id: string;
+    revision: string; content_clipped: boolean; data: Finding['data'];
+    result: { outcome: HistoricalOutcome; rationale: string; evidence: Finding['data']['evidence'] } | null;
+  }[];
+};
+const historicalOutcomes: Record<HistoricalOutcome, string> = {
+  still_present: '仍存在', fixed: '已修复',
+  suspected_false_positive: '疑似误报', not_covered: '本轮未覆盖',
+};
 type Analysis = {
   id: string; status: string; error: string | null; version: number; revision: string;
   current: boolean; created: number; findings: Finding[];
-  report: { summary: string; limitations: string[]; files_read: string[]; model?: string } | null;
+  historical_review?: HistoricalReview | null;
+  report: { summary: string; limitations: string[]; files_read: string[]; model?: string;
+    execution_scope?: { kind: string; executed: number | null; skipped: number;
+      uncovered: string[]; complete: boolean } } | null;
   events: { kind: string; agent: string; created: number }[];
   coverage: { captured: number; eligible: number; complete: boolean } | null;
   progress?: { stage: string | null; model_calls: number; source_reads: number };
@@ -26,12 +43,12 @@ type Analysis = {
   provider_response?: { finish_reason?: string; output_tokens?: number; reasoning_tokens?: number; truncated?: boolean } | null;
 };
 const statuses: Record<string, string> = {
-  waiting_model: '等待模型配置', queued: '等待分析', running: 'Agent 分析中',
+  cancelled: '已取消', waiting_model: '等待模型配置', queued: '等待分析', running: 'Agent 分析中',
   completed: '分析已完成', failed: '分析未完成', interrupted: '分析已中断',
   superseded: '已被新执行结果替代',
-  waiting_reproduction: '待人工复现', confirmed: '已确认 · 待接入修复', not_reproduced: '未能复现',
+  waiting_reproduction: '待人工复现', confirmed: '复现成功', not_reproduced: '未能复现',
 };
-const messages: Record<string, string> = {
+export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
   analysis_model_changed: '模型配置已变化，请刷新后重试。',
   analysis_model_key_required: '请填写分析模型的 API Key。',
@@ -55,6 +72,11 @@ const messages: Record<string, string> = {
   analysis_provider_unreachable: '无法连接模型服务，请检查地址与网络。',
   analysis_evidence_unverified: '模型返回的源码证据未通过校验，本次未保存问题，请重试。',
   analysis_review_incomplete: 'Agent 未完成规定的源码读取与交接，本次未保存问题，请重试。',
+  analysis_execution_unread: 'Agent 未读取已保存的测试／启动记录，报告未保存。请重试分析。',
+  analysis_source_unread: 'Agent 未成功读取任何源码，报告未保存。请重试分析。',
+  analysis_handoff_incomplete: 'Agent 未完成规定的阶段交接，报告未保存。请重试分析。',
+  analysis_execution_read_not_followed: '模型返回的执行记录读取请求未通过校验，分析已提前停止。请查看必读请求检查记录后重试分析，无需重新安装。',
+  analysis_source_read_not_followed: '模型返回的源码读取请求未通过校验，分析已提前停止。请查看必读请求检查记录后重试分析，无需重新安装。',
   analysis_max_turns_exceeded: '分析已达到总调用轮数上限，尚未生成完整报告。',
   analysis_stage_budget_exceeded: '当前阶段已耗尽预算，尚未完成交接或报告。',
   analysis_handoff_not_followed: '已要求交接，但模型未返回有效的交接调用。请检查模型服务是否支持指定工具调用。',
@@ -74,7 +96,7 @@ const messages: Record<string, string> = {
   analysis_provider_not_found: '模型服务未找到接口或模型，请检查地址、接口类型和模型名称。',
   analysis_provider_error: '模型服务返回错误，请检查服务状态后重试。',
 };
-const errorMessage = (value: string) => messages[value] ?? '操作未完成，请检查配置后重试。';
+const errorMessage = (value: string) => analysisErrorMessages[value] ?? '操作未完成，请检查配置后重试。';
 const names: Record<string, string> = {
   repository_analyst: '仓库分析', problem_investigator: '问题调查',
   reproduction_assistant: '复现辅助', independent_reviewer: '独立审查',
@@ -82,6 +104,7 @@ const names: Record<string, string> = {
 function eventLabel(item: Analysis['events'][number]) {
   const name = names[item.agent] ?? item.agent;
   if (item.kind === 'attempt') return '开始新一次分析';
+  if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
   if (item.kind === 'model_call') return `${name} · 请求模型`;
   if (item.kind === 'timeout_retry') return `${name} · 响应超时，准备重试当前请求`;
   if (item.kind === 'retry_call') return `${name} · 正在重试当前请求`;
@@ -91,11 +114,14 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'evidence_normalized') return `源码引用已去除显示行号：${item.agent} 处`;
   if (item.kind === 'evidence_validation') {
     try {
-      const detail = JSON.parse(item.agent) as { finding?: number; evidence?: number; reason?: string };
+      const detail = JSON.parse(item.agent) as { finding?: number; evidence?: number; reason?: string; historical?: boolean };
       const reason = ({ unknown_file: '文件不存在', unread_file: '文件未读取',
         invalid_range: '行号范围无效', unread_range: '范围包含未读行',
-        quote_mismatch: '引用文本与源码不一致' } as Record<string, string>)[detail.reason ?? ''] ?? '证据未匹配';
-      return `问题 ${detail.finding} · 证据 ${detail.evidence}：${reason}`;
+        quote_mismatch: '引用文本与源码不一致',
+        unknown_historical_finding: '旧问题编号不在本轮范围内',
+        duplicate_historical_finding: '旧问题被重复复核',
+        missing_current_evidence: '缺少当前源码证据' } as Record<string, string>)[detail.reason ?? ''] ?? '证据未匹配';
+      return `${detail.historical ? '旧问题' : '问题'} ${detail.finding} · 证据 ${detail.evidence}：${reason}`;
     } catch { return '源码证据检查未通过'; }
   }
   if (item.kind === 'report_finalization') return `${name} · 使用已读取证据生成最终报告`;
@@ -119,7 +145,7 @@ function eventLabel(item: Analysis['events'][number]) {
       return `${metadata.truncated ? '模型输出被截断' : '收到模型响应'}${metadata.output_tokens !== undefined ? ` · 输出 ${metadata.output_tokens} tokens` : ''}`;
     } catch { return '收到模型响应'; }
   }
-  if (item.kind === 'budget') return `${name} · 读取预算结束，进入交接或报告`;
+  if (item.kind === 'budget') return `${name} · 当前阶段收束，进入交接或报告`;
   if (item.kind === 'time_budget') return `${name} · 收束当前阶段，为报告预留时间`;
   if (item.kind === 'reasoning_setting') return `请求推理强度：${({ default: '服务默认', low: '低', medium: '中', high: '高', max: '最高' } as Record<string, string>)[item.agent] ?? item.agent}`;
   if (item.kind === 'failure') {
@@ -128,6 +154,17 @@ function eventLabel(item: Analysis['events'][number]) {
       return `${names[failure.stage ?? ''] ?? '准备分析'} · ${errorMessage(failure.code ?? '')}`;
     } catch { return '本次分析未完成'; }
   }
+  if (item.kind === 'required_read_validation') {
+    try {
+      const check = JSON.parse(item.agent) as {
+        required?: string; calls?: number; matching?: number; other?: number; allowed?: number; messages?: number;
+      };
+      return `必读请求检查（${check.required === 'execution' ? '运行记录' : '源码'}）：${
+        check.calls ?? 0} 条调用 · 匹配 ${check.matching ?? 0} · 其他 ${check.other ?? 0} · 上限 ${check.allowed ?? 0} · 正文 ${check.messages ?? 0}`;
+    } catch { return '必读请求检查已记录'; }
+  }
+  if (item.kind === 'required_read') return item.agent === 'read_execution_records'
+    ? '必读检查：先读取已保存的测试／启动记录' : '必读检查：先读取当前源码';
   if (item.kind === 'evidence') return '读取运行记录';
   if (item.kind === 'handoff') return item.agent.split(' -> ').map(value => names[value] ?? value).join(' → ');
   return name;
@@ -222,7 +259,9 @@ function FindingItem({ analysis, finding, api, refresh }: {
   </article>;
 }
 
-export function AnalysisPanel({ envId, version, api }: { envId: string; version: number; api: Api }) {
+export function AnalysisPanel({ envId, version, api, pipelineActive = false }: {
+  envId: string; version: number; api: Api; pipelineActive?: boolean;
+}) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
   const [selected, setSelected] = useState('');
   const [busy, setBusy] = useState(false);
@@ -246,7 +285,7 @@ export function AnalysisPanel({ envId, version, api }: { envId: string; version:
   return <section className="repository-analysis" aria-label="仓库自动分析">
     <div className="section-heading"><h3><FileSearch size={18} />仓库自动分析</h3>
       <span className="tag neutral">{analysis ? statuses[analysis.status] : '等待执行结果'}</span>
-      <button className="button secondary" disabled={busy || active}
+      <button className="button secondary" disabled={busy || active || pipelineActive}
         onClick={() => perform(`/environments/${envId}/analyses`, { version })}><RefreshCw size={15} />分析当前版本</button>
     </div>
     {analyses.length > 1 && <label>分析记录<select value={analysis?.id} onChange={e => setSelected(e.target.value)}>
@@ -258,6 +297,8 @@ export function AnalysisPanel({ envId, version, api }: { envId: string; version:
     {analysis?.status === 'running' &&
       ['timeout_retry', 'retry_call', 'output_retry', 'format_retry', 'evidence_retry'].includes(analysis.events.at(-1)?.kind ?? '') &&
       <p role="status">正在重试当前模型请求，已完成的阶段保留。</p>}
+    {analysis?.status === 'running' && analysis.events.at(-1)?.kind === 'handoff_recovery' &&
+      <p role="status">当前角色提前结束，正在尝试补齐交接；本轮已读取的证据保留。</p>}
     {analysis?.progress && analysis.progress.model_calls > 0 && <p className="diagnosis-meta">
       本次模型调用 {analysis.progress.model_calls} 轮 · 已读取源码 {analysis.progress.source_reads} 次
     </p>}
@@ -278,17 +319,43 @@ export function AnalysisPanel({ envId, version, api }: { envId: string; version:
         onClick={() => perform(`/analyses/${analysis.id}/retry`, { version: analysis.version })}><RefreshCw size={15} />重试分析</button>}
     {analysis?.report && <>
       <p>{analysis.report.summary}</p>
+      {analysis.report.execution_scope?.kind === 'desktop_offline' &&
+        <p role="status">本报告仅结合容器离线测试与源码分析。
+          未验证：{analysis.report.execution_scope.uncovered.join('；')}。
+          不能据此认定整个 Windows 桌面程序验收通过。</p>}
       <p className="diagnosis-meta">版本 {analysis.revision.slice(0, 12)} · 已读取 {analysis.report.files_read.length} 个文件
         {analysis.report.model && ` · ${analysis.report.model}`}</p>
       <ul>{analysis.report.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>
       {analysis.coverage && <p className="diagnosis-meta">源码快照：{analysis.coverage.captured} / {analysis.coverage.eligible} 个可分析文件
         {!analysis.coverage.complete && ' · 存在截断或未采集文件'}</p>}
-      {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题。</p>}
+      {analysis.historical_review && <section className="historical-review" aria-label="旧问题逐条复核">
+        <h4>旧问题逐条复核</h4>
+        <p className="diagnosis-meta">同仓库待复核 {analysis.historical_review.total} 项 · 本轮带入 {analysis.historical_review.included} 项。
+          这些是模型复核意见，不会更改原有人工确认，也不会自动修复或发布。</p>
+        {analysis.historical_review.omitted > 0 && <p role="status">
+          另有 {analysis.historical_review.omitted} 项受本轮数量限制未带入，均未覆盖，不能认定已修复。
+        </p>}
+        {analysis.historical_review.total === 0 && <p>没有可带入的历史未解决问题。</p>}
+        {analysis.historical_review.items.map(item => <article className="analysis-finding" key={item.finding_id}>
+          <div className="section-heading"><h4>{item.data.title}</h4>
+            <span className="tag neutral">{item.result ? historicalOutcomes[item.result.outcome] : '本轮未覆盖'}</span></div>
+          <p className="diagnosis-meta">原版本 {item.revision.slice(0, 12)} · 原人工状态：{statuses[item.human_status] ?? item.human_status}
+            {' · '}记录 {item.finding_id} / v{item.version}</p>
+          {item.content_clipped && <p className="diagnosis-meta">历史描述已截断，复核须考虑信息不完整。</p>}
+          <p>{item.result?.rationale ?? '本轮没有该旧问题的复核结论，不能据此认定已修复。'}</p>
+          {item.result?.evidence.map((evidence, index) => <details key={index}>
+            <summary>当前源码证据：{evidence.path}:{evidence.start_line}–{evidence.end_line}</summary>
+            <pre>{evidence.quote}</pre>
+          </details>)}
+        </article>)}
+      </section>}
+      {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
       {analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}
     </>}
     {analysis && analysis.events.length > 0 && <details><summary>Agent 分析记录（{analysis.events.length}）</summary>
       <ol className="analysis-events">{analysis.events.map((item, index) => <li key={index}>
         {new Date(item.created * 1000).toLocaleTimeString('zh-CN')} · {eventLabel(item)}
       </li>)}</ol></details>}
+    <RepairPanel envId={envId} api={api} />
   </section>;
 }

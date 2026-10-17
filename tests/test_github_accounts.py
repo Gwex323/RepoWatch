@@ -183,8 +183,8 @@ def test_credential_rotation_rolls_back_when_metadata_write_fails(setup):
 
 
 @pytest.mark.parametrize("status,code", [
-    (401, "github_invalid_token"), (403, "github_denied_or_rate_limited"),
-    (429, "github_denied_or_rate_limited"), (500, "github_unavailable"),
+    (401, "github_invalid_token"), (403, "github_forbidden"),
+    (429, "github_rate_limited"), (500, "github_unavailable"),
     (302, "github_unavailable"),
 ])
 def test_upstream_failures_are_redacted_and_redirects_not_followed(setup, status, code):

@@ -1,7 +1,8 @@
 # Implementation Plan
 
 Date: 2026-10-09
-Status: milestones one and two implemented; later milestones remain planned
+Status: milestones one and two and the analysis/repair/publication increments
+implemented; real Issue intake, daily scheduling and live acceptance remain planned
 
 ## Milestone-One Delivery
 
@@ -152,8 +153,8 @@ Analysis increment (2026-10-12): automatic queueing after test/start results,
 encrypted WebUI provider settings, immutable bounded source/record snapshots,
 four native SDK roles with read-only tools, evidence-checked findings, repository
 memory references, WebUI notices and personal reproduction feedback are implemented.
-Live provider acceptance awaits model configuration. Real repairs and publication
-remain planned. See ADR 0017.
+Live provider acceptance remains separate. The repair/publication increment below
+extends confirmed discoveries into the workflow described in ADR 0018.
 
 Environment-diagnosis increment (2026-10-12): failure snapshots, local rules,
 optional live-model diagnosis with three native SDK roles, evidence validation,
@@ -169,6 +170,17 @@ planned. See ADR 0016 for provider configuration and data boundaries.
 - Preserve pre-repair evidence and assess regression results.
 - Bound repair/review cycles and expose unresolved failures.
 
+Automatic repair increment (2026-10-14): after a confirmed discovery, the
+durable queue can run the repair agent and independent reviewer, validate a
+new regression against the original and patched source, run the full suite,
+and publish a marked Issue and PR through the trusted REST adapter. The
+installation switch is disabled on upgrade; once enabled there is no per-
+finding approval. Review vetoes and failed tests are retryable from a fresh
+attempt, while a verified publication retry reuses the tested patch. Remote
+operations are reconciled before retrying uncertain writes. The repository
+owner remains the only merge actor. Real existing-Issue intake is not part
+of this increment.
+
 Completion checks:
 
 - Multiple findings and repositories can make progress independently.
@@ -177,6 +189,10 @@ Completion checks:
 - A patch is not accepted merely because it removes or weakens a failing test.
 
 ## Milestone 4: GitHub Contributions
+
+The controlled REST publication implementation is in place (2026-10-14).
+HTTP mocks cover direct push, public fork fallback and uncertainty recovery.
+Live contribution acceptance against a designated repository is still pending.
 
 - Configure the contribution identity and validate actual repository permissions.
 - Implement permission-checked fork, branch, issue, and PR operations.

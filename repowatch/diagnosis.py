@@ -30,28 +30,54 @@ MANIFESTS = (
     "requirements.txt", "requirements-dev.txt", "pyproject.toml", "pytest.ini",
     "package.json", "go.mod",
 )
+CREDENTIAL_ASSIGNMENT = re.compile(
+    r"(?i)((?:api[_-]?key|access[_-]?token|token|password|authorization)"
+    r"""['"]?\s*[:=]\s*['"]?)(?:Bearer\s+)?[^\s,'";&]+"""
+)
 
 
 def fingerprint(config, revision):
     value = {key: config.get(key) for key in CONFIG_KEYS}
+    if config.get("project_profile", {}).get("kind") == "python_desktop":
+        value["project_kind"] = "python_desktop"
+    if config.get("run_mode", "service") != "service":
+        value["run_mode"] = config["run_mode"]
     return hashlib.sha256(json.dumps(
         [revision, value], sort_keys=True, ensure_ascii=True,
     ).encode()).hexdigest()
 
 
-def redact(text):
+def evidence_matches(snapshot, config, revision, action):
+    if not snapshot or snapshot.get("revision") != revision:
+        return False
+    previous = snapshot.get("config", {})
+    if action in ("test", "start") and (
+        previous.get("project_profile", {}).get("kind")
+        != config.get("project_profile", {}).get("kind")
+    ):
+        return False
+    keys = ("language", "install", "install_network")
+    if action == "test":
+        keys += ("test",)
+    elif action == "start":
+        keys += ("test", "start", "port")
+        if previous.get("run_mode", "service") != config.get("run_mode", "service"):
+            return False
+    return all(previous.get(key) == config.get(key) for key in keys)
+
+
+def redact_known(text):
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(text))
     secret = os.getenv("REPOWATCH_DIAGNOSIS_API_KEY", "")
     if secret:
         text = text.replace(secret, "[REDACTED]")
     text = re.sub(r"(?:github_pat_|gh[pousr]_|sk-)[A-Za-z0-9_-]+", "[REDACTED]", text)
     text = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text)
-    text = re.sub(
-        r"(?i)((?:api[_-]?key|access[_-]?token|token|password|authorization)"
-        r"""['"]?\s*[:=]\s*['"]?)(?:Bearer\s+)?[^\s,'";&]+""",
-        r"\1[REDACTED]", text,
-    )
     return text
+
+
+def redact(text):
+    return CREDENTIAL_ASSIGNMENT.sub(r"\1[REDACTED]", redact_known(text))
 
 
 def redact_values(value):

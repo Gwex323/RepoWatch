@@ -1,9 +1,16 @@
 # Multi-Agent GitHub Maintenance System
 
-Status: milestones one and two and origin-dependent controlled workflows implemented
-Updated: 2026-10-12
+Status: local execution, analysis and confirmed-discovery repair/publication implemented;
+real Issue intake and daily scheduling remain planned
+Updated: 2026-10-14
 
 ## Goal
+
+Current repair implementation: see ADR 0018 for bounded native SDK repair/review,
+isolated regression evidence, installation-level opt-in, trusted GitHub writes
+and uncertain-publication recovery. This increment does not enable real
+existing-Issue intake, daily scheduling, automatic merging or repair-memory
+writeback. Live provider/publication acceptance is still pending.
 
 Design a multi-agent system that analyzes GitHub repositories, identifies
 project problems, opens issues, fixes bugs, and submits pull requests.

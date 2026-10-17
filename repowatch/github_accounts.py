@@ -20,9 +20,10 @@ SCOPES = {
 
 
 class GitHubError(Exception):
-    def __init__(self, code, status=400):
+    def __init__(self, code, status=400, *, details=None):
         self.code = code
         self.status = status
+        self.details = details or {}
         super().__init__(code)
 
 
@@ -91,12 +92,20 @@ class GitHubClient:
         self.transport = transport
 
     def request(self, path, token):
+        result, headers = self.request_json("GET", path, token)
+        if not isinstance(result, dict):
+            raise GitHubError("github_invalid_response", 502)
+        return result, headers
+
+    def request_json(self, method, path, token, payload=None):
+        if not path.startswith("/") or path.startswith("//") or "://" in path:
+            raise GitHubError("github_invalid_input", 422)
         try:
             with httpx.Client(
                 base_url="https://api.github.com", timeout=10, follow_redirects=False,
                 trust_env=False, transport=self.transport,
             ) as client:
-                response = client.get(path, headers={
+                response = client.request(method, path, json=payload, headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/vnd.github+json",
                     "X-GitHub-Api-Version": "2022-11-28",
@@ -107,18 +116,87 @@ class GitHubClient:
         if response.status_code == 401:
             raise GitHubError("github_invalid_token", 401)
         if response.status_code in (403, 429):
-            raise GitHubError("github_denied_or_rate_limited", 403)
+            raise self.access_error(response, method, path)
         if response.status_code == 404:
             raise GitHubError("github_repository_unavailable", 404)
-        if response.status_code != 200:
+        if response.status_code == 422:
+            raise GitHubError("github_write_rejected", 422)
+        if response.status_code not in (200, 201, 202, 204):
             raise GitHubError("github_unavailable", 502)
+        if response.status_code == 204:
+            return {}, response.headers
         try:
             result = response.json()
         except ValueError:
             raise GitHubError("github_invalid_response", 502) from None
         if not isinstance(result, dict):
+            if isinstance(result, list):
+                return result, response.headers
             raise GitHubError("github_invalid_response", 502)
         return result, response.headers
+
+    @staticmethod
+    def access_error(response, method, path):
+        """Classify access failures; retain only bounded, allowlisted diagnostics."""
+        try:
+            body = response.json()
+        except ValueError:
+            body = {}
+        message = str(body.get("message", "")).lower() if isinstance(body, dict) else ""
+        remaining = response.headers.get("x-ratelimit-remaining", "")
+        retry_after = response.headers.get("retry-after", "")
+        limited = (
+            response.status_code == 429 or remaining == "0" or retry_after.isdecimal()
+            or any(text in message for text in (
+                "api rate limit exceeded", "secondary rate limit", "abuse detection",
+            ))
+        )
+        denied = any(text in message for text in (
+            "resource not accessible by personal access token",
+            "resource not accessible by integration", "insufficient permission",
+        ))
+        code = ("github_rate_limited" if limited else
+                "github_permission_denied" if denied else "github_forbidden")
+        details = {"status": response.status_code, "method": method.upper()}
+        suffix = path.split("?", 1)[0]
+        operations = {
+            "/git/blobs": "git_blob", "/git/trees": "git_tree",
+            "/git/commits": "git_commit", "/git/refs": "git_ref",
+            "/issues": "issue", "/pulls": "pull_request", "/forks": "fork",
+        }
+        details["operation"] = next(
+            (value for key, value in operations.items() if suffix.endswith(key)), "read_access"
+        )
+        for header, key in (
+            ("x-ratelimit-remaining", "remaining"), ("retry-after", "retry_after"),
+            ("x-ratelimit-reset", "reset_at"),
+        ):
+            value = response.headers.get(header, "")
+            if re.fullmatch(r"[0-9]{1,12}", value):
+                details[key] = int(value)
+        accepted = response.headers.get("x-accepted-github-permissions", "")
+        alternatives = []
+        for group in accepted[:512].split(";"):
+            permissions = {}
+            for item in group.split(","):
+                match = re.fullmatch(
+                    r"\s*(contents|issues|pull_requests|administration|metadata)=(read|write)\s*",
+                    item,
+                )
+                if match:
+                    key, value = match.groups()
+                    if permissions.get(key) != "write":
+                        permissions[key] = value
+            if permissions and permissions not in alternatives:
+                alternatives.append(permissions)
+        if len(alternatives) == 1:
+            details["required_permissions"] = alternatives[0]
+        elif alternatives:
+            details["permission_alternatives"] = alternatives
+        request_id = response.headers.get("x-github-request-id", "")
+        if re.fullmatch(r"[A-Za-z0-9:-]{1,100}", request_id):
+            details["request_id"] = request_id
+        return GitHubError(code, 429 if limited else 403, details=details)
 
     def identity(self, token):
         data, headers = self.request("/user", token)
