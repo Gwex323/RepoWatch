@@ -1117,7 +1117,15 @@ class Analyses:
                 self.repairer.enqueue_in(db, analysis_id, finding_id)
         return self.get(analysis_id)
 
-    def disposition(self, analysis_id, finding_id, version, note):
+    def disposition(self, analysis_id, finding_id, version, decision, note):
+        if decision not in ("not_reproduced", "resolved"):
+            raise Conflict("disposition_invalid")
+        resolution = None
+        if decision == "resolved" and self.repairer is not None:
+            # Verify outside the write transaction; the finding CAS below closes the race.
+            resolution = self.repairer.resolution_verification(finding_id)
+        if decision == "resolved" and resolution is None and not note.strip():
+            raise Conflict("resolution_note_required")
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             analysis = db.execute("SELECT * FROM repository_analyses WHERE id=?",
@@ -1138,13 +1146,17 @@ class Analyses:
                                 (finding_id,)).fetchone()
             if repair and repair["status"] == "running":
                 raise Conflict("repair_running")
-            record = {"decision": "not_reproduced", "note": note.strip(), "actor": "owner",
+            record = {"decision": decision, "note": note.strip(), "actor": "owner",
                       "revision": analysis["revision"], "at": time.time(),
                       "previous_status": finding["status"], "disposition": True}
+            if decision == "resolved":
+                record["resolution"] = "merged_pr" if resolution else "owner_assertion"
+                if resolution:
+                    record.update(resolution)
             db.execute(
-                "UPDATE analysis_findings SET status='not_reproduced',feedback=?,"
+                "UPDATE analysis_findings SET status=?,feedback=?,"
                 "version=version+1 WHERE id=?",
-                (json.dumps(record, ensure_ascii=False), finding_id),
+                (decision, json.dumps(record, ensure_ascii=False), finding_id),
             )
             if self.repairer is not None:
                 self.repairer.cancel_pending_in(db, finding_id)

@@ -4,11 +4,13 @@ import asyncio
 import hashlib
 import json
 import logging
+import re
 import threading
 import time
 
 from .diagnosis import redact, redact_values
 from .environment_recovery import EnvironmentRecovery
+from .github_accounts import GitHubError
 from .github_contributions import GitHubPublisher
 from .repair_model import (
     FAILURE_POLICY,
@@ -413,6 +415,35 @@ class Repairs(EnvironmentRecovery):
             "INSERT INTO repair_events(repair_id,kind,value,created) VALUES(?,?,?,?)",
             (row["id"], "cancelled", "finding_disposition", time.time()),
         )
+
+    def resolution_verification(self, finding_id):
+        """Return merged-PR evidence for a published fix, or None for owner assertion."""
+        with self.store.connection() as db:
+            repair = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
+                                (finding_id,)).fetchone()
+        if not repair or repair["status"] != "pr_created" or not repair["remote"]:
+            return None
+        remote = json.loads(repair["remote"])
+        pr = remote.get("pr") if isinstance(remote, dict) else None
+        url = pr.get("url") if isinstance(pr, dict) else None
+        account_id = remote.get("account_id")
+        match = re.fullmatch(
+            r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([0-9]+)", url or "",
+        )
+        if not match or type(account_id) is not int:
+            raise Conflict("resolution_verification_failed")
+        github = self.publisher.github
+        try:
+            token, _ = github.validated_identity(account_id, None)
+            result, _ = github.client.request_json(
+                "GET", f"/repos/{match.group(1)}/pulls/{match.group(2)}", token,
+            )
+        except (Conflict, Missing, GitHubError):
+            raise Conflict("resolution_verification_failed") from None
+        if (not isinstance(result, dict) or result.get("merged") is not True
+                or result.get("html_url") != url):
+            raise Conflict("resolution_pr_not_merged")
+        return {"pr": url}
 
     def retry(self, repair_id, version):
         with self.store.connection() as db:

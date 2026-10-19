@@ -121,6 +121,7 @@ class FindingFeedbackBody(StrictBody):
 
 class FindingDispositionBody(StrictBody):
     version: int = Field(ge=1, strict=True)
+    decision: Literal["not_reproduced", "resolved"]
     note: str = Field(default="", max_length=2000)
 
 
