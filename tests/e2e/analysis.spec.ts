@@ -220,29 +220,41 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
 test('historical finding disposition records owner decision', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
-  let liveStatus: string = 'confirmed';
+  const liveStates: Record<string, string> = {
+    finding_history_1: 'confirmed', finding_history_2: 'waiting_reproduction',
+  };
+  const historyItem = (id: string, title: string, human: string,
+    outcome: 'still_present' | 'suspected_false_positive') => ({
+    finding_id: id, version: 2, human_status: human,
+    analysis_id: 'analysis_previous', revision: 'b'.repeat(40), content_clipped: false,
+    data: { title },
+    result: {
+      outcome,
+      rationale: outcome === 'suspected_false_positive'
+        ? '旧复现中的空白密钥被正确拒绝，不足以证明校验绕过。' : '当前源码仍包含该边界问题。',
+      evidence: [{ path: 'app.py', start_line: 1, end_line: 1, quote: 'return previous_page' }],
+    },
+  });
   const analysis = {
     id: 'analysis_fixture', version: 1, revision: 'a'.repeat(40), status: 'completed',
     current: true, created: Date.now() / 1000, error: null,
     report: { summary: '本轮没有新的疑似问题。', limitations: [], files_read: ['app.py'] },
     historical_review: {
-      total: 1, included: 1, omitted: 0,
-      items: [{
-        finding_id: 'finding_history_1', version: 2, human_status: 'confirmed',
-        analysis_id: 'analysis_previous', revision: 'b'.repeat(40), content_clipped: false,
-        data: { title: '历史 JWT 校验疑似问题' },
-        result: {
-          outcome: 'suspected_false_positive' as const,
-          rationale: '旧复现中的空白密钥被正确拒绝，不足以证明校验绕过。',
-          evidence: [{ path: 'app.py', start_line: 1, end_line: 1, quote: 'return previous_page' }],
-        },
-      }],
+      total: 2, included: 2, omitted: 0,
+      items: [
+        historyItem('finding_history_1', '历史 JWT 校验疑似问题', 'confirmed',
+          'suspected_false_positive'),
+        historyItem('finding_history_2', '历史分页边界问题', 'waiting_reproduction',
+          'still_present'),
+      ],
     },
     events: [], findings: [],
   };
   const payload = () => ({ ...analysis, historical_review: {
     ...analysis.historical_review,
-    items: [{ ...analysis.historical_review.items[0], live_status: liveStatus, live_version: 3 }],
+    items: analysis.historical_review.items.map(item => ({
+      ...item, live_status: liveStates[item.finding_id], live_version: 3,
+    })),
   } });
   const env = { id: 'env_analysis', version: 1, revision: 'a'.repeat(40), state: 'ready',
     installed: true, busy: false, created: 1, url: null, error: null, expires: null, jobs: [],
@@ -253,12 +265,15 @@ test('historical finding disposition records owner decision', async ({ page }) =
   await page.route('**/api/**/environments', route => route.fulfill({ json: [env] }));
   await page.route('**/api/environments/env_analysis', route => route.fulfill({ json: env }));
   await page.route('**/api/environments/env_analysis/analyses', route => route.fulfill({ json: [payload()] }));
-  let disposed: { version: number; note: string } | null = null;
-  await page.route('**/api/analyses/analysis_previous/findings/finding_history_1/disposition', async route => {
-    disposed = route.request().postDataJSON() as { version: number; note: string };
-    liveStatus = 'not_reproduced';
-    await route.fulfill({ json: payload() });
-  });
+  const disposed: Record<string, { version: number; decision: string; note: string }> = {};
+  for (const id of ['finding_history_1', 'finding_history_2']) {
+    await page.route(`**/api/analyses/analysis_previous/findings/${id}/disposition`, async route => {
+      const body = route.request().postDataJSON() as { version: number; decision: string; note: string };
+      disposed[id] = body;
+      liveStates[id] = body.decision;
+      await route.fulfill({ json: payload() });
+    });
+  }
   await page.goto('/');
   await page.getByLabel('管理密码', { exact: true }).fill('qa-only-owner-password');
   if (await page.getByRole('heading', { name: '创建本地工作空间' }).isVisible()) {
@@ -272,12 +287,25 @@ test('historical finding disposition records owner decision', async ({ page }) =
     .getByRole('button', { name: '管理运行环境' }).click();
   const historical = page.getByLabel('旧问题逐条复核');
   await expect(historical).toBeVisible();
-  await expect(historical.getByRole('button', { name: '标记未能复现（含误报）' })).toBeVisible();
-  await historical.getByLabel('处置说明（选填）').fill('空白密钥被正确拒绝，确认误报。');
-  await historical.getByRole('button', { name: '标记未能复现（含误报）' }).click();
-  expect(disposed).toEqual({ version: 3, note: '空白密钥被正确拒绝，确认误报。' });
-  await expect(historical.getByText('当前状态：未能复现')).toBeVisible();
-  await expect(historical.getByRole('button', { name: '标记未能复现（含误报）' })).toHaveCount(0);
+  const jwt = historical.locator('article', { hasText: '历史 JWT 校验疑似问题' });
+  const paging = historical.locator('article', { hasText: '历史分页边界问题' });
+  await expect(jwt.getByRole('button', { name: '标记未能复现（含误报）' })).toBeVisible();
+  await expect(jwt.getByRole('button', { name: '标记已解决' })).toBeVisible();
+  await jwt.getByLabel('处置说明（选填）').fill('空白密钥被正确拒绝，确认误报。');
+  await jwt.getByRole('button', { name: '标记未能复现（含误报）' }).click();
+  expect(disposed['finding_history_1']).toEqual({
+    version: 3, decision: 'not_reproduced', note: '空白密钥被正确拒绝，确认误报。',
+  });
+  await expect(jwt.getByText('当前状态：未能复现')).toBeVisible();
+  await expect(jwt.getByRole('button', { name: '标记未能复现（含误报）' })).toHaveCount(0);
+  await expect(jwt.getByRole('button', { name: '标记已解决' })).toHaveCount(0);
+  await paging.getByLabel('处置说明（选填）').fill('已在其他分支手动修复并验证。');
+  await paging.getByRole('button', { name: '标记已解决' }).click();
+  expect(disposed['finding_history_2']).toEqual({
+    version: 3, decision: 'resolved', note: '已在其他分支手动修复并验证。',
+  });
+  await expect(paging.getByText('当前状态：已解决')).toBeVisible();
+  await expect(paging.getByRole('button', { name: '标记已解决' })).toHaveCount(0);
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   expect(errors).toEqual([]);

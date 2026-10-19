@@ -48,6 +48,7 @@ const statuses: Record<string, string> = {
   completed: '分析已完成', failed: '分析未完成', interrupted: '分析已中断',
   superseded: '已被新执行结果替代',
   waiting_reproduction: '待人工复现', confirmed: '复现成功', not_reproduced: '未能复现',
+  resolved: '已解决',
 };
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
@@ -80,6 +81,9 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_source_read_not_followed: '模型返回的源码读取请求未通过校验，分析已提前停止。请查看必读请求检查记录后重试分析，无需重新安装。',
   finding_closed: '该旧问题已记录处置结论，无需重复操作。',
   repair_running: '该问题正在修复中，暂不能改判；请等修复结束或停止任务。',
+  resolution_note_required: '手动标记解决必须填写处置说明。',
+  resolution_pr_not_merged: '修复 PR 尚未合并，请先在 GitHub 完成合并。',
+  resolution_verification_failed: '无法核验修复 PR 的合并状态，请检查 GitHub 账号与网络后重试。',
   analysis_max_turns_exceeded: '分析已达到总调用轮数上限，尚未生成完整报告。',
   analysis_stage_budget_exceeded: '当前阶段已耗尽预算，尚未完成交接或报告。',
   analysis_handoff_not_followed: '已要求交接，但模型未返回有效的交接调用。请检查模型服务是否支持指定工具调用。',
@@ -270,10 +274,10 @@ function HistoricalItem({ item, api, refresh }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const canDispose = item.live_status === 'waiting_reproduction' || item.live_status === 'confirmed';
-  const submit = () => {
+  const submit = (decision: 'not_reproduced' | 'resolved') => {
     setBusy(true); setError('');
     void api(`/analyses/${item.analysis_id}/findings/${item.finding_id}/disposition`, {
-      version: item.live_version, note,
+      version: item.live_version, decision, note,
     }).then(refresh).catch(e => setError(errorMessage(e.message))).finally(() => setBusy(false));
   };
   return <article className="analysis-finding">
@@ -293,8 +297,11 @@ function HistoricalItem({ item, api, refresh }: {
       <label>处置说明（选填）<textarea maxLength={2000} rows={3} value={note}
         onChange={e => setNote(e.target.value)} disabled={busy} /></label>
       <div className="execution-actions">
-        <button className="button secondary" disabled={busy} onClick={submit}>
+        <button className="button secondary" disabled={busy} onClick={() => submit('not_reproduced')}>
           <X size={15} />标记未能复现（含误报）
+        </button>
+        <button className="button secondary" disabled={busy} onClick={() => submit('resolved')}>
+          <Check size={15} />标记已解决
         </button>
       </div>
     </div>}
