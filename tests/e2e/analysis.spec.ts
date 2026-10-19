@@ -28,6 +28,7 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
       items: Array.from({ length: 8 }, (_, index) => ({
         finding_id: `finding_history_${index}`, version: 2, human_status: 'confirmed',
         analysis_id: 'analysis_previous', revision: 'b'.repeat(40), content_clipped: index === 0,
+        live_status: 'confirmed', live_version: 2,
         data: { title: index === 2 ? '历史 JWT 校验疑似问题' : `历史问题 ${index + 1}` },
         result: {
           outcome: ['still_present', 'fixed', 'suspected_false_positive', 'not_covered'][index % 4],
@@ -197,7 +198,7 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await expect(historical.getByText('旧复现中的空白密钥被正确拒绝，不足以证明校验绕过。')).toBeVisible();
   await expect(historical.getByText('另有 2 项受本轮数量限制未带入，均未覆盖，不能认定已修复。')).toBeVisible();
   await expect(historical.getByText(/原人工状态：复现成功/)).toHaveCount(8);
-  await expect(historical.getByRole('button')).toHaveCount(0);
+  await expect(historical.getByRole('button', { name: '标记未能复现（含误报）' })).toHaveCount(8);
   await historical.getByText('当前源码证据：app.py:1–1').first().click();
   await expect(historical.locator('pre').first()).toHaveText('return previous_page');
   await expect(panel.getByRole('button', { name: '复现成功', exact: true })).toBeEnabled();
@@ -215,3 +216,69 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   expect(errors).toEqual([]);
 });
 }
+
+test('historical finding disposition records owner decision', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  let liveStatus: string = 'confirmed';
+  const analysis = {
+    id: 'analysis_fixture', version: 1, revision: 'a'.repeat(40), status: 'completed',
+    current: true, created: Date.now() / 1000, error: null,
+    report: { summary: '本轮没有新的疑似问题。', limitations: [], files_read: ['app.py'] },
+    historical_review: {
+      total: 1, included: 1, omitted: 0,
+      items: [{
+        finding_id: 'finding_history_1', version: 2, human_status: 'confirmed',
+        analysis_id: 'analysis_previous', revision: 'b'.repeat(40), content_clipped: false,
+        data: { title: '历史 JWT 校验疑似问题' },
+        result: {
+          outcome: 'suspected_false_positive' as const,
+          rationale: '旧复现中的空白密钥被正确拒绝，不足以证明校验绕过。',
+          evidence: [{ path: 'app.py', start_line: 1, end_line: 1, quote: 'return previous_page' }],
+        },
+      }],
+    },
+    events: [], findings: [],
+  };
+  const payload = () => ({ ...analysis, historical_review: {
+    ...analysis.historical_review,
+    items: [{ ...analysis.historical_review.items[0], live_status: liveStatus, live_version: 3 }],
+  } });
+  const env = { id: 'env_analysis', version: 1, revision: 'a'.repeat(40), state: 'ready',
+    installed: true, busy: false, created: 1, url: null, error: null, expires: null, jobs: [],
+    test_result: { exit_code: 0, revision: 'a'.repeat(40) },
+    config: { language: 'python', install: '', test: 'python -m pytest', start: '', port: 8000,
+      install_network: false, detected: true } };
+  await page.route('**/api/execution/readiness', route => route.fulfill({ json: { ready: true } }));
+  await page.route('**/api/**/environments', route => route.fulfill({ json: [env] }));
+  await page.route('**/api/environments/env_analysis', route => route.fulfill({ json: env }));
+  await page.route('**/api/environments/env_analysis/analyses', route => route.fulfill({ json: [payload()] }));
+  let disposed: { version: number; note: string } | null = null;
+  await page.route('**/api/analyses/analysis_previous/findings/finding_history_1/disposition', async route => {
+    disposed = route.request().postDataJSON() as { version: number; note: string };
+    liveStatus = 'not_reproduced';
+    await route.fulfill({ json: payload() });
+  });
+  await page.goto('/');
+  await page.getByLabel('管理密码', { exact: true }).fill('qa-only-owner-password');
+  if (await page.getByRole('heading', { name: '创建本地工作空间' }).isVisible()) {
+    await page.getByLabel('确认密码', { exact: true }).fill('qa-only-owner-password');
+    await page.getByRole('button', { name: '创建并进入' }).click();
+  } else await page.getByRole('button', { name: '进入工作空间' }).click();
+  await page.getByRole('button', { name: '添加仓库', exact: true }).click();
+  await page.getByLabel('GitHub 仓库链接').fill('https://github.com/fixture/analysis');
+  await page.getByRole('dialog').getByRole('button', { name: '添加仓库', exact: true }).click();
+  await page.locator('.repository-row').filter({ hasText: 'fixture/analysis' })
+    .getByRole('button', { name: '管理运行环境' }).click();
+  const historical = page.getByLabel('旧问题逐条复核');
+  await expect(historical).toBeVisible();
+  await expect(historical.getByRole('button', { name: '标记未能复现（含误报）' })).toBeVisible();
+  await historical.getByLabel('处置说明（选填）').fill('空白密钥被正确拒绝，确认误报。');
+  await historical.getByRole('button', { name: '标记未能复现（含误报）' }).click();
+  expect(disposed).toEqual({ version: 3, note: '空白密钥被正确拒绝，确认误报。' });
+  await expect(historical.getByText('当前状态：未能复现')).toBeVisible();
+  await expect(historical.getByRole('button', { name: '标记未能复现（含误报）' })).toHaveCount(0);
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  expect(errors).toEqual([]);
+});

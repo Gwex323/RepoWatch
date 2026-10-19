@@ -401,6 +401,19 @@ class Repairs(EnvironmentRecovery):
             except (Conflict, Missing):
                 pass
 
+    def cancel_pending_in(self, db, finding_id):
+        row = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?", (finding_id,)).fetchone()
+        if not row or row["status"] != "queued":
+            return
+        db.execute(
+            "UPDATE repair_tasks SET status='cancelled',error=NULL,version=version+1,updated=? "
+            "WHERE id=? AND status='queued'", (time.time(), row["id"]),
+        )
+        db.execute(
+            "INSERT INTO repair_events(repair_id,kind,value,created) VALUES(?,?,?,?)",
+            (row["id"], "cancelled", "finding_disposition", time.time()),
+        )
+
     def retry(self, repair_id, version):
         with self.store.connection() as db:
             previous = db.execute("SELECT * FROM repair_tasks WHERE id=?", (repair_id,)).fetchone()

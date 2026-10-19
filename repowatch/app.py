@@ -119,6 +119,11 @@ class FindingFeedbackBody(StrictBody):
     note: str = Field(default="", max_length=2000)
 
 
+class FindingDispositionBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    note: str = Field(default="", max_length=2000)
+
+
 class RepairSettingsBody(StrictBody):
     version: int = Field(ge=1, strict=True)
     enabled: bool = Field(strict=True)
@@ -428,6 +433,10 @@ def create_app(
     @app.post("/api/analyses/{analysis_id}/findings/{finding_id}/feedback")
     def finding_feedback(analysis_id: str, finding_id: str, body: FindingFeedbackBody):
         return analyses.feedback(analysis_id, finding_id, **body.model_dump())
+
+    @app.post("/api/analyses/{analysis_id}/findings/{finding_id}/disposition")
+    def finding_disposition(analysis_id: str, finding_id: str, body: FindingDispositionBody):
+        return analyses.disposition(analysis_id, finding_id, **body.model_dump())
 
     @app.post("/api/environments/{env_id}/{action}", status_code=202)
     def environment_action(

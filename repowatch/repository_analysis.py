@@ -1032,6 +1032,18 @@ class Analyses:
             ]
             context = json.loads(row["context"] or "{}")
             result["historical_review"] = historical_results(context, result["report"])
+            review = result["historical_review"]
+            if review and review.get("items"):
+                ids = [item["finding_id"] for item in review["items"]]
+                marks = ",".join("?" * len(ids))
+                live = {item["id"]: item for item in db.execute(
+                    f"SELECT id,status,version FROM analysis_findings WHERE id IN ({marks})",
+                    ids,
+                )}
+                for item in review["items"]:
+                    live_finding = live.get(item["finding_id"])
+                    item["live_status"] = live_finding["status"] if live_finding else None
+                    item["live_version"] = live_finding["version"] if live_finding else None
             result["coverage"] = context.get("coverage")
             result["memory_references"] = context.get("memories", [])
         result["current"] = self.current(row)
@@ -1103,6 +1115,39 @@ class Analyses:
             )
             if decision == "confirmed" and self.repairer is not None:
                 self.repairer.enqueue_in(db, analysis_id, finding_id)
+        return self.get(analysis_id)
+
+    def disposition(self, analysis_id, finding_id, version, note):
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            analysis = db.execute("SELECT * FROM repository_analyses WHERE id=?",
+                                  (analysis_id,)).fetchone()
+            if not analysis:
+                raise Missing("Analysis not found.")
+            finding = db.execute(
+                "SELECT * FROM analysis_findings WHERE id=? AND analysis_id=?",
+                (finding_id, analysis_id),
+            ).fetchone()
+            if not finding:
+                raise Missing("Finding not found.")
+            if finding["version"] != version:
+                raise Conflict("finding_changed")
+            if finding["status"] not in ("waiting_reproduction", "confirmed"):
+                raise Conflict("finding_closed")
+            repair = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
+                                (finding_id,)).fetchone()
+            if repair and repair["status"] == "running":
+                raise Conflict("repair_running")
+            record = {"decision": "not_reproduced", "note": note.strip(), "actor": "owner",
+                      "revision": analysis["revision"], "at": time.time(),
+                      "previous_status": finding["status"], "disposition": True}
+            db.execute(
+                "UPDATE analysis_findings SET status='not_reproduced',feedback=?,"
+                "version=version+1 WHERE id=?",
+                (json.dumps(record, ensure_ascii=False), finding_id),
+            )
+            if self.repairer is not None:
+                self.repairer.cancel_pending_in(db, finding_id)
         return self.get(analysis_id)
 
     def discover_pending(self):
