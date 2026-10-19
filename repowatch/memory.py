@@ -178,6 +178,53 @@ def capture_fix(db, run_id):
     )
 
 
+def capture_repair_fix(db, repair):
+    """Persist a merged real-repository repair as bounded reference data."""
+    remote = json.loads(repair["remote"]) if repair["remote"] else None
+    patch = json.loads(repair["patch"]) if repair["patch"] else None
+    review = json.loads(repair["review"]) if repair["review"] else None
+    verification = json.loads(repair["verification"]) if repair["verification"] else None
+    finding = db.execute(
+        "SELECT data FROM analysis_findings WHERE id=?", (repair["finding_id"],),
+    ).fetchone()
+    if (repair["status"] != "pr_created" or not isinstance(remote, dict)
+            or not isinstance(remote.get("pr"), dict) or not isinstance(patch, dict)
+            or not isinstance(review, dict) or review.get("approved") is not True
+            or not isinstance(verification, dict) or not finding):
+        return
+    data = json.loads(finding["data"])
+    pr_url = str(remote["pr"].get("url", ""))[:500]
+    paths = [str(edit.get("path", ""))[:240] for edit in patch.get("edits", [])[:10]
+             if isinstance(edit, dict)]
+    regression = [str(item)[:240] for item in patch.get("regression_paths", [])[:5]]
+    content = (
+        f"问题：{str(data.get('title', ''))[:160]}。{str(data.get('explanation', ''))[:400]}\n"
+        f"修改：{str(patch.get('summary', ''))[:600]}\n"
+        f"涉及文件：{'、'.join(paths)[:600]}\n"
+        f"回归测试：{'、'.join(regression)[:300]}\n"
+        "验证：原版本测试、新增回归测试与完整测试在隔离容器中通过。\n"
+        f"审查：{str(review.get('summary', ''))[:400]}\n"
+        "状态：修复 PR 已由 owner 核验合并。本条为参考经验，不代表当前版本仍适用。"
+    )
+    insert(
+        db, repo_id=repair["repo_id"], revision=repair["revision"], source="workflow",
+        source_key=f"repair:{repair['id']}", category="fix",
+        title=f"修复经验：{str(data.get('title', ''))[:120]}",
+        content=content,
+        evidence={
+            "repair_id": repair["id"], "finding_id": repair["finding_id"],
+            "analysis_id": repair["analysis_id"], "pr": pr_url,
+            "merged": True, "published": True,
+            "paths": paths, "regression_paths": regression,
+            "verification": {
+                str(key)[:80]: value.get("exit_code") if isinstance(value, dict) else None
+                for key, value in list(verification.items())[:8] if isinstance(key, str)
+            },
+            "review_risks": [str(item)[:240] for item in review.get("risks", [])[:3]],
+        },
+    )
+
+
 class Memory:
     def __init__(self, store):
         self.store = store

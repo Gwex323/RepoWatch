@@ -26,6 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .analysis_model import REQUEST_TIMEOUT_SECONDS, OutputTruncated
 from .diagnosis import evidence_matches, fingerprint, redact, redact_values
 from .historical_review import MAX_HISTORICAL_FINDINGS, historical_results, historical_snapshot
+from .memory import capture_repair_fix
 from .store import Conflict, Missing, uid
 
 ROLES = ("repository_analyst", "problem_investigator",
@@ -1160,6 +1161,8 @@ class Analyses:
             )
             if self.repairer is not None:
                 self.repairer.cancel_pending_in(db, finding_id)
+            if decision == "resolved" and resolution is not None and repair is not None:
+                capture_repair_fix(db, repair)
         return self.get(analysis_id)
 
     def discover_pending(self):

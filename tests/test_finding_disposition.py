@@ -11,6 +11,7 @@ from test_repository_analysis import Engine, prepare_tested  # noqa: F401
 from repowatch.app import create_app
 from repowatch.github_accounts import GitHubError
 from repowatch.historical_review import historical_snapshot
+from repowatch.memory import capture_repair_fix
 from repowatch.repairs import Repairs
 from repowatch.repository_analysis import Analyses
 from repowatch.store import Conflict
@@ -42,14 +43,34 @@ class StubPublisher:
 def published_repair(execution, finding_id):
     with execution.store.connection() as db:
         db.execute(
-            "UPDATE repair_tasks SET status='pr_created',remote=? WHERE finding_id=?",
+            "UPDATE repair_tasks SET status='pr_created',patch=?,verification=?,review=?,"
+            "remote=? WHERE finding_id=?",
             (json.dumps({
+                "summary": "修复边界处理并新增回归测试",
+                "edits": [{"path": "app.py", "content": "fixed",
+                           "original_sha256": "a" * 64},
+                          {"path": "tests/test_regression.py", "content": "def test(): pass",
+                           "original_sha256": ""}],
+                "regression_paths": ["tests/test_regression.py"],
+                "regression_command": "python -m pytest tests/test_regression.py",
+            }),
+             json.dumps({"regression": {"exit_code": 0}, "full": {"exit_code": 0}}),
+             json.dumps({"approved": True, "summary": "差异与测试证据一致。",
+                         "risks": ["样例风险"]}),
+             json.dumps({
                 "repository": "alice/project", "branch": "repowatch/x", "commit": "a" * 40,
                 "issue": {"number": 6, "url": "https://github.com/alice/project/issues/6"},
                 "pr": {"number": 7, "url": PR_URL}, "account_id": 101,
                 "account_login": "alice",
             }), finding_id),
         )
+
+
+def fix_memories(execution, repo_id):
+    with execution.store.connection() as db:
+        return db.execute(
+            "SELECT * FROM memories WHERE repo_id=? AND category='fix'", (repo_id,),
+        ).fetchall()
 
 
 def analyzed(execution_fixture):
@@ -237,6 +258,13 @@ def confirmed_with_repairs(execution_fixture, *, merged=True, fail=False):
 def test_resolved_with_merged_pr_uses_remote_evidence(service):  # noqa: F811
     execution, analyses, row, finding, github = confirmed_with_repairs(service)
     published_repair(execution, finding["id"])
+    with execution.store.connection() as db:
+        repo_id = db.execute(
+            "SELECT repo_id FROM repository_analyses WHERE id=?", (row["id"],),
+        ).fetchone()["repo_id"]
+        repair_id = db.execute(
+            "SELECT id FROM repair_tasks WHERE finding_id=?", (finding["id"],),
+        ).fetchone()["id"]
     result = analyses.disposition(row["id"], finding["id"], finding["version"] + 1,
                                   "resolved", "")
     saved = result["findings"][0]
@@ -248,6 +276,52 @@ def test_resolved_with_merged_pr_uses_remote_evidence(service):  # noqa: F811
         repair = db.execute("SELECT status FROM repair_tasks WHERE finding_id=?",
                             (finding["id"],)).fetchone()
     assert repair["status"] == "pr_created"
+    memories = fix_memories(execution, repo_id)
+    assert len(memories) == 1
+    memory = memories[0]
+    assert memory["source"] == "workflow"
+    assert memory["source_key"] == f"repair:{repair_id}"
+    assert memory["revision"] == row["revision"]
+    assert memory["title"].startswith("修复经验：")
+    assert "修复 PR 已由 owner 核验合并" in memory["content"]
+    evidence = json.loads(memory["evidence"])
+    assert evidence["pr"] == PR_URL and evidence["merged"] is True
+    assert evidence["repair_id"] == repair_id
+    assert evidence["finding_id"] == finding["id"]
+
+
+def test_merged_pr_fix_memory_is_deduplicated(service):  # noqa: F811
+    execution, analyses, row, finding, _ = confirmed_with_repairs(service)
+    published_repair(execution, finding["id"])
+    analyses.disposition(row["id"], finding["id"], finding["version"] + 1, "resolved", "")
+    with execution.store.connection() as db:
+        repair = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
+                            (finding["id"],)).fetchone()
+        capture_repair_fix(db, repair)
+        capture_repair_fix(db, repair)
+    assert len(fix_memories(execution, row["repo_id"])) == 1
+
+
+def test_assertion_and_not_reproduced_do_not_write_fix_memory(service):  # noqa: F811
+    execution, analyses, _, row = analyzed(service)
+    finding = row["findings"][0]
+    analyses.disposition(row["id"], finding["id"], finding["version"],
+                         "resolved", "手动修复")
+    assert fix_memories(execution, row["repo_id"]) == []
+
+
+def test_fix_memory_loads_into_next_analysis_context(service):  # noqa: F811
+    execution, analyses, row, finding, _ = confirmed_with_repairs(service)
+    published_repair(execution, finding["id"])
+    analyses.disposition(row["id"], finding["id"], finding["version"] + 1, "resolved", "")
+    env = execution.get(row["env_id"])
+    execution.action(env["id"], env["version"], "test")
+    execution.tick()
+    asyncio.run(analyses.tick())
+    newer = analyses.list(env["id"])[0]
+    assert newer["id"] != row["id"]
+    references = analyses.get(newer["id"])["memory_references"]
+    assert any(item["title"].startswith("修复经验：") for item in references)
 
 
 @pytest.mark.parametrize("merged,fail,code", [
