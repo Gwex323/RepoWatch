@@ -1,0 +1,155 @@
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from test_execution import Runtime, Source, prepare, service  # noqa: F401
+from test_github_accounts import TOKEN_A, MemoryVault, Remote
+from test_repository_analysis import Engine, prepare_tested  # noqa: F401
+
+from repowatch.app import create_app
+from repowatch.historical_review import historical_snapshot
+from repowatch.repairs import Repairs
+from repowatch.repository_analysis import Analyses
+from repowatch.store import Conflict
+
+
+def analyzed(execution_fixture):
+    execution, _, _ = execution_fixture
+    env = prepare_tested(execution_fixture)
+    analyses = Analyses(execution, Engine())
+    asyncio.run(analyses.tick())
+    row = analyses.list(env["id"])[0]
+    return execution, analyses, env, row
+
+
+def test_stale_waiting_finding_can_be_disposed_and_leaves_candidates(service):  # noqa: F811
+    execution, analyses, env, row = analyzed(service)
+    finding = row["findings"][0]
+    execution.configure(env["id"], env["version"], {**env["config"], "test": "echo changed"})
+    assert not analyses.get(row["id"])["current"]
+    result = analyses.disposition(row["id"], finding["id"], finding["version"], " 误报 ")
+    saved = result["findings"][0]
+    assert saved["status"] == "not_reproduced"
+    assert saved["version"] == finding["version"] + 1
+    assert saved["feedback"]["note"] == "误报"
+    assert saved["feedback"]["actor"] == "owner"
+    assert saved["feedback"]["previous_status"] == "waiting_reproduction"
+    assert saved["feedback"]["disposition"] is True
+    with execution.store.connection() as db:
+        repo_id = db.execute(
+            "SELECT repo_id FROM repository_analyses WHERE id=?", (row["id"],),
+        ).fetchone()["repo_id"]
+        snapshot = historical_snapshot(db, repo_id, "analysis_other", 9e12)
+    assert snapshot["total"] == 0 and snapshot["items"] == []
+
+
+def test_confirmed_finding_disposition_cancels_queued_repair(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    repairs = Repairs(execution)
+    analyses = Analyses(execution, Engine(), repairs)
+    asyncio.run(analyses.tick())
+    row = analyses.list(env["id"])[0]
+    finding = row["findings"][0]
+    analyses.feedback(row["id"], finding["id"], finding["version"], "confirmed", "", True)
+    with execution.store.connection() as db:
+        repair = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
+                            (finding["id"],)).fetchone()
+    assert repair and repair["status"] == "queued"
+    result = analyses.disposition(row["id"], finding["id"], finding["version"] + 1, "")
+    assert result["findings"][0]["status"] == "not_reproduced"
+    assert result["findings"][0]["feedback"]["previous_status"] == "confirmed"
+    with execution.store.connection() as db:
+        repair = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
+                            (finding["id"],)).fetchone()
+        events = db.execute("SELECT kind,value FROM repair_events WHERE repair_id=?",
+                            (repair["id"],)).fetchall()
+    assert repair["status"] == "cancelled"
+    assert [(item["kind"], item["value"]) for item in events] == [
+        ("queued", "confirmed_finding"), ("cancelled", "finding_disposition"),
+    ]
+
+
+def test_running_repair_blocks_disposition(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    repairs = Repairs(execution)
+    analyses = Analyses(execution, Engine(), repairs)
+    asyncio.run(analyses.tick())
+    row = analyses.list(env["id"])[0]
+    finding = row["findings"][0]
+    analyses.feedback(row["id"], finding["id"], finding["version"], "confirmed", "", True)
+    with execution.store.connection() as db:
+        db.execute("UPDATE repair_tasks SET status='running' WHERE finding_id=?", (finding["id"],))
+    with pytest.raises(Conflict, match="repair_running"):
+        analyses.disposition(row["id"], finding["id"], finding["version"] + 1, "")
+
+
+def test_disposition_rejects_stale_versions_and_closed_findings(service):  # noqa: F811
+    execution, analyses, _, row = analyzed(service)
+    finding = row["findings"][0]
+    with pytest.raises(Conflict, match="finding_changed"):
+        analyses.disposition(row["id"], finding["id"], finding["version"] + 5, "")
+    result = analyses.disposition(row["id"], finding["id"], finding["version"], "")
+    assert result["findings"][0]["status"] == "not_reproduced"
+    with pytest.raises(Conflict, match="finding_closed"):
+        analyses.disposition(row["id"], finding["id"], finding["version"] + 1, "")
+
+
+def test_live_status_is_joined_into_historical_review(service):  # noqa: F811
+    execution, analyses, _, row = analyzed(service)
+    finding = row["findings"][0]
+    analyses.disposition(row["id"], finding["id"], finding["version"], "确认误报")
+    snapshot_item = {
+        "finding_id": finding["id"], "version": finding["version"],
+        "human_status": "confirmed", "analysis_id": "analysis_older",
+        "revision": "a" * 40, "data": {"title": "Legacy claim"},
+        "content_clipped": False,
+    }
+    with execution.store.connection() as db:
+        db.execute("UPDATE repository_analyses SET report=?,context=? WHERE id=?", (
+            json.dumps({"summary": "Fixture.", "limitations": [], "findings": [],
+                        "files_read": [], "execution_read": True, "handoffs": []}),
+            json.dumps({"historical_findings": {
+                "total": 1, "included": 1, "omitted": 0, "items": [snapshot_item]}}),
+            row["id"],
+        ))
+    review = analyses.get(row["id"])["historical_review"]
+    assert review["items"][0]["human_status"] == "confirmed"
+    assert review["items"][0]["live_status"] == "not_reproduced"
+    assert review["items"][0]["live_version"] == finding["version"] + 1
+
+
+def test_disposition_api_requires_owner_csrf_and_rejects_forged_fields(tmp_path):
+    app = create_app(
+        Path(tmp_path) / "api.db", start_worker=False, github_client=Remote().client,
+        credential_vault=MemoryVault(), execution_runtime=Runtime(),
+        repository_source=Source(), analysis_engine=Engine(),
+    )
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        session = client.post("/api/setup", json={"password": "owner-test-password"}).json()
+        headers = {"x-csrf-token": session["csrf"]}
+        execution = app.state.execution
+        execution.github.connect("alice", TOKEN_A)
+        repo = execution.store.add_repository("alice/project", "https://github.com/alice/project")
+        env = prepare_tested((execution, repo, execution.runtime))
+        url = f"/api/environments/{env['id']}/analyses"
+        client.post(url, headers=headers, json={"version": env["version"]})
+        asyncio.run(app.state.analyses.tick())
+        row = client.get(url).json()[0]
+        finding = row["findings"][0]
+        disposition_url = f"/api/analyses/{row['id']}/findings/{finding['id']}/disposition"
+        assert client.post(disposition_url, json={"version": 1}).status_code == 403
+        forged = client.post(disposition_url, headers=headers, json={
+            "version": 1, "note": "secret-should-not-echo", "unexpected": True})
+        assert forged.status_code == 422 and "secret-should-not-echo" not in forged.text
+        assert client.post(disposition_url, headers=headers,
+                           json={"version": 999}).status_code == 409
+        accepted = client.post(disposition_url, headers=headers,
+                               json={"version": 1, "note": "误报"})
+        assert accepted.status_code == 200
+        assert accepted.json()["findings"][0]["status"] == "not_reproduced"
+        assert client.post(disposition_url, headers=headers,
+                           json={"version": 2}).status_code == 409

@@ -23,6 +23,7 @@ type HistoricalReview = {
     finding_id: string; version: number; human_status: string; analysis_id: string;
     revision: string; content_clipped: boolean; data: Finding['data'];
     result: { outcome: HistoricalOutcome; rationale: string; evidence: Finding['data']['evidence'] } | null;
+    live_status?: string | null; live_version?: number | null;
   }[];
 };
 const historicalOutcomes: Record<HistoricalOutcome, string> = {
@@ -77,6 +78,8 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_handoff_incomplete: 'Agent 未完成规定的阶段交接，报告未保存。请重试分析。',
   analysis_execution_read_not_followed: '模型返回的执行记录读取请求未通过校验，分析已提前停止。请查看必读请求检查记录后重试分析，无需重新安装。',
   analysis_source_read_not_followed: '模型返回的源码读取请求未通过校验，分析已提前停止。请查看必读请求检查记录后重试分析，无需重新安装。',
+  finding_closed: '该旧问题已记录处置结论，无需重复操作。',
+  repair_running: '该问题正在修复中，暂不能改判；请等修复结束或停止任务。',
   analysis_max_turns_exceeded: '分析已达到总调用轮数上限，尚未生成完整报告。',
   analysis_stage_budget_exceeded: '当前阶段已耗尽预算，尚未完成交接或报告。',
   analysis_handoff_not_followed: '已要求交接，但模型未返回有效的交接调用。请检查模型服务是否支持指定工具调用。',
@@ -259,6 +262,46 @@ function FindingItem({ analysis, finding, api, refresh }: {
   </article>;
 }
 
+function HistoricalItem({ item, api, refresh }: {
+  item: NonNullable<Analysis['historical_review']>['items'][number];
+  api: Api; refresh: () => Promise<void>;
+}) {
+  const [note, setNote] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const canDispose = item.live_status === 'waiting_reproduction' || item.live_status === 'confirmed';
+  const submit = () => {
+    setBusy(true); setError('');
+    void api(`/analyses/${item.analysis_id}/findings/${item.finding_id}/disposition`, {
+      version: item.live_version, note,
+    }).then(refresh).catch(e => setError(errorMessage(e.message))).finally(() => setBusy(false));
+  };
+  return <article className="analysis-finding">
+    <div className="section-heading"><h4>{item.data.title}</h4>
+      <span className="tag neutral">{item.result ? historicalOutcomes[item.result.outcome] : '本轮未覆盖'}</span></div>
+    <p className="diagnosis-meta">原版本 {item.revision.slice(0, 12)} · 原人工状态：{statuses[item.human_status] ?? item.human_status}
+      {' · '}记录 {item.finding_id} / v{item.version}</p>
+    {item.live_status && item.live_status !== item.human_status &&
+      <p className="diagnosis-meta">当前状态：{statuses[item.live_status] ?? item.live_status}</p>}
+    {item.content_clipped && <p className="diagnosis-meta">历史描述已截断，复核须考虑信息不完整。</p>}
+    <p>{item.result?.rationale ?? '本轮没有该旧问题的复核结论，不能据此认定已修复。'}</p>
+    {item.result?.evidence.map((evidence, index) => <details key={index}>
+      <summary>当前源码证据：{evidence.path}:{evidence.start_line}–{evidence.end_line}</summary>
+      <pre>{evidence.quote}</pre>
+    </details>)}
+    {canDispose && item.live_version !== null && item.live_version !== undefined && <div className="analysis-feedback">
+      <label>处置说明（选填）<textarea maxLength={2000} rows={3} value={note}
+        onChange={e => setNote(e.target.value)} disabled={busy} /></label>
+      <div className="execution-actions">
+        <button className="button secondary" disabled={busy} onClick={submit}>
+          <X size={15} />标记未能复现（含误报）
+        </button>
+      </div>
+    </div>}
+    {error && <p role="alert">{error}</p>}
+  </article>;
+}
+
 export function AnalysisPanel({ envId, version, api, pipelineActive = false }: {
   envId: string; version: number; api: Api; pipelineActive?: boolean;
 }) {
@@ -331,23 +374,13 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false }: {
       {analysis.historical_review && <section className="historical-review" aria-label="旧问题逐条复核">
         <h4>旧问题逐条复核</h4>
         <p className="diagnosis-meta">同仓库待复核 {analysis.historical_review.total} 项 · 本轮带入 {analysis.historical_review.included} 项。
-          这些是模型复核意见，不会更改原有人工确认，也不会自动修复或发布。</p>
+          这些是模型复核意见，不会自动更改人工确认，也不会自动修复或发布；你可以在条目下方标记处置结论。</p>
         {analysis.historical_review.omitted > 0 && <p role="status">
           另有 {analysis.historical_review.omitted} 项受本轮数量限制未带入，均未覆盖，不能认定已修复。
         </p>}
         {analysis.historical_review.total === 0 && <p>没有可带入的历史未解决问题。</p>}
-        {analysis.historical_review.items.map(item => <article className="analysis-finding" key={item.finding_id}>
-          <div className="section-heading"><h4>{item.data.title}</h4>
-            <span className="tag neutral">{item.result ? historicalOutcomes[item.result.outcome] : '本轮未覆盖'}</span></div>
-          <p className="diagnosis-meta">原版本 {item.revision.slice(0, 12)} · 原人工状态：{statuses[item.human_status] ?? item.human_status}
-            {' · '}记录 {item.finding_id} / v{item.version}</p>
-          {item.content_clipped && <p className="diagnosis-meta">历史描述已截断，复核须考虑信息不完整。</p>}
-          <p>{item.result?.rationale ?? '本轮没有该旧问题的复核结论，不能据此认定已修复。'}</p>
-          {item.result?.evidence.map((evidence, index) => <details key={index}>
-            <summary>当前源码证据：{evidence.path}:{evidence.start_line}–{evidence.end_line}</summary>
-            <pre>{evidence.quote}</pre>
-          </details>)}
-        </article>)}
+        {analysis.historical_review.items.map(item =>
+          <HistoricalItem key={item.finding_id} item={item} api={api} refresh={refresh} />)}
       </section>}
       {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
       {analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}
