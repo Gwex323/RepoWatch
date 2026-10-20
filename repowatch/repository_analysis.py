@@ -850,10 +850,12 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
     return report
 
 
-def execution_trigger(digest, job_ids, pipeline_id=None):
+def execution_trigger(digest, job_ids, pipeline_id=None, issue_id=None):
     payload = [digest, job_ids]
     if pipeline_id:
         payload.append(pipeline_id)
+    if issue_id:
+        payload.append(issue_id)
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
 
@@ -871,7 +873,7 @@ class Analyses:
                 (analysis_id, kind, agent[:1024 if kind == "failure" else 240], time.time()),
             )
 
-    def enqueue(self, env_id, version=None, *, pipeline_id=None, manual=False):
+    def enqueue(self, env_id, version=None, *, pipeline_id=None, manual=False, issue=None):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             env = self.execution.row(db, env_id)
@@ -928,7 +930,10 @@ class Analyses:
             if (not any(job["action"] in ("test", "start") for job in jobs)
                     or not (manual or pipeline_id or fresh_execution)):
                 raise Conflict("analysis_execution_required")
-            trigger = execution_trigger(digest, [job["id"] for job in jobs], pipeline_id)
+            issue_id = issue.get("id") if isinstance(issue, dict) else None
+            trigger = execution_trigger(
+                digest, [job["id"] for job in jobs], pipeline_id, issue_id
+            )
             old = db.execute(
                 "SELECT id FROM repository_analyses WHERE env_id=? AND trigger_key=?",
                 (env_id, trigger),
@@ -956,6 +961,10 @@ class Analyses:
             })
             if pipeline_id:
                 context["pipeline_id"] = pipeline_id
+            if issue is not None:
+                if not isinstance(issue, dict) or not issue.get("id"):
+                    raise Conflict("issue_context_invalid")
+                context["issue"] = redact_values(issue)
             db.execute(
                 "INSERT INTO repository_analyses(id,env_id,repo_id,revision,fingerprint,"
                 "trigger_key,status,context,created,updated) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -987,8 +996,11 @@ class Analyses:
                 continue
             seen.add(job["action"])
             latest.append(job["id"])
-        trigger = execution_trigger(row["fingerprint"], latest,
-                                    json.loads(row["context"] or "{}").get("pipeline_id"))
+        context = json.loads(row["context"] or "{}")
+        trigger = execution_trigger(
+            row["fingerprint"], latest, context.get("pipeline_id"),
+            context.get("issue", {}).get("id") if isinstance(context.get("issue"), dict) else None,
+        )
         return trigger == row["trigger_key"]
 
     def get(self, analysis_id):

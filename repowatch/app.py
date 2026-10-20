@@ -22,6 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .analysis_model import AnalysisModel
 from .execution import Execution
 from .github_accounts import GitHubAccounts, GitHubError
+from .github_issues import GitHubIssues
 from .memory import Memory
 from .repairs import Repairs
 from .repository_analysis import Analyses
@@ -85,6 +86,10 @@ class GitHubRepositoryBody(GitHubVersionBody):
     repo_id: str = Field(min_length=1, max_length=100)
 
 
+class IssueAnalysisBody(StrictBody):
+    env_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class DownloadBody(StrictBody):
     auto_run: bool = Field(default=True, strict=True)
 
@@ -141,6 +146,7 @@ def create_app(
     store = Store(db_path or Path(os.getenv("REPOWATCH_DB", str(ROOT / "data/repowatch.db"))))
     memory = Memory(store)
     github = GitHubAccounts(store, client=github_client, vault=credential_vault)
+    issues = GitHubIssues(store, github)
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
                           diagnoser=execution_diagnoser)
     analysis_model = AnalysisModel(store, github)
@@ -158,6 +164,7 @@ def create_app(
         diagnostics = asyncio.create_task(execution.diagnoses.run()) if start_worker else None
         analyst = asyncio.create_task(analyses.run()) if start_worker else None
         repair_worker = asyncio.create_task(repairs.run()) if start_worker else None
+        issue_worker = asyncio.create_task(issues.run()) if start_worker else None
         yield
         execution.closing.set()
         if analyst:
@@ -169,6 +176,10 @@ def create_app(
             await diagnostics
         if executor:
             await executor
+        if issue_worker:
+            issue_worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await issue_worker
         if worker:
             worker.cancel()
             with suppress(asyncio.CancelledError):
@@ -295,11 +306,11 @@ def create_app(
             "automatic_repair": repairs.settings(),
             "github_account_binding": True,
             "external_repository_execution": True,
-            "existing_issue_intake": False,
+            "existing_issue_intake": True,
             "reproduction_policy": {
                 "discovered": "human", "existing_issue": "automatic", "merge": "owner_only",
             },
-            "schedule": {"frequency": "daily", "enabled": False},
+            "schedule": {"frequency": "daily", "enabled": True},
             "tracing_export": False,
             "storage": "SQLite",
             "runtime": "Python",
@@ -372,6 +383,43 @@ def create_app(
     @app.post("/api/github/accounts/{account_id}/repository-access")
     def github_repository_access(account_id: int, body: GitHubRepositoryBody):
         return github.check_repository(account_id, body.version, body.repo_id)
+
+    @app.get("/api/repositories/{repo_id}/issues")
+    def repository_issues(repo_id: str):
+        return issues.list(repo_id)
+
+    @app.post("/api/repositories/{repo_id}/issues/sync", status_code=202)
+    def sync_repository_issues(repo_id: str):
+        return issues.sync(repo_id)
+
+    @app.post("/api/repositories/{repo_id}/issues/{issue_id}/analysis", status_code=202)
+    def analyze_repository_issue(
+        repo_id: str, issue_id: str, body: IssueAnalysisBody | None = None
+    ):
+        issue = issues.get(issue_id)
+        if issue["repo_id"] != repo_id:
+            raise Conflict("issue_repository_mismatch")
+        environments = [
+            item for item in execution.list(repo_id)
+            if item["state"] != "deleted" and item["revision"]
+        ]
+        if body and body.env_id:
+            environment = next(
+                (item for item in environments if item["id"] == body.env_id), None
+            )
+            if not environment:
+                raise Missing("Environment not found.")
+        else:
+            environment = environments[0] if environments else None
+        if not environment:
+            raise Conflict("environment_required")
+        context = {key: issue[key] for key in (
+            "id", "number", "title", "body", "state", "author", "url", "updated_at"
+        )}
+        analysis_id = analyses.enqueue(
+            environment["id"], environment["version"], manual=True, issue=context
+        )
+        return analyses.get(analysis_id)
 
     @app.get("/api/execution/readiness")
     def execution_readiness():

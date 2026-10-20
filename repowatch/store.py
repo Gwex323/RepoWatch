@@ -152,6 +152,9 @@ class Store:
             from .github_accounts import initialize as initialize_github
 
             initialize_github(db)
+            from .github_issues import initialize as initialize_issues
+
+            initialize_issues(db)
             db.commit()
             from .execution import initialize as initialize_execution
 

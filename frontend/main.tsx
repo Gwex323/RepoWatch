@@ -483,7 +483,7 @@ function App() {
                   <dl className="boundary-list"><div><dt>系统发现</dt><dd className="green-text"><LockKeyhole size={13} />人工复现</dd></div>
                     <div><dt>已有 Issue</dt><dd>自动验证</dd></div>
                     <div><dt>GitHub 发布</dt><dd>未启用</dd></div><div><dt>自动合并</dt><dd className="red-text">禁止</dd></div>
-                    <div><dt>外部模型调用</dt><dd>{system?.external_model_calls ? '已启用' : '关闭'}</dd></div><div><dt>每日调度</dt><dd>未启用</dd></div></dl>
+                    <div><dt>外部模型调用</dt><dd>{system?.external_model_calls ? '已启用' : '关闭'}</dd></div><div><dt>每日调度</dt><dd>已启用</dd></div></dl>
                 </section>
                 <section className="recent-section"><div className="section-heading"><h2><Activity size={18} />最近活动</h2></div>
                   <EventFeed events={data.events.slice(0, 5)} onSelect={selectRun} /></section>
