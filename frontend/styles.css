@@ -494,6 +494,14 @@ pre { margin: 0; }
 .execution-engine, .execution-facts, .execution-actions, .execution-access {
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 16px 0; }
 .execution-engine { color: #677587; font-size: 12px; }
+.issue-panel { border-top: 1px solid var(--line); padding: 24px 0; margin-top: 24px; min-width: 0; }
+.issue-list { border-top: 1px solid var(--line); }
+.issue-row { display: flex; align-items: center; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--line); }
+.issue-number { min-width: 44px; color: #738392; font-size: 11px; }
+.issue-copy { flex: 1; min-width: 0; }
+.issue-copy strong { display: block; font-size: 13px; line-height: 1.6; overflow-wrap: anywhere; }
+.issue-copy span { display: block; margin-top: 4px; color: #75828b; font-size: 11px; }
+.issue-actions { display: flex; align-items: center; gap: 8px; }
 .execution-facts { color: #677587; }
 .execution-facts > span { display: inline-flex; align-items: center; gap: 7px; }
 .execution-facts code, .execution-access code { overflow-wrap: anywhere; min-width: 0; font-size: 11px; }

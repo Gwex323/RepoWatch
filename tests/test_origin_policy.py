@@ -147,7 +147,7 @@ def test_forged_source_rejected_at_api_and_origin_is_immutable(store):
                              headers=headers, json={}).json()["run_id"]
         assert store.run(run_id)["source_kind"] == "existing_issue"
         config = client.get("/api/system").json()
-        assert not config["existing_issue_intake"] and not config["github_publication"]
+        assert config["existing_issue_intake"] and not config["github_publication"]
     discovered = store.start_run("repo_fixture")
     with pytest.raises(sqlite3.IntegrityError), store.connection() as db:
         db.execute("UPDATE runs SET source_kind='existing_issue' WHERE id=?", (discovered,))

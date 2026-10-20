@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Download, ExternalLink, FlaskConical, Lightbulb, Loader2, Play, RefreshCw, Save, Square, Terminal, Trash2 } from 'lucide-react';
+import { CircleDot, Download, ExternalLink, FlaskConical, Lightbulb, Loader2, Play, RefreshCw, Save, Square, Terminal, Trash2 } from 'lucide-react';
 import { AnalysisPanel, analysisErrorMessages } from './analysis';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
@@ -50,6 +50,10 @@ type Environment = {
 };
 type Readiness = {
   ready: boolean; reason: string; diagnosis_model?: { enabled: boolean; model: string | null };
+};
+type Issue = {
+  id: string; number: number; title: string; state: string; url: string | null;
+  updated_at: string | null;
 };
 const configLabels: Record<string, string> = {
   install_network: '安装时允许联网', install: '安装命令', test: '测试 / CLI 命令',
@@ -256,6 +260,70 @@ function Configuration({ env, api, onSaved }: { env: Environment; api: Api; onSa
   </form>;
 }
 
+function IssuesPanel({ repo, api, environment }: {
+  repo: { id: string; name: string }; api: Api; environment: Environment | null;
+}) {
+  const [issues, setIssues] = useState<Issue[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let active = true;
+    void api<Issue[]>(`/repositories/${repo.id}/issues`)
+      .then(data => { if (active) setIssues(data); })
+      .catch(e => { if (active) setError(errorText((e as Error).message)); });
+    return () => { active = false; };
+  }, [api, repo.id]);
+
+  const sync = async () => {
+    setBusy(true); setError('');
+    try {
+      setIssues(await api<Issue[]>(`/repositories/${repo.id}/issues/sync`, {}));
+    } catch (e) {
+      setError(errorText((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const analyze = async (issue: Issue) => {
+    setBusy(true); setError('');
+    try {
+      await api(`/repositories/${repo.id}/issues/${issue.id}/analysis`,
+        environment ? { env_id: environment.id } : {});
+    } catch (e) {
+      setError(errorText((e as Error).message));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return <section className="issue-panel" aria-label="GitHub Issues">
+    <div className="section-heading">
+      <h2><CircleDot size={18} />GitHub Issues</h2>
+      <button className="button secondary" disabled={busy} onClick={() => void sync()}>
+        <RefreshCw size={15} />同步
+      </button>
+    </div>
+    {error && <div className="error-inline" role="alert">{error}</div>}
+    {!issues.length ? <div className="empty"><CircleDot size={24} /><p>暂无 Issue</p></div> :
+      <div className="issue-list">{issues.map(issue =>
+        <div className="issue-row" key={issue.id}>
+          <span className="issue-number">#{issue.number}</span>
+          <div className="issue-copy">
+            <strong>{issue.title}</strong>
+            <span>{issue.state}</span>
+          </div>
+          <div className="issue-actions">
+            {issue.url && <a className="icon-button" title="打开 Issue" href={issue.url}
+              target="_blank" rel="noreferrer"><ExternalLink size={15} /></a>}
+            <button className="button secondary" disabled={busy || !environment?.revision}
+              onClick={() => void analyze(issue)}><Play size={15} />分析</button>
+          </div>
+        </div>)}</div>}
+  </section>;
+}
+
 export function ExecutionPanel({ repo, api }: { repo: { id: string; name: string }; api: Api }) {
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [selected, setSelected] = useState('');
@@ -332,6 +400,7 @@ export function ExecutionPanel({ repo, api }: { repo: { id: string; name: string
       {readiness && !readiness.ready && <span>{errorText(readiness.reason)}</span>}
       <span>模型诊断：{readiness?.diagnosis_model?.enabled ? readiness.diagnosis_model.model : '未配置'}</span>
     </div>
+    <IssuesPanel repo={repo} api={api} environment={env ?? null} />
     {error && <div className="error-inline" role="alert">{error}</div>}
     {!env ? <div className="empty"><Download size={28} /><p>尚未下载项目源码</p></div> : <>
       <label className="execution-version">环境版本<select value={selected} onChange={e => {
