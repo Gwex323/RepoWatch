@@ -555,6 +555,13 @@ def create_app(
     async def memory_history(repo_id: str, memory_id: str):
         return memory.history(repo_id, memory_id)
 
+    @app.get("/api/repositories/{repo_id}/memory-metrics")
+    async def memory_metrics(
+        repo_id: str,
+        revision: str = Query(default="", max_length=128),
+    ):
+        return memory.metrics(repo_id, revision=revision)
+
     @app.get("/api/runs/{run_id}/memories")
     async def memory_reads(run_id: str):
         return memory.reads(run_id)

@@ -11,6 +11,10 @@ type MemoryHistory = { version: number; action: string; record: MemoryRecord };
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Repo = { id: string; name: string };
 type Draft = { category: string; title: string; content: string; revision: string };
+type MemoryMetrics = {
+  with_memory: Record<string, number>;
+  without_memory: Record<string, number>;
+};
 const categories: Record<string, string> = {
   architecture: '项目结构', setup: '环境与启动', testing: '测试约定',
   bug: '已复现问题', fix: '样例修复经验', investigation: '未确认记录',
@@ -64,6 +68,7 @@ function RepositoryMemory({ repoId, revision, api, onRun }: {
   const [editing, setEditing] = useState<MemoryRecord | null>(null);
   const [history, setHistory] = useState<{ id: string; items: MemoryHistory[] } | null>(null);
   const [reload, setReload] = useState(0);
+  const [metrics, setMetrics] = useState<MemoryMetrics | null>(null);
   const base = `/repositories/${repoId}/memories`;
   useEffect(() => {
     let active = true;
@@ -77,6 +82,14 @@ function RepositoryMemory({ repoId, revision, api, onRun }: {
       .finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
   }, [base, query, category, revisionFilter, status, offset, api, reload]);
+  useEffect(() => {
+    let active = true;
+    setMetrics(null);
+    void api<MemoryMetrics>(`/repositories/${repoId}/memory-metrics?revision=${encodeURIComponent(revisionFilter)}`)
+      .then(result => { if (active) setMetrics(result); })
+      .catch(() => { if (active) setMetrics(null); });
+    return () => { active = false; };
+  }, [repoId, revisionFilter, api, reload]);
   const action = useCallback(async (fn: () => Promise<void>) => {
     setBusy(true); setError('');
     try { await fn(); } catch (e) { setError((e as Error).message); }
@@ -105,6 +118,12 @@ function RepositoryMemory({ repoId, revision, api, onRun }: {
       <label>筛选代码版本<input value={revisionFilter} maxLength={128}
         onChange={e => { setRevisionFilter(e.target.value); setOffset(0); }} /></label>
     </div>
+    {metrics && <div className="memory-metrics" aria-label="记忆效果指标">
+      <span>有记忆分析 {metrics.with_memory.analyses}</span>
+      <span>无记忆分析 {metrics.without_memory.analyses}</span>
+      <span>有记忆合并 {metrics.with_memory.merged_resolutions}</span>
+      <span>无记忆合并 {metrics.without_memory.merged_resolutions}</span>
+    </div>}
     {error && <div className="error-inline" role="alert">{error}</div>}
     {draft && <form className="memory-editor" onSubmit={e => {
       e.preventDefault();
