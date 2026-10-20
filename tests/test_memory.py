@@ -3,6 +3,8 @@ import json
 import sqlite3
 import subprocess
 import sys
+import time
+from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
@@ -103,6 +105,51 @@ def test_context_is_bounded_and_role_specific(store):
         row["category"] == "testing"
         for row in json.loads(memory.context(run_id, "repository_analyst"))
     )
+
+
+def test_rank_prefers_relevant_paths_and_issue_text():
+    relevant = SimpleNamespace(
+        id="relevant", category="fix", title="Fixture suspected behavior",
+        content="Reference for app.py", updated=time.time(),
+        evidence=json.dumps({"experience": {
+            "problem": {"title": "Fixture suspected behavior", "summary": "fixture"},
+            "change": {"summary": "Fix app.py", "paths": ["app.py"],
+                       "regression_paths": []},
+        }}),
+    )
+    unrelated = SimpleNamespace(
+        id="unrelated", category="fix", title="Unrelated", content="Other topic",
+        updated=time.time(), evidence="{}",
+    )
+    ranked = Memory.rank(
+        [unrelated, relevant],
+        {"files": {"app.py": "print('ok')"},
+         "issue": {"title": "Fixture suspected behavior", "body": "app.py"}},
+    )
+    assert [row.id for row in ranked] == ["relevant", "unrelated"]
+
+
+def test_aging_reports_candidates_without_archiving(store):
+    memory = Memory(store)
+    fresh = note(memory, title="Fresh")
+    old = note(memory, title="Old")
+    run_id = store.start_run("repo_fixture")
+    with store.connection() as db:
+        db.execute(
+            "UPDATE memories SET updated=? WHERE id=?",
+            (time.time() - 100 * 86400, old["id"]),
+        )
+        db.execute(
+            "INSERT INTO memory_reads VALUES (?,?,?,?,?)",
+            (run_id, "repository_analyst", old["id"], 1, time.time() - 100 * 86400),
+        )
+    result = memory.aging("repo_fixture", days=30)
+    items = {item["id"]: item for item in result["items"]}
+    assert items[old["id"]]["stale"] is True
+    assert items[old["id"]]["read_count"] == 1
+    assert items[old["id"]]["days_since_last_read"] >= 99
+    assert items[fresh["id"]]["stale"] is False
+    assert memory.list("repo_fixture", status="active")["total"] == 2
 
 
 def test_six_agents_receive_scoped_memory_without_new_authority(store, monkeypatch):
@@ -282,6 +329,12 @@ def test_memory_api_validation_auth_isolation_and_pagination(tmp_path):
         assert client.get(
             metrics + "?revision=abc", headers=headers
         ).json()["with_memory"]["analyses"] == 0
+        aging = client.get(
+            "/api/repositories/repo_fixture/memory-aging?days=1", headers=headers
+        ).json()
+        assert aging["threshold_days"] == 1
+        assert aging["items"][0]["title"] == "Tests"
+        assert "stale" in aging["items"][0]
 
 
 def test_upgrade_imports_existing_confirmed_results_once(store):

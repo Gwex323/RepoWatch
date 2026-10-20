@@ -1388,6 +1388,28 @@ def test_analysis_memory_is_repository_and_revision_scoped(service):  # noqa: F8
     assert [ref["title"] for ref in references] == ["Matching"]
 
 
+def test_analysis_memory_ranking_prefers_relevant_issue_text(service):  # noqa: F811
+    from repowatch.memory import Memory
+    execution, repo, _ = service
+    env = prepare_tested(service)
+    memory = Memory(execution.store)
+    memory.create(repo["id"], category="testing", title="Unrelated note",
+                  content="Other setup detail", revision=env["revision"])
+    memory.create(repo["id"], category="testing", title="Fixture suspected behavior",
+                  content="Scoped reference for this issue", revision=env["revision"])
+    analyses = Analyses(execution, Engine())
+    analyses.enqueue(
+        env["id"], env["version"], manual=True,
+        issue={"id": "issue_test", "number": 1, "title": "Fixture suspected behavior",
+               "body": "app.py", "state": "open", "author": "alice", "url": None,
+               "updated_at": None},
+    )
+    asyncio.run(analyses.tick())
+    references = analyses.list(env["id"])[0]["memory_references"]
+    assert references[0]["title"] == "Fixture suspected behavior"
+    assert "Unrelated note" in [item["title"] for item in references]
+
+
 def test_provider_key_encryption_validation_and_rotation(service):  # noqa: F811
     execution, _, _ = service
     settings = AnalysisModel(execution.store, execution.github)

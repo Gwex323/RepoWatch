@@ -557,6 +557,13 @@ pre { margin: 0; }
   padding: 18px 0; border-bottom: 1px solid var(--line);
   color: #677587; font-size: 12px; }
 .memory-metrics span { white-space: nowrap; }
+.memory-aging {
+  display: grid; gap: 8px; padding: 16px 0 20px;
+  border-bottom: 1px solid var(--line); color: #677587; font-size: 12px; }
+.memory-aging-row {
+  display: flex; align-items: center; gap: 12px; min-width: 0; }
+.memory-aging-row strong { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.memory-aging-row span { white-space: nowrap; }
 .memory-editor { padding: 24px 0; border-bottom: 1px solid var(--line); display: grid; gap: 16px; }
 .memory-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; }
 .memory-editor textarea { width: 100%; }
