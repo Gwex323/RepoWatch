@@ -53,6 +53,14 @@ within the same memory budget. A repository effect report compares attempted
 analyses with and without supplied memory, but remains observational; it does
 not assign causal impact.
 
+Repository analysis can enqueue a paired A/B evaluation for a completed task.
+The same immutable source snapshot runs once with no memories and once with the
+bounded repository/revision-scoped references. The stored summary reports
+finding fingerprints, paths, model calls, elapsed time and memory identifiers.
+It is observational evidence only: differences may reflect nondeterminism, and
+the comparison does not grant authority or change repair, publish, or merge
+decisions.
+
 Memory selection now applies a lightweight relevance rank before the existing
 role-category round robin and context budget. Signals are limited to exact
 source-path overlap, literal token overlap with the current issue text, and

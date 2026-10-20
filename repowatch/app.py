@@ -24,6 +24,7 @@ from .execution import Execution
 from .github_accounts import GitHubAccounts, GitHubError
 from .github_issues import GitHubIssues
 from .memory import Memory
+from .memory_evaluation import MemoryEvaluations
 from .repairs import Repairs
 from .repository_analysis import Analyses
 from .repository_source import ExecutionError
@@ -154,6 +155,7 @@ def create_app(
         execution, repair_engine or analysis_model, github, publisher=repair_publisher,
     )
     analyses = Analyses(execution, analysis_engine or analysis_model, repairs)
+    memory_evaluations = MemoryEvaluations(analyses, analysis_engine or analysis_model)
     repairs.analyses = analyses
     login_attempts: dict[str, deque] = defaultdict(deque)
 
@@ -163,12 +165,20 @@ def create_app(
         executor = asyncio.create_task(execution.run()) if start_worker else None
         diagnostics = asyncio.create_task(execution.diagnoses.run()) if start_worker else None
         analyst = asyncio.create_task(analyses.run()) if start_worker else None
+        evaluation_worker = asyncio.create_task(
+            memory_evaluations.run(),
+        ) if start_worker else None
         repair_worker = asyncio.create_task(repairs.run()) if start_worker else None
         issue_worker = asyncio.create_task(issues.run()) if start_worker else None
         yield
         execution.closing.set()
         if analyst:
             await analyst
+        if evaluation_worker:
+            memory_evaluations.closing.set()
+            evaluation_worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await evaluation_worker
         repairs.closing.set()
         if repair_worker:
             await repair_worker
@@ -190,6 +200,7 @@ def create_app(
     app.state.execution = execution
     app.state.analyses = analyses
     app.state.analysis_model = analysis_model
+    app.state.memory_evaluations = memory_evaluations
     app.state.repairs = repairs
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
@@ -478,6 +489,14 @@ def create_app(
     @app.post("/api/analyses/{analysis_id}/retry")
     def retry_analysis(analysis_id: str, body: GitHubVersionBody):
         return analyses.retry(analysis_id, body.version)
+
+    @app.post("/api/analyses/{analysis_id}/memory-evaluation", status_code=202)
+    def create_memory_evaluation(analysis_id: str):
+        return memory_evaluations.enqueue(analysis_id)
+
+    @app.get("/api/analyses/{analysis_id}/memory-evaluation")
+    def memory_evaluation(analysis_id: str):
+        return memory_evaluations.get_by_analysis(analysis_id)
 
     @app.post("/api/analyses/{analysis_id}/findings/{finding_id}/feedback")
     def finding_feedback(analysis_id: str, finding_id: str, body: FindingFeedbackBody):

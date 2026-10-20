@@ -165,6 +165,9 @@ class Store:
 
             initialize_analysis(db)
             initialize_model(db)
+            from .memory_evaluation import initialize as initialize_memory_evaluation
+
+            initialize_memory_evaluation(db)
             from .repairs import initialize as initialize_repair
 
             initialize_repair(db)
