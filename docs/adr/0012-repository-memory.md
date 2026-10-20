@@ -67,8 +67,8 @@ normalized failure code; an incomplete pair is labeled insufficient evidence.
 The evaluation rejects a comparison if model settings change between variants.
 Existing completed records remain readable after the additive SQLite migration.
 
-A fixed validation suite contains two known boundary defects and one clean
-control. `python -m repowatch.memory_validation` verifies source hashes, reads
+A fixed validation suite contains eight known defects and four clean controls.
+`python -m repowatch.memory_validation` verifies source hashes, reads
 the owner's configured model without copying its credential, and writes a new
 JSON result for each run. Gold labels are used only after analysis. Path and
 title fingerprints are screening signals, not semantic deduplication: findings

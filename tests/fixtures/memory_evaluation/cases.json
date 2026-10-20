@@ -5,36 +5,217 @@
       "id": "pagination",
       "repo_id": "fixture/pagination",
       "revision": "09b33234161db441bda39d5826f4fddbe18b4e28160ec046876510c4062349a3",
-      "files": {"pager.py": "pagination/pager.py"},
-      "file_sha256": {"pager.py": "4416729ea2497d13dcbdf6535054cb019a1aad78887cd6ab881d9a60af3f272f"},
+      "files": {
+        "pager.py": "pagination/pager.py"
+      },
+      "file_sha256": {
+        "pager.py": "4416729ea2497d13dcbdf6535054cb019a1aad78887cd6ab881d9a60af3f272f"
+      },
       "gold": {
         "known_defect": true,
         "description": "超出末页时应返回空列表，当前实现重复最后一页。",
-        "paths": ["pager.py"]
+        "paths": [
+          "pager.py"
+        ]
       }
     },
     {
       "id": "expiry",
       "repo_id": "fixture/expiry",
       "revision": "b2d44057503d20b2c04fa77092c7b7aa3eb90bf861e19803ce0e4b2fb856d4c0",
-      "files": {"clock.py": "expiry/clock.py"},
-      "file_sha256": {"clock.py": "fedbd42d27f58f70246e6123433fbb446f7749e90b05ac509b03780788a67f9b"},
+      "files": {
+        "clock.py": "expiry/clock.py"
+      },
+      "file_sha256": {
+        "clock.py": "fedbd42d27f58f70246e6123433fbb446f7749e90b05ac509b03780788a67f9b"
+      },
       "gold": {
         "known_defect": true,
         "description": "到达过期时刻即应过期，当前实现直到下一时刻才判为过期。",
-        "paths": ["clock.py"]
+        "paths": [
+          "clock.py"
+        ]
       }
     },
     {
       "id": "clamp",
       "repo_id": "fixture/clamp",
       "revision": "6fb9049676f34c5048e52b401a8d8c6b4af2edcf827ded70e50485aa3c3bd069",
-      "files": {"clamp.py": "clamp/clamp.py"},
-      "file_sha256": {"clamp.py": "70a9f9e2492ec9da898ef48529d1827a220e3c067dc8da898da6833a90ecabca"},
+      "files": {
+        "clamp.py": "clamp/clamp.py"
+      },
+      "file_sha256": {
+        "clamp.py": "70a9f9e2492ec9da898ef48529d1827a220e3c067dc8da898da6833a90ecabca"
+      },
       "gold": {
         "known_defect": false,
         "description": "当前实现符合包含端点的区间约定。",
         "paths": []
+      }
+    },
+    {
+      "id": "dedupe_first",
+      "repo_id": "fixture/dedupe_first",
+      "revision": "1ff58659d1a8a8f0ba7de359ecd79784118c9b26fef523f5099068e51a373102",
+      "files": {
+        "records.py": "dedupe_first/records.py"
+      },
+      "file_sha256": {
+        "records.py": "96b0befc7da95cce74ffdc7d6e1c44dbbc5ef72a13fb3aedd5524fb4f3b176df"
+      },
+      "gold": {
+        "known_defect": true,
+        "description": "重复 ID 应保留首次到达的记录；当前实现用后续记录覆盖它。",
+        "paths": [
+          "records.py"
+        ],
+        "contract_visibility": "memory"
+      }
+    },
+    {
+      "id": "dedupe_stable",
+      "repo_id": "fixture/dedupe_stable",
+      "revision": "5ce2bfa8a0224babdc537dcb5eda03bfb8db7876c35b2e89af87377bf9c486c4",
+      "files": {
+        "records.py": "dedupe_stable/records.py"
+      },
+      "file_sha256": {
+        "records.py": "15419e26736c5ecb181447f1975da0140d5967d62ce1233cd7820446cbc94775"
+      },
+      "gold": {
+        "known_defect": false,
+        "description": "重复 ID 保留首次记录，输出顺序与首次到达顺序一致。",
+        "paths": [],
+        "contract_visibility": "memory"
+      }
+    },
+    {
+      "id": "config_precedence",
+      "repo_id": "fixture/config_precedence",
+      "revision": "ec897b574e142dbbcfb6350e4548cd933f1ddc278d380676536db506356912a6",
+      "files": {
+        "settings.py": "config_precedence/settings.py"
+      },
+      "file_sha256": {
+        "settings.py": "6188ed803be57eddf0c10879049f165440b576261bdcc80e05ab280a519c1d92"
+      },
+      "gold": {
+        "known_defect": true,
+        "description": "显式请求设置应覆盖默认值；当前合并顺序让默认值覆盖了请求值。",
+        "paths": [
+          "settings.py"
+        ],
+        "contract_visibility": "memory"
+      }
+    },
+    {
+      "id": "config_control",
+      "repo_id": "fixture/config_control",
+      "revision": "d63c7628f99dd907962f195320e223218f747d6243334ba73e7cfd8965263640",
+      "files": {
+        "settings.py": "config_control/settings.py"
+      },
+      "file_sha256": {
+        "settings.py": "1b66253cb356b90c17f5ae3ea0d3376afca0b92a4e478e7c7d709819dba6c402"
+      },
+      "gold": {
+        "known_defect": false,
+        "description": "显式请求设置覆盖默认值，其他键继承默认值。",
+        "paths": [],
+        "contract_visibility": "memory"
+      }
+    },
+    {
+      "id": "scope_boundary",
+      "repo_id": "fixture/scope_boundary",
+      "revision": "779ff4b0120b172aee6e9604224f5c94f9f01ec6ad34191cdedbfd2d06349052",
+      "files": {
+        "scope.py": "scope_boundary/scope.py"
+      },
+      "file_sha256": {
+        "scope.py": "4e088f17c435e933567988d365dbec0153d5ab0854956014230b190f4f89b785"
+      },
+      "gold": {
+        "known_defect": true,
+        "description": "点分命名空间授权不能覆盖同名前缀的兄弟空间；当前前缀匹配越权。",
+        "paths": [
+          "scope.py"
+        ],
+        "contract_visibility": "source"
+      }
+    },
+    {
+      "id": "scope_control",
+      "repo_id": "fixture/scope_control",
+      "revision": "691dd71793394db6ecf50572b33cb3a22535b0cd070345159b10d6d9bca975b6",
+      "files": {
+        "scope.py": "scope_control/scope.py"
+      },
+      "file_sha256": {
+        "scope.py": "fb10f614fffd37916d2a0d557a9108d4adca0f7100eb8ee50a584feb17902219"
+      },
+      "gold": {
+        "known_defect": false,
+        "description": "授权仅覆盖本命名空间和点分子空间，不覆盖同名前缀的兄弟空间。",
+        "paths": [],
+        "contract_visibility": "source"
+      }
+    },
+    {
+      "id": "retry_budget",
+      "repo_id": "fixture/retry_budget",
+      "revision": "0fc8c66db909960fcbf7a3bb4abd65c1e501662f955b75e4ddec46b2572ddb20",
+      "files": {
+        "sender.py": "retry_budget/sender.py"
+      },
+      "file_sha256": {
+        "sender.py": "b1b2653187ebe77b33711bcd29acb1b82abd63fe4bb24a42ca16abcb45578d9f"
+      },
+      "gold": {
+        "known_defect": true,
+        "description": "预算是总调用次数；持续失败时当前循环会多调用一次。",
+        "paths": [
+          "sender.py"
+        ],
+        "contract_visibility": "source"
+      }
+    },
+    {
+      "id": "quota_rejection",
+      "repo_id": "fixture/quota_rejection",
+      "revision": "eccd916619df8fbf5d5630b8a2a2ca33378483228168fb5e2dd17a14b3d30daa",
+      "files": {
+        "quota.py": "quota_rejection/quota.py"
+      },
+      "file_sha256": {
+        "quota.py": "634b1c5238d5b50a78be55da0baafd717ba0889b78e128a6147cca7f642430a1"
+      },
+      "gold": {
+        "known_defect": true,
+        "description": "配额不足时应拒绝且保留原余额；当前返回被扣成负数的余额。",
+        "paths": [
+          "quota.py"
+        ],
+        "contract_visibility": "source"
+      }
+    },
+    {
+      "id": "version_numeric",
+      "repo_id": "fixture/version_numeric",
+      "revision": "6cdc9150b7d150a51e7a56060652905c603b95e4e833ab9b05df4f9766ae41c9",
+      "files": {
+        "versions.py": "version_numeric/versions.py"
+      },
+      "file_sha256": {
+        "versions.py": "91d8aa6584db616b32aa033c188479d17d428d39683062d9c3405ff1544af9af"
+      },
+      "gold": {
+        "known_defect": true,
+        "description": "点分版本各段应按数字比较；当前字符串比较把 1.10 判为旧于 1.9。",
+        "paths": [
+          "versions.py"
+        ],
+        "contract_visibility": "source"
       }
     }
   ],
@@ -62,6 +243,78 @@
       "category": "testing",
       "title": "区间边界约定",
       "content": "上下界属于有效区间；同时检查上下界顺序错误的处理。"
+    },
+    {
+      "id": "fixture-dedupe_first-guide",
+      "repo_id": "fixture/dedupe_first",
+      "revision": "1ff58659d1a8a8f0ba7de359ecd79784118c9b26fef523f5099068e51a373102",
+      "category": "testing",
+      "title": "审计去重约定",
+      "content": "导入批次中的重复 ID 通常是重试消息；审计记录以首次收到的内容为准，顺序保持原样。"
+    },
+    {
+      "id": "fixture-dedupe_stable-guide",
+      "repo_id": "fixture/dedupe_stable",
+      "revision": "5ce2bfa8a0224babdc537dcb5eda03bfb8db7876c35b2e89af87377bf9c486c4",
+      "category": "testing",
+      "title": "审计去重约定",
+      "content": "导入批次中的重复 ID 通常是重试消息；审计记录以首次收到的内容为准，顺序保持原样。"
+    },
+    {
+      "id": "fixture-config_precedence-guide",
+      "repo_id": "fixture/config_precedence",
+      "revision": "ec897b574e142dbbcfb6350e4548cd933f1ddc278d380676536db506356912a6",
+      "category": "testing",
+      "title": "配置优先级约定",
+      "content": "运营台明确填写的请求设置优先于系统默认值；未填写的键才继承默认值。"
+    },
+    {
+      "id": "fixture-config_control-guide",
+      "repo_id": "fixture/config_control",
+      "revision": "d63c7628f99dd907962f195320e223218f747d6243334ba73e7cfd8965263640",
+      "category": "testing",
+      "title": "配置优先级约定",
+      "content": "运营台明确填写的请求设置优先于系统默认值；未填写的键才继承默认值。"
+    },
+    {
+      "id": "fixture-scope_boundary-guide",
+      "repo_id": "fixture/scope_boundary",
+      "revision": "779ff4b0120b172aee6e9604224f5c94f9f01ec6ad34191cdedbfd2d06349052",
+      "category": "testing",
+      "title": "命名空间边界约定",
+      "content": "命名空间按点号分段；名称前缀相同的兄弟空间独立管理。"
+    },
+    {
+      "id": "fixture-scope_control-guide",
+      "repo_id": "fixture/scope_control",
+      "revision": "691dd71793394db6ecf50572b33cb3a22535b0cd070345159b10d6d9bca975b6",
+      "category": "testing",
+      "title": "命名空间边界约定",
+      "content": "命名空间按点号分段；名称前缀相同的兄弟空间独立管理。"
+    },
+    {
+      "id": "fixture-retry_budget-guide",
+      "repo_id": "fixture/retry_budget",
+      "revision": "0fc8c66db909960fcbf7a3bb4abd65c1e501662f955b75e4ddec46b2572ddb20",
+      "category": "testing",
+      "title": "上游调用预算约定",
+      "content": "预算字段记录总尝试次数，首次调用已计入额度；告警按实际调用次数统计。"
+    },
+    {
+      "id": "fixture-quota_rejection-guide",
+      "repo_id": "fixture/quota_rejection",
+      "revision": "eccd916619df8fbf5d5630b8a2a2ca33378483228168fb5e2dd17a14b3d30daa",
+      "category": "testing",
+      "title": "配额拒绝约定",
+      "content": "被拒绝的操作不改变剩余额度；配额日志与可用额度必须一致。"
+    },
+    {
+      "id": "fixture-version_numeric-guide",
+      "repo_id": "fixture/version_numeric",
+      "revision": "6cdc9150b7d150a51e7a56060652905c603b95e4e833ab9b05df4f9766ae41c9",
+      "category": "testing",
+      "title": "版本分段约定",
+      "content": "上线版本的点分组件是数字，组件值经常超过个位数。"
     }
   ]
 }

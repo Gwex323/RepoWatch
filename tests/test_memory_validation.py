@@ -24,7 +24,11 @@ class ValidationEngine:
             raise ValueError("analysis_evidence_unverified")
         path, source = next(iter(context["files"].items()))
         findings = []
-        if context["memories"] and context["repo_id"] != "fixture/clamp":
+        clean_repos = {
+            "fixture/clamp", "fixture/dedupe_stable", "fixture/config_control",
+            "fixture/scope_control",
+        }
+        if context["memories"] and context["repo_id"] not in clean_repos:
             findings.append({
                 "title": "Boundary behavior needs review", "severity": "P2",
                 "explanation": "The source may disagree with its documented boundary.",
@@ -44,7 +48,12 @@ class ValidationEngine:
 
 def test_fixed_cases_verify_hashes_and_filter_memory_scope(tmp_path):
     cases = load_cases(DEFAULT_CASES)
-    assert {case["id"] for case in cases} == {"pagination", "expiry", "clamp"}
+    assert {case["id"] for case in cases} == {
+        "pagination", "expiry", "clamp", "dedupe_first", "dedupe_stable",
+        "config_precedence", "config_control", "scope_boundary", "scope_control",
+        "retry_budget", "quota_rejection", "version_numeric",
+    }
+    assert sum(case["gold"]["known_defect"] for case in cases) == 8
     for case in cases:
         assert len(case["memories"]) == 1
         assert case["memories"][0]["id"].startswith(f"fixture-{case['id']}")
@@ -96,11 +105,12 @@ def test_fixed_suite_runs_known_and_clean_cases(tmp_path):
     path = asyncio.run(run_suite(DEFAULT_CASES, tmp_path, ValidationEngine()))
     saved = json.loads(path.read_text(encoding="utf-8"))
     cases = saved["cases"]
-    assert set(cases) == {"pagination", "expiry", "clamp"}
+    assert len(cases) == 12
+    assert {"pagination", "expiry", "clamp"} <= set(cases)
     assert cases["clamp"]["score"]["variants"]["memory"]["other_findings"] == []
     assert cases["expiry"]["summary"]["finding_counts"]["memory"] == 1
-    assert saved["summary"]["case_count"] == 3
-    assert saved["summary"]["pairs_completed"] == 3
+    assert saved["summary"]["case_count"] == 12
+    assert saved["summary"]["pairs_completed"] == 12
     assert saved["summary"]["clean_control_findings"] == {"baseline": 0, "memory": 0}
 
 
