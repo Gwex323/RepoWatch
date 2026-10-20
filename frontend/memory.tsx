@@ -15,6 +15,11 @@ type MemoryMetrics = {
   with_memory: Record<string, number>;
   without_memory: Record<string, number>;
 };
+type MemoryAging = {
+  id: string; title: string; category: string; revision: string;
+  read_count: number; days_since_updated: number;
+  days_since_last_read: number | null; stale: boolean;
+};
 const categories: Record<string, string> = {
   architecture: '项目结构', setup: '环境与启动', testing: '测试约定',
   bug: '已复现问题', fix: '样例修复经验', investigation: '未确认记录',
@@ -69,6 +74,7 @@ function RepositoryMemory({ repoId, revision, api, onRun }: {
   const [history, setHistory] = useState<{ id: string; items: MemoryHistory[] } | null>(null);
   const [reload, setReload] = useState(0);
   const [metrics, setMetrics] = useState<MemoryMetrics | null>(null);
+  const [aging, setAging] = useState<MemoryAging[]>([]);
   const base = `/repositories/${repoId}/memories`;
   useEffect(() => {
     let active = true;
@@ -88,6 +94,15 @@ function RepositoryMemory({ repoId, revision, api, onRun }: {
     void api<MemoryMetrics>(`/repositories/${repoId}/memory-metrics?revision=${encodeURIComponent(revisionFilter)}`)
       .then(result => { if (active) setMetrics(result); })
       .catch(() => { if (active) setMetrics(null); });
+    return () => { active = false; };
+  }, [repoId, revisionFilter, api, reload]);
+  useEffect(() => {
+    let active = true;
+    setAging([]);
+    const params = new URLSearchParams({ revision: revisionFilter, limit: '5' });
+    void api<{ items: MemoryAging[] }>(`/repositories/${repoId}/memory-aging?${params}`)
+      .then(result => { if (active) setAging(result.items); })
+      .catch(() => { if (active) setAging([]); });
     return () => { active = false; };
   }, [repoId, revisionFilter, api, reload]);
   const action = useCallback(async (fn: () => Promise<void>) => {
@@ -123,6 +138,13 @@ function RepositoryMemory({ repoId, revision, api, onRun }: {
       <span>无记忆分析 {metrics.without_memory.analyses}</span>
       <span>有记忆合并 {metrics.with_memory.merged_resolutions}</span>
       <span>无记忆合并 {metrics.without_memory.merged_resolutions}</span>
+    </div>}
+    {aging.length > 0 && <div className="memory-aging" aria-label="老化候选">
+      {aging.map(item => <div className="memory-aging-row" key={item.id}>
+        <strong>{item.title}</strong>
+        <span>{item.read_count} 次引用</span>
+        <span>{item.days_since_last_read === null ? '从未引用' : `${item.days_since_last_read} 天未引用`}</span>
+      </div>)}
     </div>}
     {error && <div className="error-inline" role="alert">{error}</div>}
     {draft && <form className="memory-editor" onSubmit={e => {

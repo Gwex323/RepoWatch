@@ -1,6 +1,7 @@
 """Repository-scoped reference data, never an authorization source."""
 
 import json
+import re
 import time
 from itertools import zip_longest
 
@@ -21,6 +22,23 @@ ROLE_CATEGORIES = {
 CONTEXT_LIMIT = 6000
 ENTRY_LIMIT = 6
 METRIC_VERSION = "structured_effect_v1"
+AGING_DEFAULT_DAYS = 90
+
+
+def _keywords(value):
+    """Extract bounded literal tokens, including Chinese bigrams."""
+    text = str(value or "").lower()
+    tokens = set(re.findall(r"[a-z0-9_./-]{2,}", text))
+    for sequence in re.findall(r"[\u4e00-\u9fff]+", text):
+        tokens.update(sequence[index:index + 2] for index in range(len(sequence) - 1))
+    return tokens
+
+
+def _row_data(row):
+    try:
+        return dict(row)
+    except TypeError:
+        return vars(row)
 
 
 def initialize(db):
@@ -384,6 +402,83 @@ class Memory:
                 )
             ]
 
+    @staticmethod
+    def read_stats(db, memory_ids):
+        if not memory_ids:
+            return {}
+        marks = ",".join("?" for _ in memory_ids)
+        rows = db.execute(
+            f"SELECT memory_id,count(DISTINCT run_id) AS read_count,max(created) AS last_read "
+            f"FROM memory_reads WHERE memory_id IN ({marks}) GROUP BY memory_id",
+            memory_ids,
+        ).fetchall()
+        return {
+            row["memory_id"]: {
+                "read_count": row["read_count"],
+                "last_read": row["last_read"],
+            } for row in rows
+        }
+
+    @staticmethod
+    def rank(rows, context=None, read_stats=None):
+        """Rank memories by bounded literal relevance, reads and recency."""
+        context = context if isinstance(context, dict) else {}
+        read_stats = read_stats or {}
+        source_paths = set(context.get("files", {}).keys())
+        source_names = {path.rsplit("/", 1)[-1] for path in source_paths}
+        issue = context.get("issue") if isinstance(context.get("issue"), dict) else {}
+        issue_text = " ".join(
+            str(issue.get(key, "")) for key in ("title", "body", "number")
+        )
+        issue_tokens = _keywords(issue_text)
+
+        def score(row):
+            data = _row_data(row)
+            value = 0.0
+            experience = compact_experience(row)
+            paths = set()
+            if experience:
+                change = experience.get("change", {})
+                paths.update(change.get("paths", []))
+                paths.update(change.get("regression_paths", []))
+            if paths & source_paths:
+                value += 4
+            elif any(path.rsplit("/", 1)[-1] in source_names for path in paths):
+                value += 2
+
+            memory_text = " ".join((data["title"], data["content"]))
+            if experience:
+                problem = experience.get("problem", {})
+                memory_text += " " + " ".join(
+                    (problem.get("title", ""), problem.get("summary", ""),
+                     experience.get("change", {}).get("summary", ""))
+                )
+            if issue_tokens & _keywords(memory_text):
+                value += 3
+
+            stats = read_stats.get(data["id"], {})
+            read_count = stats.get("read_count", 0)
+            last_read = stats.get("last_read")
+            value += min(read_count, 10) * 0.1
+            now = time.time()
+            if last_read:
+                age = (now - last_read) / 86400
+                if age <= 30:
+                    value += 1
+                elif age <= 90:
+                    value += 0.5
+            updated_age = (now - data["updated"]) / 86400
+            if updated_age <= 30:
+                value += 0.5
+            elif updated_age <= 90:
+                value += 0.25
+            return value
+
+        return sorted(rows, key=lambda row: (
+            score(row), _row_data(row)["updated"], _row_data(row)["id"],
+        ),
+                      reverse=True)
+
     def context(self, run_id, role):
         categories = ROLE_CATEGORIES[role]
         with self.store.connection() as db:
@@ -401,6 +496,9 @@ class Memory:
                 ).fetchall()
                 for category in categories
             ]
+            memory_ids = [row["id"] for group in candidates for row in group]
+            read_stats = self.read_stats(db, memory_ids)
+            candidates = [self.rank(group, None, read_stats) for group in candidates]
             # Round-robin prevents daily bug records from crowding out setup/test knowledge.
             for group in zip_longest(*candidates):
                 for row in group:
@@ -500,6 +598,47 @@ class Memory:
             "repo_id": repo_id, "revision": revision or None,
             "metric_version": METRIC_VERSION, **buckets,
         }
+
+    def aging(self, repo_id, *, revision="", days=AGING_DEFAULT_DAYS, limit=50):
+        """Return review candidates; this never archives or deletes memory."""
+        with self.store.connection() as db:
+            self.require_repo(db, repo_id)
+            clauses, params = ["m.repo_id=?", "m.status='active'"], [repo_id]
+            if revision:
+                clauses.append("m.revision=?")
+                params.append(revision)
+            rows = db.execute(
+                "SELECT m.*,COALESCE(r.read_count,0) AS read_count,r.last_read "
+                "FROM memories m LEFT JOIN (SELECT memory_id,count(DISTINCT run_id) "
+                "AS read_count,max(created) AS last_read FROM memory_reads "
+                "GROUP BY memory_id) r ON r.memory_id=m.id WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY r.last_read IS NULL DESC,COALESCE(r.last_read,m.updated) ASC,"
+                "m.updated ASC LIMIT ?",
+                (*params, max(1, min(limit, 100))),
+            ).fetchall()
+        now = time.time()
+        items = []
+        for row in rows:
+            last_read = row["last_read"]
+            days_since_updated = max(0, int((now - row["updated"]) / 86400))
+            days_since_last_read = (
+                max(0, int((now - last_read) / 86400)) if last_read else None
+            )
+            items.append({
+                "id": row["id"], "title": row["title"], "category": row["category"],
+                "revision": row["revision"], "source": row["source"],
+                "status": row["status"], "version": row["version"],
+                "updated": row["updated"], "last_read": last_read,
+                "read_count": row["read_count"],
+                "days_since_updated": days_since_updated,
+                "days_since_last_read": days_since_last_read,
+                "stale": (
+                    days_since_updated > days
+                    and (days_since_last_read is None or days_since_last_read > days)
+                ),
+            })
+        return {"items": items, "total": len(items), "threshold_days": days}
 
     def reads(self, run_id):
         self.store.run(run_id)

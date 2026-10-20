@@ -562,6 +562,15 @@ def create_app(
     ):
         return memory.metrics(repo_id, revision=revision)
 
+    @app.get("/api/repositories/{repo_id}/memory-aging")
+    async def memory_aging(
+        repo_id: str,
+        revision: str = Query(default="", max_length=128),
+        days: int = Query(default=90, ge=1, le=3650),
+        limit: int = Query(default=50, ge=1, le=100),
+    ):
+        return memory.aging(repo_id, revision=revision, days=days, limit=limit)
+
     @app.get("/api/runs/{run_id}/memories")
     async def memory_reads(run_id: str):
         return memory.reads(run_id)

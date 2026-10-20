@@ -53,6 +53,16 @@ within the same memory budget. A repository effect report compares attempted
 analyses with and without supplied memory, but remains observational; it does
 not assign causal impact.
 
+Memory selection now applies a lightweight relevance rank before the existing
+role-category round robin and context budget. Signals are limited to exact
+source-path overlap, literal token overlap with the current issue text, and
+bounded read/recency counts. The rank does not grant authority, infer meaning
+beyond these literal signals, or bypass repository/revision isolation.
+
+An aging report lists active memories that have not been read recently, with
+read counts, last-read time, and days since update. It is an owner review aid
+only; RepoWatch never archives, deletes, or rewrites a memory because of age.
+
 Human decision and memory creation share the confirmation/enqueue transaction.
 Fix memory and task completion share a transaction. Source-event keys prevent
 duplicates on retries; separate runs keep separate evidence records. This is
