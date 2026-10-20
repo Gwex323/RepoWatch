@@ -11,7 +11,7 @@ from test_repository_analysis import Engine, prepare_tested  # noqa: F401
 from repowatch.app import create_app
 from repowatch.github_accounts import GitHubError
 from repowatch.historical_review import historical_snapshot
-from repowatch.memory import capture_repair_fix
+from repowatch.memory import Memory, capture_repair_fix
 from repowatch.repairs import Repairs
 from repowatch.repository_analysis import Analyses
 from repowatch.store import Conflict
@@ -288,6 +288,12 @@ def test_resolved_with_merged_pr_uses_remote_evidence(service):  # noqa: F811
     assert evidence["pr"] == PR_URL and evidence["merged"] is True
     assert evidence["repair_id"] == repair_id
     assert evidence["finding_id"] == finding["id"]
+    experience = evidence["experience"]
+    assert experience["problem"]["title"]
+    assert experience["change"]["paths"] == ["app.py", "tests/test_regression.py"]
+    assert experience["verification"]["passed"] is True
+    assert experience["review"]["approved"] is True
+    assert experience["resolution"]["pr"] == PR_URL
 
 
 def test_merged_pr_fix_memory_is_deduplicated(service):  # noqa: F811
@@ -322,6 +328,17 @@ def test_fix_memory_loads_into_next_analysis_context(service):  # noqa: F811
     assert newer["id"] != row["id"]
     references = analyses.get(newer["id"])["memory_references"]
     assert any(item["title"].startswith("修复经验：") for item in references)
+    structured = next(item for item in references
+                      if item["title"].startswith("修复经验："))
+    assert structured["experience"]["change"]["paths"]
+    metrics = Memory(execution.store).metrics(
+        row["repo_id"], revision=row["revision"],
+    )
+    assert metrics["metric_version"] == "structured_effect_v1"
+    assert metrics["with_memory"]["analyses"] == 1
+    assert metrics["with_memory"]["memory_entries"] >= 1
+    assert metrics["without_memory"]["analyses"] == 1
+    assert metrics["without_memory"]["repairs"] == 1
 
 
 @pytest.mark.parametrize("merged,fail,code", [

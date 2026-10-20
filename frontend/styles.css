@@ -552,6 +552,11 @@ pre { margin: 0; }
 .memory-toolbar .segmented { margin: 0 auto 0 0; min-width: 190px; }
 .memory-filters { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 2fr);
   gap: 14px; padding-bottom: 22px; border-bottom: 1px solid var(--line); }
+.memory-metrics {
+  display: flex; align-items: center; flex-wrap: wrap; gap: 12px;
+  padding: 18px 0; border-bottom: 1px solid var(--line);
+  color: #677587; font-size: 12px; }
+.memory-metrics span { white-space: nowrap; }
 .memory-editor { padding: 24px 0; border-bottom: 1px solid var(--line); display: grid; gap: 16px; }
 .memory-form-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); gap: 16px; }
 .memory-editor textarea { width: 100%; }

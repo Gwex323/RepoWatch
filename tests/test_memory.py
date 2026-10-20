@@ -274,6 +274,14 @@ def test_memory_api_validation_auth_isolation_and_pagination(tmp_path):
         ).json()["version"] == 4
         assert client.get(base).json()["total"] == 1
         assert client.get(path + "/history").json()[0]["action"] == "restored"
+        metrics = "/api/repositories/repo_fixture/memory-metrics"
+        empty = client.get(metrics, headers=headers).json()
+        assert empty["metric_version"] == "structured_effect_v1"
+        assert empty["with_memory"]["analyses"] == 0
+        assert empty["without_memory"]["analyses"] == 0
+        assert client.get(
+            metrics + "?revision=abc", headers=headers
+        ).json()["with_memory"]["analyses"] == 0
 
 
 def test_upgrade_imports_existing_confirmed_results_once(store):

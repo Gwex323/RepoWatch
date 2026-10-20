@@ -26,7 +26,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .analysis_model import REQUEST_TIMEOUT_SECONDS, OutputTruncated
 from .diagnosis import evidence_matches, fingerprint, redact, redact_values
 from .historical_review import MAX_HISTORICAL_FINDINGS, historical_results, historical_snapshot
-from .memory import capture_repair_fix
+from .memory import capture_repair_fix, compact_experience
 from .store import Conflict, Missing, uid
 
 ROLES = ("repository_analyst", "problem_investigator",
@@ -1251,13 +1251,18 @@ class Analyses:
                 context.update(source_snapshot(self.execution.directory(row["env_id"]) / "source"))
                 with self.store.connection() as db:
                     memories = db.execute(
-                        "SELECT id,version,title,category,content FROM memories WHERE repo_id=? "
-                        "AND revision=? AND status='active' ORDER BY updated DESC LIMIT 6",
+                        "SELECT id,version,title,category,content,evidence FROM memories "
+                        "WHERE repo_id=? AND revision=? AND status='active' "
+                        "ORDER BY updated DESC LIMIT 6",
                         (row["repo_id"], row["revision"]),
                     ).fetchall()
-                context["memories"] = redact_values([
-                    {**dict(item), "content": item["content"][:800]} for item in memories
-                ])
+                context["memories"] = []
+                for item in memories:
+                    reference = {**dict(item), "content": item["content"][:800]}
+                    experience = compact_experience(item)
+                    if experience:
+                        reference["experience"] = experience
+                    context["memories"].append(redact_values(reference))
                 with self.store.connection() as db:
                     db.execute("UPDATE repository_analyses SET context=? WHERE id=?",
                                (json.dumps(context, ensure_ascii=False), row["id"]))

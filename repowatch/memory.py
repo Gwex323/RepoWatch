@@ -5,6 +5,7 @@ import time
 from itertools import zip_longest
 
 from . import fixture
+from .diagnosis import redact_values
 from .store import Conflict, Missing, reproduction_evidence, uid
 
 KNOWLEDGE_CATEGORIES = ("architecture", "setup", "testing")
@@ -19,6 +20,7 @@ ROLE_CATEGORIES = {
 }
 CONTEXT_LIMIT = 6000
 ENTRY_LIMIT = 6
+METRIC_VERSION = "structured_effect_v1"
 
 
 def initialize(db):
@@ -197,13 +199,38 @@ def capture_repair_fix(db, repair):
     paths = [str(edit.get("path", ""))[:240] for edit in patch.get("edits", [])[:10]
              if isinstance(edit, dict)]
     regression = [str(item)[:240] for item in patch.get("regression_paths", [])[:5]]
+    verification_codes = {
+        str(key)[:80]: value.get("exit_code") if isinstance(value, dict) else None
+        for key, value in list(verification.items())[:8] if isinstance(key, str)
+    }
+    experience = {
+        "problem": {
+            "title": str(data.get("title", ""))[:160],
+            "summary": str(data.get("explanation", ""))[:400],
+        },
+        "change": {
+            "summary": str(patch.get("summary", ""))[:600],
+            "paths": paths,
+            "regression_paths": regression,
+            "regression_command": str(patch.get("regression_command", ""))[:300],
+        },
+        "verification": {"passed": True, "checks": verification_codes},
+        "review": {
+            "approved": True,
+            "summary": str(review.get("summary", ""))[:400],
+            "risks": [str(item)[:240] for item in review.get("risks", [])[:3]],
+        },
+        "resolution": {"published": True, "merged": True, "pr": pr_url},
+    }
+    experience = redact_values(experience)
+    change = experience["change"]
     content = (
-        f"问题：{str(data.get('title', ''))[:160]}。{str(data.get('explanation', ''))[:400]}\n"
-        f"修改：{str(patch.get('summary', ''))[:600]}\n"
-        f"涉及文件：{'、'.join(paths)[:600]}\n"
-        f"回归测试：{'、'.join(regression)[:300]}\n"
+        f"问题：{experience['problem']['title']}。{experience['problem']['summary']}\n"
+        f"修改：{change['summary']}\n"
+        f"涉及文件：{'、'.join(change['paths'])[:600]}\n"
+        f"回归测试：{'、'.join(change['regression_paths'])[:300]}\n"
         "验证：原版本测试、新增回归测试与完整测试在隔离容器中通过。\n"
-        f"审查：{str(review.get('summary', ''))[:400]}\n"
+        f"审查：{experience['review']['summary']}\n"
         "状态：修复 PR 已由 owner 核验合并。本条为参考经验，不代表当前版本仍适用。"
     )
     insert(
@@ -216,13 +243,37 @@ def capture_repair_fix(db, repair):
             "analysis_id": repair["analysis_id"], "pr": pr_url,
             "merged": True, "published": True,
             "paths": paths, "regression_paths": regression,
-            "verification": {
-                str(key)[:80]: value.get("exit_code") if isinstance(value, dict) else None
-                for key, value in list(verification.items())[:8] if isinstance(key, str)
-            },
+            "verification": verification_codes,
+            "experience": experience,
             "review_risks": [str(item)[:240] for item in review.get("risks", [])[:3]],
         },
     )
+
+
+def compact_experience(row):
+    """Return bounded structured fields for model context, not raw evidence."""
+    try:
+        experience = json.loads(row["evidence"]).get("experience")
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(experience, dict):
+        return None
+    return redact_values({
+        "problem": {
+            "title": str(experience.get("problem", {}).get("title", ""))[:160],
+            "summary": str(experience.get("problem", {}).get("summary", ""))[:400],
+        },
+        "change": {
+            "summary": str(experience.get("change", {}).get("summary", ""))[:600],
+            "paths": experience.get("change", {}).get("paths", [])[:5],
+            "regression_paths": experience.get("change", {}).get("regression_paths", [])[:3],
+        },
+        "review": {"summary": str(experience.get("review", {}).get("summary", ""))[:400]},
+        "resolution": {
+            "merged": True,
+            "pr": str(experience.get("resolution", {}).get("pr", ""))[:500],
+        },
+    })
 
 
 class Memory:
@@ -360,6 +411,9 @@ class Memory:
                         "title": row["title"], "content": row["content"], "source": row["source"],
                         "source_run_id": row["source_run_id"], "revision": row["revision"],
                     }
+                    experience = compact_experience(row)
+                    if experience:
+                        item["experience"] = experience
                     encoded = json.dumps(item, ensure_ascii=False)
                     if len(selected) >= ENTRY_LIMIT or size + len(encoded) + 2 > CONTEXT_LIMIT:
                         continue
@@ -370,6 +424,82 @@ class Memory:
                         (run_id, role, row["id"], row["version"], time.time()),
                     )
         return json.dumps(selected, ensure_ascii=False)
+
+    def metrics(self, repo_id, *, revision=""):
+        """Return bounded outcome counts for memory-assisted and baseline runs."""
+        buckets = {
+            key: {name: 0 for name in (
+                "analyses", "completed_analyses", "failed_analyses", "memory_entries",
+                "findings", "confirmed_findings", "resolved_findings",
+                "merged_resolutions", "repairs", "published_repairs", "failed_repairs",
+            )} for key in ("with_memory", "without_memory")
+        }
+        with self.store.connection() as db:
+            self.require_repo(db, repo_id)
+            clauses, params = ["repo_id=?"], [repo_id]
+            if revision:
+                clauses.append("revision=?")
+                params.append(revision)
+            analyses = db.execute(
+                "SELECT * FROM repository_analyses WHERE "
+                + " AND ".join(clauses)
+                + " ORDER BY created DESC LIMIT 500",
+                params,
+            ).fetchall()
+            repairs = {
+                row["finding_id"]: row for row in db.execute(
+                    "SELECT * FROM repair_tasks WHERE repo_id=?", (repo_id,)
+                )
+            }
+            for analysis in analyses:
+                if analysis["status"] in ("queued", "waiting_model"):
+                    continue
+                try:
+                    context = json.loads(analysis["context"] or "{}")
+                except ValueError:
+                    context = {}
+                memories = context.get("memories") if isinstance(context, dict) else None
+                if not isinstance(memories, list):
+                    memories = None
+                bucket = "with_memory" if memories else "without_memory"
+                metrics = buckets[bucket]
+                metrics["analyses"] += 1
+                metrics["completed_analyses"] += int(analysis["status"] == "completed")
+                metrics["failed_analyses"] += int(
+                    analysis["status"] in ("failed", "interrupted")
+                )
+                if memories:
+                    metrics["memory_entries"] += len(memories)
+                findings = db.execute(
+                    "SELECT * FROM analysis_findings WHERE analysis_id=?",
+                    (analysis["id"],),
+                ).fetchall()
+                for finding in findings:
+                    try:
+                        feedback = json.loads(finding["feedback"] or "{}")
+                    except ValueError:
+                        feedback = {}
+                    if not isinstance(feedback, dict):
+                        feedback = {}
+                    metrics["findings"] += 1
+                    metrics["confirmed_findings"] += int(
+                        finding["status"] == "confirmed"
+                    )
+                    metrics["resolved_findings"] += int(finding["status"] == "resolved")
+                    metrics["merged_resolutions"] += int(
+                        feedback.get("resolution") == "merged_pr"
+                    )
+                    repair = repairs.get(finding["id"])
+                    if repair and repair["revision"] == analysis["revision"]:
+                        metrics["repairs"] += 1
+                        metrics["published_repairs"] += int(repair["status"] == "pr_created")
+                        metrics["failed_repairs"] += int(
+                            repair["status"] in ("failed", "interrupted")
+                        )
+        return {
+            "repo_id": repo_id, "revision": revision or None,
+            "metric_version": METRIC_VERSION, **buckets,
+        }
 
     def reads(self, run_id):
         self.store.run(run_id)
