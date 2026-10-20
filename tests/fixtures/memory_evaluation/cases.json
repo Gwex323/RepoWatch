@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "cases": [
+    {
+      "id": "pagination",
+      "repo_id": "fixture/pagination",
+      "revision": "09b33234161db441bda39d5826f4fddbe18b4e28160ec046876510c4062349a3",
+      "files": {"pager.py": "pagination/pager.py"},
+      "file_sha256": {"pager.py": "4416729ea2497d13dcbdf6535054cb019a1aad78887cd6ab881d9a60af3f272f"},
+      "gold": {
+        "known_defect": true,
+        "description": "超出末页时应返回空列表，当前实现重复最后一页。",
+        "paths": ["pager.py"]
+      }
+    },
+    {
+      "id": "expiry",
+      "repo_id": "fixture/expiry",
+      "revision": "b2d44057503d20b2c04fa77092c7b7aa3eb90bf861e19803ce0e4b2fb856d4c0",
+      "files": {"clock.py": "expiry/clock.py"},
+      "file_sha256": {"clock.py": "fedbd42d27f58f70246e6123433fbb446f7749e90b05ac509b03780788a67f9b"},
+      "gold": {
+        "known_defect": true,
+        "description": "到达过期时刻即应过期，当前实现直到下一时刻才判为过期。",
+        "paths": ["clock.py"]
+      }
+    },
+    {
+      "id": "clamp",
+      "repo_id": "fixture/clamp",
+      "revision": "6fb9049676f34c5048e52b401a8d8c6b4af2edcf827ded70e50485aa3c3bd069",
+      "files": {"clamp.py": "clamp/clamp.py"},
+      "file_sha256": {"clamp.py": "70a9f9e2492ec9da898ef48529d1827a220e3c067dc8da898da6833a90ecabca"},
+      "gold": {
+        "known_defect": false,
+        "description": "当前实现符合包含端点的区间约定。",
+        "paths": []
+      }
+    }
+  ],
+  "memories": [
+    {
+      "id": "fixture-pagination-guide",
+      "repo_id": "fixture/pagination",
+      "revision": "09b33234161db441bda39d5826f4fddbe18b4e28160ec046876510c4062349a3",
+      "category": "testing",
+      "title": "分页输入约定",
+      "content": "页码从 1 开始；维护时检查首页、末页及越界输入。"
+    },
+    {
+      "id": "fixture-expiry-guide",
+      "repo_id": "fixture/expiry",
+      "revision": "b2d44057503d20b2c04fa77092c7b7aa3eb90bf861e19803ce0e4b2fb856d4c0",
+      "category": "testing",
+      "title": "时间边界约定",
+      "content": "时间比较测试包括截止时刻之前、恰好截止和之后三个输入。"
+    },
+    {
+      "id": "fixture-clamp-guide",
+      "repo_id": "fixture/clamp",
+      "revision": "6fb9049676f34c5048e52b401a8d8c6b4af2edcf827ded70e50485aa3c3bd069",
+      "category": "testing",
+      "title": "区间边界约定",
+      "content": "上下界属于有效区间；同时检查上下界顺序错误的处理。"
+    }
+  ]
+}

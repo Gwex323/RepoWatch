@@ -1,4 +1,6 @@
 import asyncio
+import sqlite3
+import time
 from pathlib import Path
 
 import pytest
@@ -9,6 +11,7 @@ from test_repository_analysis import prepare_tested
 
 from repowatch.app import create_app
 from repowatch.memory import Memory
+from repowatch.memory_evaluation import initialize
 from repowatch.repository_analysis import ROLES
 from repowatch.store import Conflict
 
@@ -42,6 +45,16 @@ class EvaluationEngine:
             "files_read": ["app.py"], "execution_read": True,
             "read_ranges": {"app.py": [[1, 1]]},
         }
+
+
+class FailingEvaluationEngine(EvaluationEngine):
+    fail_memory = False
+
+    async def analyze(self, context, event):
+        if self.fail_memory and context.get("memories"):
+            event("model_call", "test-only")
+            raise ValueError("analysis_evidence_unverified")
+        return await super().analyze(context, event)
 
 
 def service(tmp_path, engine):
@@ -120,3 +133,78 @@ def test_memory_evaluation_requires_memory_and_owner(tmp_path):
         assert client.post(url).status_code == 403
         with pytest.raises(Conflict, match="memory_evaluation_memory_required"):
             app.state.memory_evaluations.enqueue(analysis["id"])
+
+
+def test_memory_evaluation_retains_baseline_when_memory_variant_fails(tmp_path):
+    engine = FailingEvaluationEngine()
+    app = service(tmp_path, engine)
+    with TestClient(app, base_url="http://127.0.0.1") as client:
+        session = client.post("/api/setup", json={"password": "owner-test-password"}).json()
+        headers = {"x-csrf-token": session["csrf"]}
+        execution, repo, env = prepared(app)
+        Memory(app.state.store).create(
+            repo["id"], category="testing", title="Relevant memory",
+            content="Review app.py.", revision=env["revision"],
+        )
+        analyses = app.state.analyses
+        analyses.enqueue(env["id"], env["version"], manual=True)
+        asyncio.run(analyses.tick())
+        analysis = analyses.list(env["id"])[0]
+        assert analysis["status"] == "completed"
+        engine.fail_memory = True
+        app.state.memory_evaluations.enqueue(analysis["id"])
+        asyncio.run(app.state.memory_evaluations.tick())
+        detail = client.get(
+            f"/api/analyses/{analysis['id']}/memory-evaluation", headers=headers
+        ).json()
+        assert detail["status"] == "failed"
+        assert detail["baseline"]["status"] == "completed"
+        assert detail["memory"]["status"] == "failed"
+        assert detail["memory_error"] == "analysis_evidence_unverified"
+        assert detail["memory"]["model_calls"] == 1
+        assert detail["summary"]["finding_counts"]["baseline"] == 0
+        assert detail["summary"]["conclusion"] == "insufficient_evidence"
+    reopened = service(tmp_path, engine)
+    persisted = reopened.state.memory_evaluations.get_by_analysis(analysis["id"])
+    assert persisted["baseline"] == detail["baseline"]
+    assert persisted["memory_error"] == "analysis_evidence_unverified"
+
+
+def test_memory_evaluation_recovers_interrupted_partial_result(tmp_path):
+    engine = EvaluationEngine()
+    app = service(tmp_path, engine)
+    execution, repo, env = prepared(app)
+    app.state.analyses.enqueue(env["id"], env["version"], manual=True)
+    asyncio.run(app.state.analyses.tick())
+    analysis = app.state.analyses.list(env["id"])[0]
+    with app.state.store.connection() as db:
+        db.execute(
+            "INSERT INTO memory_evaluations(id,analysis_id,repo_id,revision,status,"
+            "baseline,created,updated) VALUES(?,?,?,?,?,?,?,?)",
+            ("eval_test", analysis["id"], repo["id"], env["revision"], "running",
+             '{"status":"completed","report":{"findings":[]},"model_calls":1,'
+             '"elapsed_seconds":2,"memories":[]}', 0, time.time()),
+        )
+    reopened = service(tmp_path, engine)
+    assert reopened.state.memory_evaluations.get("eval_test")["status"] == "running"
+    with reopened.state.store.connection() as db:
+        db.execute("UPDATE memory_evaluations SET updated=0 WHERE id='eval_test'")
+    asyncio.run(reopened.state.memory_evaluations.tick())
+    row = reopened.state.memory_evaluations.get("eval_test")
+    assert row["status"] == "failed"
+    assert row["error"] == "memory_evaluation_interrupted"
+    assert row["baseline"]["model_calls"] == 1
+    assert row["summary"]["finding_counts"]["baseline"] == 0
+
+
+def test_memory_evaluation_adds_failure_columns_to_old_table(tmp_path):
+    path = tmp_path / "old.db"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE memory_evaluations (id TEXT PRIMARY KEY, analysis_id TEXT,"
+            "repo_id TEXT, revision TEXT, status TEXT, baseline TEXT, memory TEXT,"
+            "summary TEXT, error TEXT, version INTEGER, created REAL, updated REAL)"
+        )
+        initialize(db)
+        columns = {row[1] for row in db.execute("PRAGMA table_info(memory_evaluations)")}
+    assert {"baseline_error", "memory_error"} <= columns
