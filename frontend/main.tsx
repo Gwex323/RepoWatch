@@ -3,7 +3,7 @@ import { createRoot } from 'react-dom/client';
 import {
   Activity, ArrowLeft, ArrowRight, Bell, BookOpen, Check, CheckCircle2,
   ChevronRight, Circle, CircleHelp, Clock3, Code2, ExternalLink, FileCode2,
-  FolderGit2, GitBranch, GitPullRequest, LayoutDashboard, Loader2, LockKeyhole,
+  FolderGit2, GitBranch, GitPullRequest, History, LayoutDashboard, Loader2, LockKeyhole,
   LogOut, Menu, Play, Plus, RefreshCw, Search, Settings2, ShieldCheck,
   Terminal, Workflow, X, XCircle,
 } from 'lucide-react';
@@ -51,6 +51,10 @@ type ScheduleOverview = {
   repo_id: string; repository: string; kind: string; enabled: boolean;
   local_time: string; last_run_date: string; last_status: string; last_detail: string;
 };
+type ScheduleHistory = {
+  run_date: string; status: string; detail: string;
+  environment_id: string | null; pipeline_id: string | null; created: number;
+};
 const roles = [
   ['repository_analyst', '仓库分析', FolderGit2],
   ['problem_investigator', '问题发现', Search],
@@ -83,6 +87,22 @@ const scheduleDetail = (item: ScheduleOverview) => {
 };
 const scheduleStatusClass = (item: ScheduleOverview) =>
   item.last_status === 'failed' ? 'red' : item.enabled ? 'green' : 'neutral';
+const scheduleHistoryStatusClass = (status: string) =>
+  status === 'failed' ? 'red' : status === 'skipped_active' ? 'neutral' : 'green';
+const scheduleHistoryDetail = (item: ScheduleHistory) => {
+  if (item.status === 'failed') {
+    const details: Record<string, string> = {
+      github_active_account_required: '需要激活 GitHub 账号',
+      schedule_execution_failed: '巡检执行失败',
+    };
+    return details[item.detail] ?? item.detail;
+  }
+  if (item.status === 'skipped_active') return '已有活动任务，跳过本次调度';
+  if (item.status === 'scheduled') {
+    return item.environment_id ? `已创建运行环境 ${item.environment_id}` : '已创建运行环境';
+  }
+  return item.detail || '调度已完成';
+};
 const time = (value: number) => new Date(value * 1000).toLocaleString('zh-CN', {
   month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
   timeZone: 'Asia/Shanghai',
@@ -319,6 +339,10 @@ function App() {
   const [system, setSystem] = useState<System | null>(null);
   const [analysisNotices, setAnalysisNotices] = useState<AnalysisNotice[]>([]);
   const [scheduleOverview, setScheduleOverview] = useState<ScheduleOverview[]>([]);
+  const [scheduleHistories, setScheduleHistories] = useState<Record<string, ScheduleHistory[]>>({});
+  const [scheduleHistoryErrors, setScheduleHistoryErrors] = useState<Record<string, string>>({});
+  const [scheduleHistoryLoading, setScheduleHistoryLoading] = useState<string | null>(null);
+  const [openScheduleHistory, setOpenScheduleHistory] = useState<string | null>(null);
   const [view, setView] = useState<View>('overview');
   const [executionRepo, setExecutionRepo] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -356,6 +380,25 @@ function App() {
     setBusy(true); setError('');
     try { await fn(); await refresh(); } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
+  };
+  const toggleScheduleHistory = (repoId: string) => {
+    if (openScheduleHistory === repoId) {
+      setOpenScheduleHistory(null);
+      return;
+    }
+    setOpenScheduleHistory(repoId);
+    setScheduleHistoryLoading(repoId);
+    void api<ScheduleHistory[]>(`/repositories/${repoId}/schedule/history?limit=10`)
+      .then(history => {
+        setScheduleHistories(current => ({ ...current, [repoId]: history }));
+        setScheduleHistoryErrors(current => ({ ...current, [repoId]: '' }));
+      })
+      .catch(e => {
+        const message = (e as Error).message;
+        setScheduleHistoryErrors(current => ({ ...current, [repoId]: message }));
+        setError(message);
+      })
+      .finally(() => setScheduleHistoryLoading(current => current === repoId ? null : current));
   };
   const selectRun = (id: string) => { setDetail(null); setSelected(id); setView('findings'); setMenuOpen(false); };
   const start = (repoId = 'repo_fixture') => action(async () => {
@@ -531,17 +574,47 @@ function App() {
               </div>
               {scheduleOverview.filter(item =>
                 item.repository.toLowerCase().includes(query.toLowerCase())).map(item => (
-                <div className="schedule-grid schedule-grid-row" key={item.repo_id}>
-                  <div><strong>{item.repository}</strong>
-                    <span>{item.kind === 'github' ? 'GitHub' : '本地样例'}</span></div>
-                  <div><Clock3 size={14} />{item.local_time}
-                    <span className={`tag ${scheduleStatusClass(item)}`}>
-                      {scheduleStatuses[item.last_status] ?? item.last_status}
-                    </span></div>
-                  <div><strong>{item.last_run_date || '尚未调度'}</strong>
-                    <span>{scheduleDetail(item)}</span></div>
-                  <button className="icon-button" title="管理巡检" disabled={item.kind !== 'github'}
-                    onClick={() => setExecutionRepo(item.repo_id)}><ChevronRight size={16} /></button>
+                <div className="schedule-item" key={item.repo_id}>
+                  <div className="schedule-grid schedule-grid-row">
+                    <div><strong>{item.repository}</strong>
+                      <span>{item.kind === 'github' ? 'GitHub' : '本地样例'}</span></div>
+                    <div><Clock3 size={14} />{item.local_time}
+                      <span className={`tag ${scheduleStatusClass(item)}`}>
+                        {scheduleStatuses[item.last_status] ?? item.last_status}
+                      </span></div>
+                    <div><strong>{item.last_run_date || '尚未调度'}</strong>
+                      <span>{scheduleDetail(item)}</span></div>
+                    <div className="schedule-row-actions">
+                      <button className="icon-button" title="查看巡检历史"
+                        disabled={item.kind !== 'github'}
+                        onClick={() => toggleScheduleHistory(item.repo_id)}>
+                        <History size={16} /></button>
+                      <button className="icon-button" title="管理巡检" disabled={item.kind !== 'github'}
+                        onClick={() => setExecutionRepo(item.repo_id)}><ChevronRight size={16} /></button>
+                    </div>
+                  </div>
+                  {openScheduleHistory === item.repo_id && (
+                    scheduleHistoryLoading === item.repo_id ? (
+                      <div className="schedule-history-empty">正在载入巡检历史</div>
+                    ) : scheduleHistoryErrors[item.repo_id] ? (
+                      <div className="schedule-history-empty">{scheduleHistoryErrors[item.repo_id]}</div>
+                    ) : scheduleHistories[item.repo_id]?.length ? (
+                      <div className="schedule-history">
+                        {scheduleHistories[item.repo_id].map(history => (
+                          <div className="schedule-history-row"
+                            key={`${history.run_date}-${history.created}`}>
+                            <span className={`tag ${scheduleHistoryStatusClass(history.status)}`}>
+                              {scheduleStatuses[history.status] ?? history.status}
+                            </span>
+                            <div><strong>{history.run_date}</strong>
+                              <span>{time(history.created)}</span></div>
+                            <div><span>{scheduleHistoryDetail(history)}</span>
+                              {history.pipeline_id && <code>流水线 {history.pipeline_id}</code>}</div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : <div className="schedule-history-empty">暂无巡检历史</div>
+                  )}
                 </div>
               ))}
             </section>

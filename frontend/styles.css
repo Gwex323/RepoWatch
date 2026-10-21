@@ -498,15 +498,28 @@ pre { margin: 0; }
 .issue-panel { border-top: 1px solid var(--line); padding: 24px 0; margin-top: 24px; min-width: 0; }
 .schedule-panel { border-top: 1px solid var(--line); padding: 24px 0; margin-top: 24px; min-width: 0; }
 .schedule-overview { min-width: 0; margin-bottom: 30px; }
-.schedule-grid { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(150px, 1fr) minmax(180px, 1.5fr) 40px; gap: 14px; align-items: center; }
+.schedule-grid { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(150px, 1fr) minmax(180px, 1.5fr) 82px; gap: 14px; align-items: center; }
 .schedule-grid-header { color: #738392; font-size: 11px; padding: 12px 0 8px; border-bottom: 1px solid var(--line); }
-.schedule-grid-row { padding: 15px 0; border-bottom: 1px solid var(--line); }
+.schedule-item { border-bottom: 1px solid var(--line); }
+.schedule-grid-row { padding: 15px 0; }
 .schedule-grid-row > div { min-width: 0; }
 .schedule-grid-row strong, .schedule-grid-row span { display: block; overflow-wrap: anywhere; }
 .schedule-grid-row > div:nth-child(2) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .schedule-grid-row > div:nth-child(2) span { display: inline; }
 .schedule-grid-row small { color: #75828b; font-size: 11px; line-height: 1.7; margin-top: 4px; }
 .schedule-grid-row .icon-button { width: 34px; height: 34px; flex-shrink: 0; }
+.schedule-row-actions { display: flex; justify-content: flex-end; gap: 7px; }
+.schedule-history { display: grid; gap: 2px; padding: 10px 12px 12px; margin: 0 0 15px;
+  background: #f6f8f7; border-radius: 5px; }
+.schedule-history-row { display: grid; grid-template-columns: 88px minmax(90px, 1fr) minmax(0, 2fr);
+  gap: 12px; align-items: center; padding: 8px 0; border-bottom: 1px solid #e4eae6; }
+.schedule-history-row:last-child { border-bottom: 0; }
+.schedule-history-row > div { min-width: 0; }
+.schedule-history-row strong, .schedule-history-row span, .schedule-history-row code {
+  display: block; overflow-wrap: anywhere; line-height: 1.7; }
+.schedule-history-row span, .schedule-history-row code { color: #75828b; font-size: 11px; }
+.schedule-history-row code { margin-top: 3px; }
+.schedule-history-empty { padding: 0 0 15px; color: #75828b; font-size: 12px; }
 .issue-list { border-top: 1px solid var(--line); }
 .issue-row { display: flex; align-items: center; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--line); }
 .issue-number { min-width: 44px; color: #738392; font-size: 11px; }
@@ -553,6 +566,8 @@ pre { margin: 0; }
   .schedule-grid, .schedule-grid-header, .schedule-grid-row { grid-template-columns: minmax(0, 1fr); }
   .schedule-grid-header { display: none; }
   .schedule-grid-row .icon-button { justify-self: end; }
+  .schedule-row-actions { justify-content: flex-start; }
+  .schedule-history-row { grid-template-columns: minmax(0, 1fr); }
   .repository-row.large { flex-wrap: wrap; }
   .repository-row.large > div { flex-basis: calc(100% - 70px); min-width: 0; }
   .repository-row.large > div > span { overflow-wrap: anywhere; }

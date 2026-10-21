@@ -29,6 +29,12 @@ outcome, stable failure code, and skip reason can be compared without opening
 each repository individually. Repositories without a schedule row are shown as
 paused rather than omitted.
 
+Every claimed daily run is also persisted in `repository_schedule_history`.
+The table is unique by repository and local run date and records the final
+`scheduled`, `failed`, or `skipped_active` outcome, its stable detail, and the
+associated environment or active pipeline ID. The owner can query this history
+through a repository-scoped read-only API and expand it in the repository page.
+
 Scheduled runs remain subject to the existing repository-access,
 publication-evidence, and owner-approval requirements.
 
@@ -40,6 +46,7 @@ for those reminders.
 
 - Scheduling is durable in SQLite and survives service restarts.
 - A repository remains independently pausable.
+- Daily-check outcomes remain auditable after the latest status changes.
 - The first version uses the host local timezone; it does not implement cron
   expressions or cross-host coordination.
 
@@ -47,4 +54,4 @@ for those reminders.
 
 - Should unchanged repositories skip a full re-analysis after a successful run?
 - Should failed daily checks retry later on the same day?
-- Should the UI expose historical daily-check outcomes beyond the latest record?
+- How long should daily-check history be retained before archival or cleanup?

@@ -60,7 +60,8 @@ test('mobile: negative result, repository registration and no overflow', async (
   await page.getByRole('button', { name: '添加仓库', exact: true }).click();
   await page.getByLabel('GitHub 仓库链接').fill('https://github.com/openai/openai-agents-python');
   await page.getByRole('dialog').getByRole('button', { name: '添加仓库', exact: true }).click();
-  await expect(page.getByText('openai/openai-agents-python', { exact: true })).toBeVisible();
+  await expect(page.locator('.repository-row')
+    .filter({ hasText: 'openai/openai-agents-python' })).toBeVisible();
   await expect(page.locator('.repository-row').filter({ hasText: 'openai/openai-agents-python' })
     .getByRole('button', { name: '管理运行环境' })).toBeEnabled();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);

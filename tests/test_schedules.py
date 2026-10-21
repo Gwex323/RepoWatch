@@ -78,6 +78,13 @@ def test_schedule_triggers_once_per_day(schedule_service):
     detail = schedules.get(repo["id"])
     assert detail["last_status"] == "scheduled"
     assert detail["last_run_date"]
+    history = schedules.history(repo["id"])
+    assert len(history) == 1
+    assert history[0]["run_date"] == detail["last_run_date"]
+    assert history[0]["status"] == "scheduled"
+    assert history[0]["detail"] == ""
+    assert history[0]["environment_id"] == "environment_test"
+    assert history[0]["pipeline_id"] is None
 
 
 def test_schedule_skips_active_pipeline(schedule_service):
@@ -93,6 +100,11 @@ def test_schedule_skips_active_pipeline(schedule_service):
     assert result == {"status": "skipped_active", "pipeline_id": "pipeline_test"}
     assert execution.created == []
     assert schedules.get(repo["id"])["last_status"] == "skipped_active"
+    history = schedules.history(repo["id"])
+    assert history[0]["status"] == "skipped_active"
+    assert history[0]["detail"] == ""
+    assert history[0]["pipeline_id"] == "pipeline_test"
+    assert history[0]["environment_id"] is None
 
 
 def test_schedule_records_failure(schedule_service):
@@ -108,6 +120,33 @@ def test_schedule_records_failure(schedule_service):
     detail = schedules.get(repo["id"])
     assert detail["last_status"] == "failed"
     assert detail["last_detail"] == "github_active_account_required"
+    history = schedules.history(repo["id"])
+    assert history[0]["status"] == "failed"
+    assert history[0]["detail"] == "github_active_account_required"
+
+
+def test_schedule_history_returns_newest_first(schedule_service):
+    store, repo, _, schedules = schedule_service
+    with store.connection() as db:
+        db.execute(
+            "INSERT INTO repository_schedule_history"
+            "(repo_id,run_date,status,detail,environment_id,pipeline_id,created) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (repo["id"], "2000-01-01", "failed", "old_failure", "", "", 1),
+        )
+    initial = schedules.get(repo["id"])
+    schedules.configure(
+        repo["id"], enabled=True, local_time="00:00", version=initial["version"]
+    )
+    schedules.trigger(repo["id"])
+
+    history = schedules.history(repo["id"], limit=10)
+
+    assert [item["run_date"] for item in history] == [
+        schedules.get(repo["id"])["last_run_date"], "2000-01-01",
+    ]
+    assert history[0]["status"] == "scheduled"
+    assert history[1]["status"] == "failed"
 
 
 def test_schedule_summary_counts_enabled_repositories(schedule_service):
@@ -167,6 +206,8 @@ def test_schedule_api_requires_owner_and_csrf(tmp_path):
     app = create_app(store.path, start_worker=False)
     with TestClient(app, base_url="http://127.0.0.1") as client:
         assert client.get("/api/schedules").status_code == 401
+        history_url = f"/api/repositories/{repo['id']}/schedule/history"
+        assert client.get(history_url).status_code == 401
         session = client.post(
             "/api/setup", json={"password": "owner-test-password"}
         ).json()
@@ -175,6 +216,8 @@ def test_schedule_api_requires_owner_and_csrf(tmp_path):
 
         assert client.get("/api/schedules").status_code == 200
         assert client.get(url).status_code == 200
+        assert client.get(history_url).status_code == 200
+        assert client.get(history_url).json() == []
         assert client.post(url).status_code == 403
         response = client.post(
             url,
