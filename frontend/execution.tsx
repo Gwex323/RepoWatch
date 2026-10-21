@@ -260,11 +260,14 @@ function Configuration({ env, api, onSaved }: { env: Environment; api: Api; onSa
   </form>;
 }
 
-function IssuesPanel({ repo, api, environment }: {
+function IssuesPanel({ repo, api, environment, onAnalysisSubmitted }: {
   repo: { id: string; name: string }; api: Api; environment: Environment | null;
+  onAnalysisSubmitted: (analysisId: string) => void;
 }) {
   const [issues, setIssues] = useState<Issue[]>([]);
   const [busy, setBusy] = useState(false);
+  const [submittingIssue, setSubmittingIssue] = useState('');
+  const [submitted, setSubmitted] = useState<Record<string, { id: string; status: string }>>({});
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -287,14 +290,17 @@ function IssuesPanel({ repo, api, environment }: {
   };
 
   const analyze = async (issue: Issue) => {
-    setBusy(true); setError('');
+    setBusy(true); setSubmittingIssue(issue.id); setError('');
     try {
-      await api(`/repositories/${repo.id}/issues/${issue.id}/analysis`,
+      const result = await api<{ id: string; status: string }>(
+        `/repositories/${repo.id}/issues/${issue.id}/analysis`,
         environment ? { env_id: environment.id } : {});
+      setSubmitted(current => ({ ...current, [issue.id]: result }));
+      onAnalysisSubmitted(result.id);
     } catch (e) {
       setError(errorText((e as Error).message));
     } finally {
-      setBusy(false);
+      setBusy(false); setSubmittingIssue('');
     }
   };
 
@@ -318,8 +324,20 @@ function IssuesPanel({ repo, api, environment }: {
             {issue.url && <a className="icon-button" title="打开 Issue" href={issue.url}
               target="_blank" rel="noreferrer"><ExternalLink size={15} /></a>}
             <button className="button secondary" disabled={busy || !environment?.revision}
-              onClick={() => void analyze(issue)}><Play size={15} />分析</button>
+              onClick={() => void analyze(issue)}>
+              {submittingIssue === issue.id ? <Loader2 size={15} className="spin" /> : <Play size={15} />}
+              {submittingIssue === issue.id ? '提交中' : '分析'}
+            </button>
           </div>
+          {submitted[issue.id] && <p className="diagnosis-meta" role="status">
+            {({ queued: '已排队', running: '分析中', waiting_model: '等待模型配置',
+              completed: '分析已完成', failed: '分析未完成', interrupted: '分析已中断',
+              superseded: '已被新分析替代' } as Record<string, string>)[submitted[issue.id].status]
+              ?? '分析请求已提交'}。
+            <button className="text-link" onClick={() => {
+              document.getElementById('repository-analysis')?.scrollIntoView({ behavior: 'smooth' });
+            }}>查看分析进度与结果</button>
+          </p>}
         </div>)}</div>}
   </section>;
 }
@@ -329,6 +347,7 @@ export function ExecutionPanel({ repo, api }: { repo: { id: string; name: string
   const [selected, setSelected] = useState('');
   const selectedRef = useRef('');
   const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [issueAnalysisId, setIssueAnalysisId] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [autoRun, setAutoRun] = useState(true);
@@ -400,7 +419,8 @@ export function ExecutionPanel({ repo, api }: { repo: { id: string; name: string
       {readiness && !readiness.ready && <span>{errorText(readiness.reason)}</span>}
       <span>模型诊断：{readiness?.diagnosis_model?.enabled ? readiness.diagnosis_model.model : '未配置'}</span>
     </div>
-    <IssuesPanel repo={repo} api={api} environment={env ?? null} />
+    <IssuesPanel repo={repo} api={api} environment={env ?? null}
+      onAnalysisSubmitted={setIssueAnalysisId} />
     {error && <div className="error-inline" role="alert">{error}</div>}
     {!env ? <div className="empty"><Download size={28} /><p>尚未下载项目源码</p></div> : <>
       <label className="execution-version">环境版本<select value={selected} onChange={e => {
@@ -445,6 +465,7 @@ export function ExecutionPanel({ repo, api }: { repo: { id: string; name: string
       {env.config?.project_profile && <DesktopCoverage profile={env.config.project_profile}
         scope={env.test_result?.desktop_scope} />}
       <AnalysisPanel key={env.id} envId={env.id} version={env.version} api={api}
+        focusAnalysisId={issueAnalysisId}
         pipelineActive={chainActive && env.pipeline?.stage !== 'analysis'} />
       <FailureDiagnosis key={`${env.id}:${env.diagnosis?.job_id}:${env.diagnosis?.current}`}
         env={env} locked={!!locked} onApply={() => void perform(() => api(
