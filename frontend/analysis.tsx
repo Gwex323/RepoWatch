@@ -112,6 +112,17 @@ function eventLabel(item: Analysis['events'][number]) {
   const name = names[item.agent] ?? item.agent;
   if (item.kind === 'attempt') return '开始新一次分析';
   if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
+  if (item.kind === 'handoff_retry') return `${name} · 指定交接未通过，使用同一轮证据重试一次`;
+  if (item.kind === 'handoff_validation') {
+    try {
+      const detail = JSON.parse(item.agent) as {
+        expected?: string; calls?: number; matching?: number; names?: string[]; accepted?: boolean;
+      };
+      const actual = detail.names?.length ? detail.names.join('、') : '无工具调用';
+      return `交接调用检查：期望 ${detail.expected ?? '指定工具'} · 收到 ${actual} · ${
+        detail.accepted ? '通过' : `未通过（${detail.matching ?? 0}/${detail.calls ?? 0} 匹配）`}`;
+    } catch { return '交接调用检查已记录'; }
+  }
   if (item.kind === 'model_call') return `${name} · 请求模型`;
   if (item.kind === 'timeout_retry') return `${name} · 响应超时，准备重试当前请求`;
   if (item.kind === 'retry_call') return `${name} · 正在重试当前请求`;

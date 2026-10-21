@@ -67,8 +67,9 @@ def mock_provider(monkeypatch, transport):
 
 @pytest.mark.parametrize("effort", ["auto", "default", "low", "medium", "high", "max"])
 @pytest.mark.parametrize("invalid_report", [False, True])
+@pytest.mark.parametrize("handoff_behavior", ["valid", "recover", "invalid"])
 def test_saved_deepseek_config_runs_forced_reads_handoffs_and_validated_report(
-    service, monkeypatch, effort, invalid_report,  # noqa: F811
+    service, monkeypatch, effort, invalid_report, handoff_behavior,  # noqa: F811
 ):
     execution, _, _ = service
     engine = AnalysisModel(execution.store, execution.github)
@@ -91,27 +92,41 @@ def test_saved_deepseek_config_runs_forced_reads_handoffs_and_validated_report(
         _, reads, chars = STAGE_LIMITS[role]
         monkeypatch.setitem(STAGE_LIMITS, role, (2 if index == 0 else 0, reads, chars))
     requests, events = [], []
+    next_tool = 0
+    mismatch_emitted = False
     expected_tools = ["read_execution_records", "read_source_file", *[
         f"transfer_to_{role}" for role in ROLES[1:]
     ]]
 
     async def transport(request):
+        nonlocal next_tool, mismatch_emitted
         payload = json.loads(request.content)
         requests.append(payload)
         assert request.url.path == "/chat/completions"
         assert payload["thinking"] == {"type": "disabled"}
         assert "reasoning_effort" not in payload
         assert all(not tool["function"]["strict"] for tool in payload.get("tools", []))
-        turn = len(requests)
-        if turn <= len(expected_tools):
-            name = expected_tools[turn - 1]
+        if next_tool < len(expected_tools):
+            name = expected_tools[next_tool]
             assert payload["tool_choice"] == {"type": "function", "function": {"name": name}}
             assert [tool["function"]["name"] for tool in payload["tools"]] == [name]
-            args = {"path": "app.py", "start_line": 1, "end_line": 1} if turn == 2 else {}
+            args = (
+                {"path": "app.py", "start_line": 1, "end_line": 1}
+                if name == "read_source_file" else {}
+            )
+            response_name = name
+            if (handoff_behavior == "invalid" and name.startswith("transfer_")
+                    or handoff_behavior == "recover" and name.startswith("transfer_")
+                    and not mismatch_emitted):
+                mismatch_emitted = True
+                response_name = "unexpected_handoff"
+            else:
+                next_tool += 1
             return completion({"content": None, "tool_calls": [{
-                "id": f"call_{turn}", "type": "function",
-                "function": {"name": name, "arguments": json.dumps(args)},
+                "id": f"call_{len(requests)}", "type": "function",
+                "function": {"name": response_name, "arguments": json.dumps(args)},
             }]}, "tool_calls")
+        assert next_tool == len(expected_tools)
         assert not payload.get("tools")
         assert payload["tool_choice"] == "none"
         assert payload["response_format"] == {"type": "json_object"}
@@ -121,18 +136,31 @@ def test_saved_deepseek_config_runs_forced_reads_handoffs_and_validated_report(
 
     mock_provider(monkeypatch, transport)
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
-    if invalid_report:
+    if handoff_behavior == "invalid":
+        with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
+            asyncio.run(engine.analyze(context, lambda *item: events.append(item)))
+        assert len(requests) == 4
+        assert not any(kind == "handoff" for kind, _ in events)
+    elif invalid_report:
         with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
             asyncio.run(engine.analyze(context, lambda *item: events.append(item)))
         assert sum(kind == "format_retry" for kind, _ in events) == 1
-        assert len(requests) == 7
+        assert len(requests) == 7 + (handoff_behavior == "recover")
     else:
         report = asyncio.run(engine.analyze(context, lambda *item: events.append(item)))
         assert len(report["handoffs"]) == 3
         assert sum(kind == "evidence" for kind, _ in events) == 1
         assert report["files_read"] == ["app.py"]
         assert report["reasoning_effort"] is None
-        assert len(requests) == 6
+        assert len(requests) == 6 + (handoff_behavior == "recover")
+    assert sum(kind == "handoff_retry" for kind, _ in events) == int(
+        handoff_behavior != "valid",
+    )
+    validations = [json.loads(value) for kind, value in events if kind == "handoff_validation"]
+    assert sum(not item["accepted"] for item in validations) == (
+        0 if handoff_behavior == "valid" else 2 if handoff_behavior == "invalid" else 1
+    )
+    assert all("arguments" not in item and "content" not in item for item in validations)
     assert ("provider_compatibility", "deepseek_chat") in events
     with execution.store.connection() as db:
         after = dict(db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone())

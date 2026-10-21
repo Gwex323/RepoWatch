@@ -127,9 +127,11 @@ class OutputTruncated(ModelBehaviorError):
 class ObservedModel(Model):
     """Observe safe completion metadata before accepting SDK-decoded output."""
 
-    def __init__(self, delegate, observation, *, separate_schema_from_tools=False):
+    def __init__(self, delegate, observation, *, separate_schema_from_tools=False,
+                 retry_handoff_mismatch=False):
         self.delegate, self.observation = delegate, observation
         self.separate_schema_from_tools = separate_schema_from_tools
+        self.retry_handoff_mismatch = retry_handoff_mismatch
 
     async def get_response(self, *args, **kwargs):
         self.observation.clear()
@@ -343,6 +345,7 @@ class AnalysisModel:
             model = ObservedModel(
                 delegate, observation,
                 separate_schema_from_tools=separate_review_schema_from_tools(config),
+                retry_handoff_mismatch=deepseek_chat_compatibility(config),
             )
             result = await runner(
                 model, context, event, reasoning_effort=effective_reasoning(config),
