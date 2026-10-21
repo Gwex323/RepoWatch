@@ -895,7 +895,7 @@ class Analyses:
                         or pipeline["state"] not in ("waiting_analysis", "waiting_model")):
                     raise Conflict("pipeline_stopped")
             elif pipeline:
-                if pipeline["analysis_id"]:
+                if not issue and pipeline["analysis_id"]:
                     attached = db.execute("SELECT * FROM repository_analyses WHERE id=?",
                                           (pipeline["analysis_id"],)).fetchone()
                     if attached and self.current(attached):

@@ -309,8 +309,8 @@ function HistoricalItem({ item, api, refresh }: {
   </article>;
 }
 
-export function AnalysisPanel({ envId, version, api, pipelineActive = false }: {
-  envId: string; version: number; api: Api; pipelineActive?: boolean;
+export function AnalysisPanel({ envId, version, api, pipelineActive = false, focusAnalysisId }: {
+  envId: string; version: number; api: Api; pipelineActive?: boolean; focusAnalysisId?: string;
 }) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
   const [selected, setSelected] = useState('');
@@ -324,7 +324,11 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false }: {
     load(); const timer = window.setInterval(load, 2000);
     return () => { active = false; window.clearInterval(timer); };
   }, [api, envId]);
-  const analysis = analyses.find(item => item.id === selected) ?? analyses[0];
+  useEffect(() => {
+    if (focusAnalysisId) setSelected('');
+  }, [focusAnalysisId]);
+  const analysis = analyses.find(item => item.id === selected)
+    ?? analyses.find(item => item.id === focusAnalysisId) ?? analyses[0];
   const perform = (path: string, body: unknown) => {
     setBusy(true); setError('');
     void api(path, body).then(refresh).catch(e => setError(errorMessage(e.message))).finally(() => setBusy(false));
@@ -332,7 +336,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false }: {
   const active = analyses.some(item => ['queued', 'running', 'waiting_model'].includes(item.status));
   const stage = analysis?.progress?.stage ??
     analysis?.events.filter(event => event.kind === 'agent').at(-1)?.agent;
-  return <section className="repository-analysis" aria-label="仓库自动分析">
+  return <section id="repository-analysis" className="repository-analysis" aria-label="仓库自动分析">
     <div className="section-heading"><h3><FileSearch size={18} />仓库自动分析</h3>
       <span className="tag neutral">{analysis ? statuses[analysis.status] : '等待执行结果'}</span>
       <button className="button secondary" disabled={busy || active || pipelineActive}
