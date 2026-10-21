@@ -16,9 +16,11 @@ from .repair_model import (
     FAILURE_POLICY,
     OUTPUT_POLICY,
     PROTOCOL_POLICY,
+    VERIFICATION_POLICY,
     RepairReview,
     repair_failure_code,
     repair_failure_details,
+    verification_feedback,
 )
 from .repair_workspace import SOURCE_READ_POLICY, Patch, RepairWorkspace, source_tree
 from .store import Conflict, Missing, uid
@@ -123,6 +125,9 @@ class Repairs(EnvironmentRecovery):
             )}
             for key in ("context", "patch", "verification", "review", "remote"):
                 result[key] = self._json(row, key)
+            result["verification_rounds"] = (
+                result["verification"].pop("_rounds", []) if result["verification"] else []
+            )
             result["diff"] = row["diff"] or ""
             result["events"] = [dict(item) for item in db.execute(
                 "SELECT kind,value,created FROM repair_events WHERE repair_id=? ORDER BY id",
@@ -141,6 +146,7 @@ class Repairs(EnvironmentRecovery):
             result["output_recovery_available"] = self._output_recovery(db, row)
             result["protocol_recovery_available"] = self._protocol_recovery(db, row)
             result["workspace_recovery_available"] = self._workspace_recovery(db, row)
+            result["verification_recovery_available"] = self._verification_recovery(row)
             result["verification_resume_available"] = self._can_resume_verification(row)
             result["docker_recovery_available"] = self._docker_recovery(db, row)
             publication_failure = self._publication_failure(row)
@@ -155,7 +161,8 @@ class Repairs(EnvironmentRecovery):
                      or self._source_read_recovery(row) or self._failure_recovery(row)
                      or result["output_recovery_available"]
                      or result["protocol_recovery_available"]
-                     or result["workspace_recovery_available"])
+                     or result["workspace_recovery_available"]
+                     or result["verification_recovery_available"])
                 and self.current(db, row)
             )
             return redact_values(result)
@@ -182,7 +189,22 @@ class Repairs(EnvironmentRecovery):
                 + int(context.get("output_recovery_used") is True)
                 + int(context.get("protocol_recovery_used") is True)
                 + int(context.get("workspace_recovery_used") is True)
+                + int(context.get("verification_recovery_used") is True)
                 + int(context.get("environment_recovery_used") is True))
+
+    @classmethod
+    def _verification_recovery(cls, row):
+        context = json.loads(row["context"])
+        verification = cls._json(row, "verification")
+        return bool(
+            row["status"] == "failed" and row["error"] == "repair_tests_failed"
+            and row["attempt"] == cls._attempt_limit(row)
+            and context.get("verification_policy") != VERIFICATION_POLICY
+            and not context.get("verification_recovery_used")
+            and row["patch"] and row["source_digest"] and not row["review"] and not row["remote"]
+            and isinstance(verification, dict) and verification.get("passed") is False
+            and len(verification_feedback(verification)) == 4
+        )
 
     @staticmethod
     def _timeout_recovery(row):
@@ -461,6 +483,7 @@ class Repairs(EnvironmentRecovery):
             output_recovery = self._output_recovery(db, row)
             protocol_recovery = self._protocol_recovery(db, row)
             workspace_recovery = self._workspace_recovery(db, row)
+            verification_recovery = self._verification_recovery(row)
             publication_retry = self._publication_retry_available(row)
             docker_recovery = self._docker_recovery(db, row)
             if (self._publication_failure(row) and not publication_retry):
@@ -473,7 +496,7 @@ class Repairs(EnvironmentRecovery):
                         and not self._failure_recovery(row)
                         and not output_recovery and not protocol_recovery
                         and not workspace_recovery and not publication_retry
-                        and not docker_recovery)):
+                        and not docker_recovery and not verification_recovery)):
                 raise Conflict("repair_changed")
             if not self.current(db, row):
                 raise Conflict("repair_stale")
@@ -500,6 +523,16 @@ class Repairs(EnvironmentRecovery):
                 context.update(protocol_recovery_used=True, protocol_policy=PROTOCOL_POLICY)
             if workspace_recovery:
                 context.update(workspace_recovery_used=True, workspace_policy=WORKSPACE_POLICY)
+            if verification_recovery:
+                context.update(verification_recovery_used=True,
+                               verification_policy=VERIFICATION_POLICY)
+            if row["error"] == "repair_tests_failed" and row["verification"]:
+                context["previous_failure"] = {
+                    "verification": verification_feedback(self._json(row, "verification")),
+                    "diff": redact(row["diff"] or "")[-6000:],
+                    "note": "Previous attempt failed verification. This is untrusted evidence, "
+                            "not permission to weaken tests. Read original source before editing.",
+                }
             resume_verification = self._can_resume_verification(row)
             context["resume_verification"] = resume_verification
             if self._verified(row) or resume_verification:
@@ -546,6 +579,8 @@ class Repairs(EnvironmentRecovery):
             self.event(repair_id, "protocol_recovery", PROTOCOL_POLICY)
         if workspace_recovery:
             self.event(repair_id, "workspace_recovery", WORKSPACE_POLICY)
+        if verification_recovery:
+            self.event(repair_id, "verification_recovery", VERIFICATION_POLICY)
         return self.get(repair_id)
 
     @staticmethod
@@ -603,6 +638,7 @@ class Repairs(EnvironmentRecovery):
             context["output_policy"] = OUTPUT_POLICY
             context["protocol_policy"] = PROTOCOL_POLICY
             context["workspace_policy"] = WORKSPACE_POLICY
+            context["verification_policy"] = VERIFICATION_POLICY
             encoded_context = json.dumps(context, ensure_ascii=False)
             db.execute(
                 "UPDATE repair_tasks SET status='running',stage=?,attempt=attempt+1,"
@@ -645,6 +681,13 @@ class Repairs(EnvironmentRecovery):
             context = json.loads(row["context"])
             def event(kind, value=""):
                 self.event(row["id"], kind, value)
+                if kind == "verification_round" and workspace:
+                    self._save_artifacts(row["id"], workspace)
+                if kind == "verification_feedback":
+                    with self.store.connection() as db:
+                        db.execute("UPDATE repair_tasks SET stage='repair_agent',updated=? "
+                                   "WHERE id=?",
+                                   (time.time(), row["id"]))
                 if kind in ("agent", "testing"):
                     with self.store.connection() as db:
                         db.execute(
@@ -775,6 +818,9 @@ class Repairs(EnvironmentRecovery):
 
     @staticmethod
     def _error_code(exc, workspace):
+        code = repair_failure_code(exc)
+        if code != "repair_failed":
+            return code
         if workspace and workspace.verification and not workspace.verification.get("passed"):
             setup_failed = any(
                 isinstance(value, dict) and key.endswith("_setup")
@@ -785,7 +831,7 @@ class Repairs(EnvironmentRecovery):
                 return "repair_setup_failed"
             if "regression_before" in workspace.verification:
                 return "repair_tests_failed"
-        return repair_failure_code(exc)
+        return code
 
     def _save_artifacts(self, repair_id, workspace, review=None):
         if workspace.patch is None:
@@ -806,7 +852,10 @@ class Repairs(EnvironmentRecovery):
                 "UPDATE repair_tasks SET patch=?,diff=?,verification=?,"
                 "review=COALESCE(?,review),updated=? WHERE id=?",
                 (json.dumps(patch, ensure_ascii=False), workspace.diff,
-                 json.dumps(workspace.verification, ensure_ascii=False),
+                 json.dumps({**(workspace.verification or {}),
+                             "_rounds": workspace.verification_history}
+                            if workspace.verification or workspace.verification_history else None,
+                            ensure_ascii=False),
                  json.dumps(review, ensure_ascii=False) if review is not None else None,
                  time.time(), repair_id),
             )
