@@ -218,6 +218,14 @@ class AnalysisModel:
             request_timeout_seconds=REPAIR_REQUEST_TIMEOUT_SECONDS,
         )
 
+    async def diagnose(self, context):
+        from .diagnosis import run_agents
+
+        async def runner(model, value, _event, *, reasoning_effort=None):
+            return await run_agents(model, value, reasoning_effort=reasoning_effort)
+
+        return await self._run(runner, context, lambda *_: None)
+
     async def _run(self, runner, context, event, *,
                    request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
         with self.store.connection() as db:

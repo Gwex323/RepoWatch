@@ -20,6 +20,7 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .analysis_model import AnalysisModel
+from .diagnosis import AnalysisModelDiagnoser
 from .execution import Execution
 from .github_accounts import GitHubAccounts, GitHubError
 from .github_issues import GitHubIssues
@@ -148,9 +149,9 @@ def create_app(
     memory = Memory(store)
     github = GitHubAccounts(store, client=github_client, vault=credential_vault)
     issues = GitHubIssues(store, github)
-    execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
-                          diagnoser=execution_diagnoser)
     analysis_model = AnalysisModel(store, github)
+    execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
+                          diagnoser=execution_diagnoser or AnalysisModelDiagnoser(analysis_model))
     repairs = Repairs(
         execution, repair_engine or analysis_model, github, publisher=repair_publisher,
     )
