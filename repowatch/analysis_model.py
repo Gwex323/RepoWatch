@@ -16,6 +16,14 @@ REQUEST_TIMEOUT_SECONDS = 120
 REQUEST_TIMEOUT = httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=10, write=30, pool=10)
 REPAIR_REQUEST_TIMEOUT_SECONDS = 450
 REASONING_EFFORTS = {"auto", "default", "low", "medium", "high", "max"}
+PROVIDER_REQUEST_FIELDS = {
+    "tools", "tool_choice", "response_format", "parallel_tool_calls",
+    "reasoning_effort", "max_tokens",
+}
+PROVIDER_REQUEST_CODES = {
+    "BadRequest", "InvalidParameter", "InvalidParameterValue", "InvalidRequest",
+    "UnsupportedParameter",
+}
 
 
 def effective_reasoning(config):
@@ -30,6 +38,14 @@ def output_protocol(config):
             and urlsplit(config["base_url"]).hostname in ("open.bigmodel.cn", "api.z.ai")):
         return "json_object"
     return "json_schema"
+
+
+def separate_review_schema_from_tools(config):
+    url = urlsplit(config["base_url"])
+    return (config["api"] == "chat_completions"
+            and config["model"].lower() in {"glm-5.3", "glm-5.3-flash"}
+            and url.hostname == "ark.cn-beijing.volces.com"
+            and url.path.rstrip("/") == "/api/coding/v3")
 
 
 def finalization_mode(config):
@@ -75,8 +91,9 @@ class OutputTruncated(ModelBehaviorError):
 class ObservedModel(Model):
     """Observe safe completion metadata before accepting SDK-decoded output."""
 
-    def __init__(self, delegate, observation):
+    def __init__(self, delegate, observation, *, separate_schema_from_tools=False):
         self.delegate, self.observation = delegate, observation
+        self.separate_schema_from_tools = separate_schema_from_tools
 
     async def get_response(self, *args, **kwargs):
         self.observation.clear()
@@ -96,8 +113,26 @@ class ObservedModel(Model):
 
 
 async def observe_response(response, observation, event):
-    """Never retain model text, reasoning text, tool arguments or provider errors."""
+    """Keep only safe metadata, never provider prose, model text or tool arguments."""
     if not response.is_success:
+        if response.status_code in (400, 422):
+            await response.aread()
+            details = {"http_status": response.status_code}
+            try:
+                body = response.json()
+            except ValueError:
+                body = None
+            error = body.get("error") if isinstance(body, dict) else None
+            if isinstance(error, dict):
+                code = error.get("code")
+                if isinstance(code, str) and code in PROVIDER_REQUEST_CODES:
+                    details["provider_code"] = code
+                param = error.get("param")
+                if isinstance(param, str):
+                    field = param.split(".", 1)[0].split("[", 1)[0]
+                    if field in PROVIDER_REQUEST_FIELDS:
+                        details["parameter"] = field
+            event("provider_rejection", json.dumps(details))
         return
     await response.aread()
     try:
@@ -266,7 +301,10 @@ class AnalysisModel:
                     else OpenAIChatCompletionsModel
                 )
                 delegate = adapter(config["model"], client)
-            model = ObservedModel(delegate, observation)
+            model = ObservedModel(
+                delegate, observation,
+                separate_schema_from_tools=separate_review_schema_from_tools(config),
+            )
             result = await runner(
                 model, context, event, reasoning_effort=effective_reasoning(config),
                 **options,

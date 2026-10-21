@@ -24,5 +24,6 @@ playwright-report/
 comparisons/
 .agents/
 .codex/
+.trellis/
 *.egg-info/
 build/

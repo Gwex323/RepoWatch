@@ -36,6 +36,7 @@ from repowatch.analysis_model import (
     finalization_mode,
     observe_response,
     output_protocol,
+    separate_review_schema_from_tools,
 )
 from repowatch.app import create_app
 from repowatch.repository_analysis import (
@@ -433,6 +434,85 @@ def test_truncation_metadata_is_secret_free_and_rejects_partial_output(body):
     model.get_response = response_with_metadata
     with pytest.raises(OutputTruncated):
         asyncio.run(ObservedModel(model, observation).get_response())
+
+
+@pytest.mark.parametrize("error,expected", [
+    ({"code": "InvalidParameter", "param": "response_format.json_schema",
+      "message": "private-secret"},
+     {"http_status": 400, "provider_code": "InvalidParameter",
+      "parameter": "response_format"}),
+    ({"code": "private-secret", "param": "private-secret",
+      "message": "private-secret"}, {"http_status": 400}),
+])
+def test_provider_rejection_records_only_allowlisted_diagnostics(error, expected):
+    events = []
+    response = httpx.Response(400, json={"error": error})
+    asyncio.run(observe_response(response, {}, lambda *item: events.append(item)))
+    assert events == [("provider_rejection", json.dumps(expected))]
+    assert "private-secret" not in json.dumps(events)
+
+
+def test_reviewer_sends_tools_and_report_schema_in_separate_requests():
+    from agents.models.interface import ModelTracing
+
+    @function_tool
+    def synthetic_read() -> str:
+        """Return synthetic source evidence."""
+        return "synthetic"
+
+    payloads = []
+
+    async def transport(request):
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if len(payloads) == 1:
+            assert [tool["function"]["name"] for tool in payload["tools"]] == [
+                "synthetic_read",
+            ]
+            assert "response_format" not in payload
+            message = {"role": "assistant", "content": None, "tool_calls": [{
+                "id": "call_1", "type": "function",
+                "function": {"name": "synthetic_read", "arguments": "{}"},
+            }]}
+            reason = "tool_calls"
+        else:
+            assert not payload.get("tools")
+            assert payload["tool_choice"] == "none"
+            assert payload["response_format"]["type"] == "json_schema"
+            message = {"role": "assistant", "content": json.dumps({
+                "summary": "Synthetic review", "limitations": [], "findings": [],
+            })}
+            reason = "stop"
+        return httpx.Response(200, json={
+            "id": "synthetic", "object": "chat.completion", "created": 1,
+            "model": "fixture", "choices": [{"index": 0, "message": message,
+                                            "finish_reason": reason}],
+        })
+
+    async def run():
+        async with AsyncOpenAI(
+            api_key="synthetic-not-a-real-key", base_url="https://fixture.example/v1",
+            max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+        ) as client:
+            stage = StageModel(
+                OpenAIChatCompletionsModel("fixture", client), ROLES[-1],
+                StageBudget(), lambda *_: None, separate_schema_from_tools=True,
+            )
+            request = dict(
+                system_instructions="Synthetic only", input="Synthetic evidence",
+                model_settings=ModelSettings(max_tokens=5000), tools=[synthetic_read],
+                handoffs=[], output_schema=AgentOutputSchema(Review),
+                tracing=ModelTracing.DISABLED,
+            )
+            first = await stage.get_response(**request)
+            assert first.output[0].type == "function_call"
+            stage.force_closing = True
+            second = await stage.get_response(**request)
+            assert second.output[0].type == "message"
+
+    asyncio.run(run())
+    assert len(payloads) == 2
 
 
 def test_repeated_truncation_is_bounded_and_never_reaches_tools():
@@ -908,6 +988,43 @@ def test_budget_closing_report_can_be_corrected_without_replaying_exploration():
 ])
 def test_json_mode_is_limited_to_known_glm_provider_contract(host, model, api, expected):
     assert output_protocol({"base_url": host, "model": model, "api": api}) == expected
+
+
+@pytest.mark.parametrize("model,base_url,api,expected", [
+    ("glm-5.3", "https://ark.cn-beijing.volces.com/api/coding/v3",
+     "chat_completions", True),
+    ("GLM-5.3-FLASH", "https://ark.cn-beijing.volces.com/api/coding/v3",
+     "chat_completions", True),
+    ("glm-5.3", "https://ark.cn-beijing.volces.com/api/v3",
+     "chat_completions", False),
+    ("glm-5.3", "https://ark.cn-beijing.volces.com/api/coding/v3",
+     "responses", False),
+    ("other-model", "https://ark.cn-beijing.volces.com/api/coding/v3",
+     "chat_completions", False),
+])
+def test_schema_tool_separation_is_limited_to_ark_coding_glm53(
+    model, base_url, api, expected,
+):
+    assert separate_review_schema_from_tools({
+        "model": model, "base_url": base_url, "api": api,
+    }) is expected
+
+
+def test_ark_glm53_wires_schema_tool_separation(service, monkeypatch):  # noqa: F811
+    execution, _, _ = service
+    engine = AnalysisModel(execution.store, execution.github)
+    engine.save(
+        version=0, enabled=True, model="glm-5.3", api="chat_completions",
+        base_url="https://ark.cn-beijing.volces.com/api/coding/v3",
+        api_key="synthetic-not-a-real-key",
+    )
+
+    async def synthetic_run(model, context, event, *, reasoning_effort):
+        assert model.separate_schema_from_tools is True
+        return {"summary": "Synthetic only", "limitations": [], "findings": []}
+
+    monkeypatch.setattr("repowatch.repository_analysis.run_analysis", synthetic_run)
+    asyncio.run(engine.analyze({}, lambda *_: None))
 
 
 def test_output_protocol_status_does_not_migrate_credentials(service):  # noqa: F811
