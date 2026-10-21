@@ -226,6 +226,24 @@ allowance. Used flags, current-policy failures, stale evidence and artifacts
 outside this narrow resume contract cannot qualify. Attempt numbers/history
 remain monotonic; deployment does not requeue production tasks or publish.
 
+### Rejected Source File Types (2026-10-21, Issue #40)
+
+The second live repair attempt failed inside read_repair_source before any patch
+submission. Application frames identify safe_path's unsupported-file-type guard;
+the actual requested path was not retained. The shared repair_unsafe_path UI text
+incorrectly described a patch failure. This is distinct from the earlier attempt's
+failed regression tests and the resolved GLM report-format incompatibility.
+
+An unsupported source-read type now returns a bounded correction result with
+actual eligible source paths. At most two such corrections are allowed per run;
+the third rejection terminates with repair_source_path_rejected. Rejected reads
+still consume the existing read and stage budgets. No rejected file is read,
+hashed or counted as evidence, and patch file types are unchanged. Every other
+path rejection remains fatal. Events retain only the fixed reason, correction
+count and recoverability, never the raw rejected path or file contents. The UI
+distinguishes read-path events from patch-path events, and the generic path error
+no longer claims a patch was submitted. Deployment does not retry failed tasks.
+
 ## Execution And Review
 
 Use the existing configured model through its existing SDK/provider adapter.
