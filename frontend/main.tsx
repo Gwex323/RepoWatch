@@ -47,6 +47,10 @@ type System = {
   automatic_repair?: { enabled: boolean };
   schedule?: { enabled: boolean; enabled_repositories: number };
 };
+type ScheduleOverview = {
+  repo_id: string; repository: string; kind: string; enabled: boolean;
+  local_time: string; last_run_date: string; last_status: string; last_detail: string;
+};
 const roles = [
   ['repository_analyst', '仓库分析', FolderGit2],
   ['problem_investigator', '问题发现', Search],
@@ -61,6 +65,24 @@ const labels: Record<string, string> = {
   not_reproduced: '未能复现', demo_completed: '样例已完成', failed: '执行失败',
   validation_blocked: '自动验证暂停',
 };
+const scheduleStatuses: Record<string, string> = {
+  idle: '待调度', paused: '已暂停', scheduled: '已调度',
+  skipped_active: '活动任务中', failed: '调度失败',
+};
+const scheduleDetail = (item: ScheduleOverview) => {
+  if (item.last_status === 'failed') {
+    const details: Record<string, string> = {
+      github_active_account_required: '需要激活 GitHub 账号',
+      schedule_execution_failed: '巡检执行失败',
+    };
+    return details[item.last_detail] ?? item.last_detail;
+  }
+  if (item.last_status === 'skipped_active') return '已有活动任务，跳过本次调度';
+  if (item.last_status === 'scheduled') return '已创建运行环境';
+  return item.last_run_date ? '调度已完成' : '尚未调度';
+};
+const scheduleStatusClass = (item: ScheduleOverview) =>
+  item.last_status === 'failed' ? 'red' : item.enabled ? 'green' : 'neutral';
 const time = (value: number) => new Date(value * 1000).toLocaleString('zh-CN', {
   month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
   timeZone: 'Asia/Shanghai',
@@ -296,6 +318,7 @@ function App() {
   const [data, setData] = useState<Dashboard>({ repositories: [], runs: [], events: [] });
   const [system, setSystem] = useState<System | null>(null);
   const [analysisNotices, setAnalysisNotices] = useState<AnalysisNotice[]>([]);
+  const [scheduleOverview, setScheduleOverview] = useState<ScheduleOverview[]>([]);
   const [view, setView] = useState<View>('overview');
   const [executionRepo, setExecutionRepo] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
@@ -311,12 +334,14 @@ function App() {
   useEffect(() => { void api<Session>('/session').then(s => { csrf = s.csrf; setSession(s); })
     .catch(e => setError(e.message)); }, []);
   const refresh = useCallback(async () => {
-    const [dashboard, config, notices] = await Promise.all([
+    const [dashboard, config, notices, schedules] = await Promise.all([
       api<Dashboard>('/dashboard'), api<System>('/system'),
       api<AnalysisNotice[]>('/analysis-notifications'),
+      api<ScheduleOverview[]>('/schedules'),
     ]);
     setData(dashboard); setSystem(config); setLoaded(true);
     setAnalysisNotices(notices);
+    setScheduleOverview(schedules);
     if (selected) setDetail(await api<Run>(`/runs/${selected}`));
   }, [selected]);
   useEffect(() => {
@@ -494,6 +519,32 @@ function App() {
             </div>
           </>}
           {view === 'repositories' && <section className="repo-page">
+            <section className="schedule-overview">
+              <div className="section-heading">
+                <h2><Clock3 size={18} />每日巡检</h2>
+                <span className="section-meta">
+                  {scheduleOverview.filter(item => item.enabled).length} 个启用
+                </span>
+              </div>
+              <div className="schedule-grid schedule-grid-header">
+                <span>仓库</span><span>巡检时间</span><span>最近调度</span><span />
+              </div>
+              {scheduleOverview.filter(item =>
+                item.repository.toLowerCase().includes(query.toLowerCase())).map(item => (
+                <div className="schedule-grid schedule-grid-row" key={item.repo_id}>
+                  <div><strong>{item.repository}</strong>
+                    <span>{item.kind === 'github' ? 'GitHub' : '本地样例'}</span></div>
+                  <div><Clock3 size={14} />{item.local_time}
+                    <span className={`tag ${scheduleStatusClass(item)}`}>
+                      {scheduleStatuses[item.last_status] ?? item.last_status}
+                    </span></div>
+                  <div><strong>{item.last_run_date || '尚未调度'}</strong>
+                    <span>{scheduleDetail(item)}</span></div>
+                  <button className="icon-button" title="管理巡检" disabled={item.kind !== 'github'}
+                    onClick={() => setExecutionRepo(item.repo_id)}><ChevronRight size={16} /></button>
+                </div>
+              ))}
+            </section>
             <div className="list-topline"><span>{data.repositories.length} 个仓库</span><span>登记状态</span></div>
             {data.repositories.filter(r => r.name.toLowerCase().includes(query.toLowerCase())).map(repo =>
               <div className="repository-row large" key={repo.id}><span className={`repo-icon ${repo.kind}`}><FolderGit2 size={23} /></span>

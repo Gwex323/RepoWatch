@@ -49,6 +49,7 @@ pre { margin: 0; }
   color: #847442; background: #f7f1de; white-space: nowrap; }
 .tag.neutral { background: #f0f3f1; color: #77857c; }
 .tag.green { background: #eaf5ed; color: #357951; }
+.tag.red { background: #f9ece7; color: #a15443; }
 .live-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; background: #74b798; flex-shrink: 0; }
 .status { display: inline-flex; align-items: center; gap: 6px; padding: 4px 7px; border-radius: 4px; font-size: 10px;
   font-weight: 550; background: #edf1ef; color: #78857d; white-space: nowrap; }
@@ -496,6 +497,16 @@ pre { margin: 0; }
 .execution-engine { color: #677587; font-size: 12px; }
 .issue-panel { border-top: 1px solid var(--line); padding: 24px 0; margin-top: 24px; min-width: 0; }
 .schedule-panel { border-top: 1px solid var(--line); padding: 24px 0; margin-top: 24px; min-width: 0; }
+.schedule-overview { min-width: 0; margin-bottom: 30px; }
+.schedule-grid { display: grid; grid-template-columns: minmax(180px, 2fr) minmax(150px, 1fr) minmax(180px, 1.5fr) 40px; gap: 14px; align-items: center; }
+.schedule-grid-header { color: #738392; font-size: 11px; padding: 12px 0 8px; border-bottom: 1px solid var(--line); }
+.schedule-grid-row { padding: 15px 0; border-bottom: 1px solid var(--line); }
+.schedule-grid-row > div { min-width: 0; }
+.schedule-grid-row strong, .schedule-grid-row span { display: block; overflow-wrap: anywhere; }
+.schedule-grid-row > div:nth-child(2) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.schedule-grid-row > div:nth-child(2) span { display: inline; }
+.schedule-grid-row small { color: #75828b; font-size: 11px; line-height: 1.7; margin-top: 4px; }
+.schedule-grid-row .icon-button { width: 34px; height: 34px; flex-shrink: 0; }
 .issue-list { border-top: 1px solid var(--line); }
 .issue-row { display: flex; align-items: center; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--line); }
 .issue-number { min-width: 44px; color: #738392; font-size: 11px; }
@@ -539,6 +550,9 @@ pre { margin: 0; }
 @media (max-width: 760px) {
   .execution-config-row { grid-template-columns: minmax(0, 1fr); }
   .execution-panel .section-heading h2 { flex-basis: 100%; }
+  .schedule-grid, .schedule-grid-header, .schedule-grid-row { grid-template-columns: minmax(0, 1fr); }
+  .schedule-grid-header { display: none; }
+  .schedule-grid-row .icon-button { justify-self: end; }
   .repository-row.large { flex-wrap: wrap; }
   .repository-row.large > div { flex-basis: calc(100% - 70px); min-width: 0; }
   .repository-row.large > div > span { overflow-wrap: anywhere; }

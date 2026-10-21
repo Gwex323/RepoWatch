@@ -126,6 +126,39 @@ def test_schedule_summary_counts_enabled_repositories(schedule_service):
     }
 
 
+def test_schedule_overview_includes_all_repositories(schedule_service):
+    store, repo, _, schedules = schedule_service
+    other = store.add_repository(
+        "bob/service", "https://github.com/bob/service"
+    )
+    initial = schedules.get(repo["id"])
+    schedules.configure(
+        repo["id"], enabled=True, local_time="08:30", version=initial["version"]
+    )
+    schedules.execution = FakeExecution(error=Conflict("github_active_account_required"))
+    schedules._record(repo["id"], "failed", "github_active_account_required")
+
+    overview = schedules.list()
+
+    assert overview[0] == {
+        "repo_id": "repo_fixture", "repository": "samples / page-window",
+        "kind": "fixture", "enabled": False, "local_time": "09:00",
+        "last_run_date": "", "last_status": "paused", "last_detail": "",
+    }
+    assert overview[1:] == [
+        {
+            "repo_id": repo["id"], "repository": "alice/project", "kind": "github",
+            "enabled": True, "local_time": "08:30", "last_run_date": "",
+            "last_status": "failed", "last_detail": "github_active_account_required",
+        },
+        {
+            "repo_id": other["id"], "repository": "bob/service", "kind": "github",
+            "enabled": False, "local_time": "09:00", "last_run_date": "",
+            "last_status": "paused", "last_detail": "",
+        },
+    ]
+
+
 def test_schedule_api_requires_owner_and_csrf(tmp_path):
     store = Store(tmp_path / "schedule-api.db")
     repo = store.add_repository(
@@ -133,12 +166,14 @@ def test_schedule_api_requires_owner_and_csrf(tmp_path):
     )
     app = create_app(store.path, start_worker=False)
     with TestClient(app, base_url="http://127.0.0.1") as client:
+        assert client.get("/api/schedules").status_code == 401
         session = client.post(
             "/api/setup", json={"password": "owner-test-password"}
         ).json()
         headers = {"x-csrf-token": session["csrf"]}
         url = f"/api/repositories/{repo['id']}/schedule"
 
+        assert client.get("/api/schedules").status_code == 200
         assert client.get(url).status_code == 200
         assert client.post(url).status_code == 403
         response = client.post(

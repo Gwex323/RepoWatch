@@ -317,6 +317,10 @@ def create_app(
     async def dashboard():
         return store.dashboard()
 
+    @app.get("/api/schedules")
+    def schedule_overview():
+        return schedules.list()
+
     @app.get("/api/system")
     async def system():
         return {
