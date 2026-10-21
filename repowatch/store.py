@@ -155,6 +155,9 @@ class Store:
             from .github_issues import initialize as initialize_issues
 
             initialize_issues(db)
+            from .schedules import initialize as initialize_schedules
+
+            initialize_schedules(db)
             db.commit()
             from .execution import initialize as initialize_execution
 

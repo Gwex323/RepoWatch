@@ -29,6 +29,7 @@ from .memory_evaluation import MemoryEvaluations
 from .repairs import Repairs
 from .repository_analysis import Analyses
 from .repository_source import ExecutionError
+from .schedules import RepositorySchedules
 from .store import SDK_VERSION, Conflict, Missing, Store
 from .workflow import ROLES, Worker
 
@@ -137,6 +138,12 @@ class RepairSettingsBody(StrictBody):
     enabled: bool = Field(strict=True)
 
 
+class ScheduleBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    enabled: bool = Field(strict=True)
+    local_time: str = Field(min_length=5, max_length=5)
+
+
 def create_app(
     db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
     execution_runtime=None, repository_source=None, execution_diagnoser=None, analysis_engine=None,
@@ -157,6 +164,7 @@ def create_app(
     )
     analyses = Analyses(execution, analysis_engine or analysis_model, repairs)
     memory_evaluations = MemoryEvaluations(analyses, analysis_engine or analysis_model)
+    schedules = RepositorySchedules(store, execution)
     repairs.analyses = analyses
     login_attempts: dict[str, deque] = defaultdict(deque)
 
@@ -171,6 +179,7 @@ def create_app(
         ) if start_worker else None
         repair_worker = asyncio.create_task(repairs.run()) if start_worker else None
         issue_worker = asyncio.create_task(issues.run()) if start_worker else None
+        schedule_worker = asyncio.create_task(schedules.run()) if start_worker else None
         yield
         execution.closing.set()
         if analyst:
@@ -191,6 +200,11 @@ def create_app(
             issue_worker.cancel()
             with suppress(asyncio.CancelledError):
                 await issue_worker
+        if schedule_worker:
+            schedules.closing.set()
+            schedule_worker.cancel()
+            with suppress(asyncio.CancelledError):
+                await schedule_worker
         if worker:
             worker.cancel()
             with suppress(asyncio.CancelledError):
@@ -322,7 +336,7 @@ def create_app(
             "reproduction_policy": {
                 "discovered": "human", "existing_issue": "automatic", "merge": "owner_only",
             },
-            "schedule": {"frequency": "daily", "enabled": True},
+            "schedule": schedules.summary(),
             "tracing_export": False,
             "storage": "SQLite",
             "runtime": "Python",
@@ -441,6 +455,17 @@ def create_app(
     @app.get("/api/repositories/{repo_id}/environments")
     def environments(repo_id: str):
         return execution.list(repo_id)
+
+    @app.get("/api/repositories/{repo_id}/schedule")
+    def repository_schedule(repo_id: str):
+        return schedules.get(repo_id)
+
+    @app.post("/api/repositories/{repo_id}/schedule")
+    def configure_repository_schedule(repo_id: str, body: ScheduleBody):
+        return schedules.configure(
+            repo_id, enabled=body.enabled, local_time=body.local_time,
+            version=body.version,
+        )
 
     @app.post("/api/repositories/{repo_id}/environments", status_code=202)
     def download_repository(repo_id: str, body: DownloadBody):

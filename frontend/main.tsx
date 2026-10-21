@@ -45,6 +45,7 @@ type System = {
   external_model_calls: boolean; execution_diagnosis?: { enabled: boolean; model: string | null };
   repository_analysis?: { enabled: boolean; model: string };
   automatic_repair?: { enabled: boolean };
+  schedule?: { enabled: boolean; enabled_repositories: number };
 };
 const roles = [
   ['repository_analyst', '仓库分析', FolderGit2],
@@ -483,7 +484,9 @@ function App() {
                   <dl className="boundary-list"><div><dt>系统发现</dt><dd className="green-text"><LockKeyhole size={13} />人工复现</dd></div>
                     <div><dt>已有 Issue</dt><dd>自动验证</dd></div>
                     <div><dt>GitHub 发布</dt><dd>未启用</dd></div><div><dt>自动合并</dt><dd className="red-text">禁止</dd></div>
-                    <div><dt>外部模型调用</dt><dd>{system?.external_model_calls ? '已启用' : '关闭'}</dd></div><div><dt>每日调度</dt><dd>已启用</dd></div></dl>
+                    <div><dt>外部模型调用</dt><dd>{system?.external_model_calls ? '已启用' : '关闭'}</dd></div>
+                    <div><dt>每日调度</dt><dd>{system?.schedule?.enabled_repositories
+                      ? `${system.schedule.enabled_repositories} 个仓库` : '未启用'}</dd></div></dl>
                 </section>
                 <section className="recent-section"><div className="section-heading"><h2><Activity size={18} />最近活动</h2></div>
                   <EventFeed events={data.events.slice(0, 5)} onSelect={selectRun} /></section>
@@ -539,7 +542,10 @@ function App() {
                 ['环境诊断模型', system?.execution_diagnosis?.enabled ? system.execution_diagnosis.model ?? '已启用' : '未配置 · 使用本地规则'],
                 ['系统发现问题', '人工复现确认'], ['已有 Issue', '自动验证（仅样例）'],
                 ['真实 Issue 接入', '未接入'],
-                ['外部仓库执行', '本机 Docker · 按需启动'], ['每日检查', '未启用'], ['自动合并', '禁止'],
+                ['外部仓库执行', '本机 Docker · 按需启动'],
+                ['每日检查', system?.schedule?.enabled_repositories
+                  ? `${system.schedule.enabled_repositories} 个仓库` : '未启用'],
+                ['自动合并', '禁止'],
                 ['每次任务最大轮数', String(system?.max_turns)], ['任务最大尝试次数', String(system?.max_attempts)],
                 ['外部 Trace 上传', '关闭'], ['访问范围', '本机 · 所有者登录'],
               ].filter(([label]) => hasSamples || !['样例模型', '已有 Issue'].includes(label))
