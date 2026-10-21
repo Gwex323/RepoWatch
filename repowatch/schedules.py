@@ -76,6 +76,29 @@ class RepositorySchedules:
             row = self._ensure(db, repo_id)
         return self._row(row)
 
+    def list(self):
+        with self.store.connection() as db:
+            rows = db.execute(
+                "SELECT r.id AS repo_id,r.name AS repository,r.kind,"
+                "COALESCE(s.enabled,0) AS enabled,"
+                "COALESCE(s.local_time,'09:00') AS local_time,"
+                "COALESCE(s.last_run_date,'') AS last_run_date,"
+                "COALESCE(s.last_status,'paused') AS last_status,"
+                "COALESCE(s.last_detail,'') AS last_detail "
+                "FROM repositories r "
+                "LEFT JOIN repository_schedules s ON s.repo_id=r.id "
+                "ORDER BY r.created"
+            ).fetchall()
+        result = []
+        for row in rows:
+            item = {key: row[key] for key in (
+                "repo_id", "repository", "kind", "enabled", "local_time",
+                "last_run_date", "last_status", "last_detail",
+            )}
+            item["enabled"] = bool(item["enabled"])
+            result.append(item)
+        return result
+
     def summary(self):
         with self.store.connection() as db:
             row = db.execute(

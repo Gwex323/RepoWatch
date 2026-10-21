@@ -23,6 +23,12 @@ disappear.
 Daily checks reuse the existing download → execution → analysis → Issue intake
 pipeline and add no new repair, publication, or merge authority.
 
+The repository page exposes an owner-only schedule overview. It joins every
+registered repository with its latest schedule state so enabled time, latest
+outcome, stable failure code, and skip reason can be compared without opening
+each repository individually. Repositories without a schedule row are shown as
+paused rather than omitted.
+
 Scheduled runs remain subject to the existing repository-access,
 publication-evidence, and owner-approval requirements.
 
