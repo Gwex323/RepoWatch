@@ -164,13 +164,15 @@ class StageModel(Model):
     """Reserve downstream turns while letting the SDK execute real handoffs."""
 
     def __init__(self, delegate, role, budget, event, retries=None, deadline=None,
-                 final_input=None, review_evidence=None, required_read=None):
+                 final_input=None, review_evidence=None, required_read=None,
+                 separate_schema_from_tools=False):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
         self.final_input = final_input
         self.review_evidence = review_evidence
         self.required_read = required_read
+        self.separate_schema_from_tools = separate_schema_from_tools
         self.force_closing = False
 
     async def get_response(self, system_instructions, input, **kwargs):
@@ -266,10 +268,18 @@ class StageModel(Model):
                 )
                 if remaining_seconds <= 0:
                     raise AnalysisFailure("analysis_deadline_exceeded")
+                # Some compatible providers reject a response_format constraint
+                # alongside callable tools. Validate exploration answers locally;
+                # keep provider schema enforcement for calls with tools closed.
+                model_kwargs = (
+                    {**kwargs, "output_schema": None}
+                    if self.separate_schema_from_tools and review_schema is not None
+                    and kwargs["tools"] else kwargs
+                )
                 # Bound the entire call too, not just the transport's idle-read timeout.
                 response = await asyncio.wait_for(self.delegate.get_response(
                     system_instructions=(system_instructions or "") + remaining + correction,
-                    input=call_input, **kwargs,
+                    input=call_input, **model_kwargs,
                 ), timeout=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds))
                 if correction and any(item.type == "function_call" for item in response.output):
                     raise AnalysisFailure("analysis_finalization_not_followed")
@@ -767,6 +777,7 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             final_input=compact_review_input if role == ROLES[-1] else None,
             review_evidence=review_evidence if role == ROLES[-1] else None,
             required_read=required_read if role == ROLES[0] else None,
+            separate_schema_from_tools=getattr(model, "separate_schema_from_tools", False),
         )
         for role in ROLES
     }
