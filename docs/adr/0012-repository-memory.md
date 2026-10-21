@@ -61,6 +61,22 @@ It is observational evidence only: differences may reflect nondeterminism, and
 the comparison does not grant authority or change repair, publish, or merge
 decisions.
 
+Each variant is now persisted as soon as it finishes. A failed or interrupted
+variant retains the other variant's report, call count and elapsed time, with a
+normalized failure code; an incomplete pair is labeled insufficient evidence.
+The evaluation rejects a comparison if model settings change between variants.
+Existing completed records remain readable after the additive SQLite migration.
+
+A fixed validation suite contains eight known defects and four clean controls.
+`python -m repowatch.memory_validation` verifies source hashes, reads
+the owner's configured model without copying its credential, and writes a new
+JSON result for each run. Gold labels are used only after analysis. Path and
+title fingerprints are screening signals, not semantic deduplication: findings
+with different wording may describe the same defect and require human review.
+The suite summary aggregates completed pairs, incomplete pairs, model usage,
+known-defect path candidates and findings in the clean control; these counts do
+not establish true positives or causal improvement.
+
 Memory selection now applies a lightweight relevance rank before the existing
 role-category round robin and context budget. Signals are limited to exact
 source-path overlap, literal token overlap with the current issue text, and

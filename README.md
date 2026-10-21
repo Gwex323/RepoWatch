@@ -339,6 +339,23 @@ Issue 文本和近期引用，但仍保持字面匹配和固定预算；老化�
 不会自动归档。固定样例模型接收记忆上下文，但其预定义修复行为不会因此改变。
 详情见 [记忆设计记录](docs/adr/0012-repository-memory.md)。
 
+### 固定记忆评测
+
+仓库附带八个已知缺陷和四个正常对照固定样本。启用“运行配置 → 仓库分析模型”后，
+可在项目根目录运行以下命令；评测会调用已配置的真实模型：
+
+```powershell
+.\.venv\Scripts\python.exe -m repowatch.memory_validation --case pagination
+.\.venv\Scripts\python.exe -m repowatch.memory_validation
+```
+
+第一条先检查单个样本和模型兼容性，第二条运行全部十二个样本；完整运行会调用
+十二对真实模型分析并产生费用。每次运行创建独立的
+`data/memory-validation/memory-validation-*.json`，保存两种变体的脱敏报告、失败码、
+调用数、耗时、逐样本差异、全套汇总与人工核查线索。样本源码哈希不匹配会在模型调用前停止；
+评分答案不会送给模型。结果是小样本观察记录，需人工核查发现是否真正命中缺陷。
+固定入口只读取本机模型配置和样本源码，不启动样本项目或触发修复、发布。
+
 记忆与任务共用 `data/repowatch.db`，迁移时随数据库一起保留。
 请勿在知识内容中填写密码、API Key 或其他凭据。
 

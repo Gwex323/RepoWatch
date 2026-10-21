@@ -8,11 +8,31 @@ import time
 
 from .diagnosis import redact_values
 from .memory import Memory, compact_experience
-from .repository_analysis import AnalysisFailure, validate_report
+from .repository_analysis import (
+    ANALYSIS_TIMEOUT_SECONDS,
+    AnalysisFailure,
+    failure_code,
+    validate_report,
+)
 from .store import Conflict, Missing, uid
 
 LOG = logging.getLogger(__name__)
 REFERENCE_LIMIT = 6
+RECOVERY_GRACE_SECONDS = ANALYSIS_TIMEOUT_SECONDS + 60
+MODEL_IDENTITY_KEYS = ("model", "base_url", "api", "version", "reasoning_effort")
+
+
+def model_identity(engine):
+    status = engine.status()
+    return tuple(status.get(key) for key in MODEL_IDENTITY_KEYS)
+
+
+def _model_consistent(baseline, memory):
+    first, second = baseline["report"], memory["report"]
+    for key in ("model", "model_version", "reasoning_effort"):
+        if first.get(key) != second.get(key):
+            return False
+    return True
 
 
 def initialize(db):
@@ -25,12 +45,17 @@ def initialize(db):
             status TEXT NOT NULL DEFAULT 'queued' CHECK(status IN
                 ('queued','running','completed','failed')),
             baseline TEXT, memory TEXT, summary TEXT, error TEXT,
+            baseline_error TEXT, memory_error TEXT,
             version INTEGER NOT NULL DEFAULT 1,
             created REAL NOT NULL, updated REAL NOT NULL
         );
         CREATE INDEX IF NOT EXISTS memory_evaluation_scope
             ON memory_evaluations(repo_id, revision, status);
     """)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(memory_evaluations)")}
+    for column in ("baseline_error", "memory_error"):
+        if column not in columns:
+            db.execute(f"ALTER TABLE memory_evaluations ADD COLUMN {column} TEXT")
 
 
 def _references(memory, repo_id, revision, context):
@@ -77,17 +102,50 @@ def _findings(report):
 
 
 def _summary(baseline, memory):
-    baseline_findings, memory_findings = _findings(baseline["report"]), _findings(
-        memory["report"],
+    baseline_findings = (
+        _findings(baseline["report"]) if baseline and baseline.get("report") else None
     )
+    memory_findings = _findings(memory["report"]) if memory and memory.get("report") else None
+    complete = baseline_findings is not None and memory_findings is not None
+    if not complete:
+        return {
+            "version": "paired_ab_v2",
+            "variants": {
+                "baseline": baseline["status"] if baseline else "not_run",
+                "memory": memory["status"] if memory else "not_run",
+            },
+            "errors": {
+                "baseline": baseline.get("error_code") if baseline else None,
+                "memory": memory.get("error_code") if memory else None,
+            },
+            "finding_counts": {
+                "baseline": len(baseline_findings) if baseline_findings is not None else None,
+                "memory": len(memory_findings) if memory_findings is not None else None,
+            },
+            "model_calls": {
+                "baseline": baseline["model_calls"] if baseline else None,
+                "memory": memory["model_calls"] if memory else None,
+            },
+            "elapsed_seconds": {
+                "baseline": baseline["elapsed_seconds"] if baseline else None,
+                "memory": memory["elapsed_seconds"] if memory else None,
+            },
+            "memory_entry_count": len(memory["memories"]) if memory else None,
+            "memory_ids": [item["id"] for item in memory["memories"]] if memory else [],
+            "model_consistent": None,
+            "conclusion": "insufficient_evidence",
+        }
     baseline_paths = {path for item in baseline_findings for path in item["paths"]}
     memory_paths = {path for item in memory_findings for path in item["paths"]}
     baseline_hashes = {item["fingerprint"] for item in baseline_findings}
     memory_hashes = {item["fingerprint"] for item in memory_findings}
     baseline_titles = {item["title"] for item in baseline_findings}
     memory_titles = {item["title"] for item in memory_findings}
+    consistent = _model_consistent(baseline, memory)
     return {
-        "version": "paired_ab_v1",
+        "version": "paired_ab_v2",
+        "variants": {"baseline": "completed", "memory": "completed"},
+        "errors": {"baseline": None, "memory": None},
         "finding_counts": {
             "baseline": len(baseline_findings), "memory": len(memory_findings),
         },
@@ -110,6 +168,36 @@ def _summary(baseline, memory):
         },
         "memory_entry_count": len(memory["memories"]),
         "memory_ids": [item["id"] for item in memory["memories"]],
+        "model_consistent": consistent,
+        "conclusion": "requires_human_review" if consistent else "insufficient_evidence",
+    }
+
+
+async def run_variant(engine, context, memories):
+    """Run one bounded analysis without granting any repair or publication authority."""
+    calls = 0
+
+    def event(kind, agent=""):
+        nonlocal calls
+        if kind == "model_call":
+            calls += 1
+
+    variant_context = {**context, "memories": memories}
+    started = time.monotonic()
+    try:
+        report = redact_values(await engine.analyze(variant_context, event))
+        validate_report(report, variant_context)
+    except Exception as exc:
+        code = failure_code(exc)
+        if code == "analysis_failed":
+            code = "memory_evaluation_failed"
+        return {
+            "status": "failed", "error_code": code, "memories": memories,
+            "model_calls": calls, "elapsed_seconds": round(time.monotonic() - started),
+        }
+    return {
+        "status": "completed", "report": report, "memories": memories,
+        "model_calls": calls, "elapsed_seconds": round(time.monotonic() - started),
     }
 
 
@@ -119,12 +207,32 @@ class MemoryEvaluations:
         self.store = analyses.store
         self.memory = memory or Memory(self.store)
         self.closing = asyncio.Event()
+        self._recover_interrupted()
+
+    def _recover_interrupted(self):
+        stale_before = time.time() - RECOVERY_GRACE_SECONDS
+        with self.store.connection() as db:
+            rows = db.execute(
+                "SELECT id,baseline,memory FROM memory_evaluations "
+                "WHERE status='running' AND updated<?", (stale_before,)
+            ).fetchall()
+            for row in rows:
+                baseline = json.loads(row["baseline"]) if row["baseline"] else None
+                memory = json.loads(row["memory"]) if row["memory"] else None
+                db.execute(
+                    "UPDATE memory_evaluations SET status='failed',"
+                    "error='memory_evaluation_interrupted',summary=?,version=version+1,"
+                    "updated=? WHERE id=? AND status='running' AND updated<?",
+                    (json.dumps(_summary(baseline, memory), ensure_ascii=False),
+                     time.time(), row["id"], stale_before),
+                )
 
     @staticmethod
     def _row(row):
         result = {
             key: row[key] for key in (
                 "id", "analysis_id", "repo_id", "revision", "status", "error",
+                "baseline_error", "memory_error",
                 "version", "created", "updated",
             )
         }
@@ -208,23 +316,20 @@ class MemoryEvaluations:
             return dict(row)
 
     async def _variant(self, context, memories):
-        calls = 0
+        return await run_variant(self.engine, context, memories)
 
-        def event(kind, agent=""):
-            nonlocal calls
-            if kind == "model_call":
-                calls += 1
-
-        variant_context = {
-            **context, "memories": memories,
-        }
-        started = time.monotonic()
-        report = redact_values(await self.engine.analyze(variant_context, event))
-        validate_report(report, variant_context)
-        return {
-            "report": report, "memories": memories, "model_calls": calls,
-            "elapsed_seconds": round(time.monotonic() - started),
-        }
+    def _save_variant(self, row, name, outcome, version):
+        error = outcome.get("error_code")
+        with self.store.connection() as db:
+            changed = db.execute(
+                f"UPDATE memory_evaluations SET {name}=?,{name}_error=?,"
+                "version=version+1,updated=? WHERE id=? AND status='running' AND version=?",
+                (json.dumps(outcome, ensure_ascii=False), error, time.time(),
+                 row["id"], version),
+            ).rowcount
+        if not changed:
+            raise Conflict("memory_evaluation_changed")
+        return version + 1
 
     async def _execute(self, row):
         with self.store.connection() as db:
@@ -237,20 +342,38 @@ class MemoryEvaluations:
         memories = _references(
             self.memory, row["repo_id"], row["revision"], context,
         )
+        identity = model_identity(self.engine)
+        version = row["version"]
         baseline = await self._variant(context, [])
-        memory = await self._variant(context, memories)
+        version = self._save_variant(row, "baseline", baseline, version)
+        if model_identity(self.engine) == identity:
+            memory = await self._variant(context, memories)
+        else:
+            memory = {
+                "status": "failed", "error_code": "analysis_model_changed",
+                "memories": memories, "model_calls": 0, "elapsed_seconds": 0,
+            }
+        version = self._save_variant(row, "memory", memory, version)
         summary = _summary(baseline, memory)
+        status = "completed" if all(
+            outcome["status"] == "completed" for outcome in (baseline, memory)
+        ) and summary["model_consistent"] is True else "failed"
+        error = next((
+            outcome["error_code"] for outcome in (baseline, memory)
+            if outcome["status"] == "failed"
+        ), None) or ("analysis_model_changed" if not summary["model_consistent"] else None)
         with self.store.connection() as db:
-            db.execute(
-                "UPDATE memory_evaluations SET status='completed',baseline=?,memory=?,"
-                "summary=?,error=NULL,version=version+1,updated=? WHERE id=? AND version=?",
-                (json.dumps(baseline, ensure_ascii=False),
-                 json.dumps(memory, ensure_ascii=False),
-                 json.dumps(summary, ensure_ascii=False), time.time(),
-                 row["id"], row["version"]),
-            )
+            changed = db.execute(
+                "UPDATE memory_evaluations SET status=?,summary=?,error=?,"
+                "version=version+1,updated=? WHERE id=? AND status='running' AND version=?",
+                (status, json.dumps(summary, ensure_ascii=False), error, time.time(),
+                 row["id"], version),
+            ).rowcount
+        if not changed:
+            raise Conflict("memory_evaluation_changed")
 
     async def tick(self):
+        self._recover_interrupted()
         row = self._claim()
         if not row:
             return False
@@ -262,10 +385,16 @@ class MemoryEvaluations:
                 else "memory_evaluation_failed"
             )
             with self.store.connection() as db:
+                saved = db.execute(
+                    "SELECT baseline,memory FROM memory_evaluations WHERE id=?", (row["id"],)
+                ).fetchone()
+                baseline = json.loads(saved["baseline"]) if saved["baseline"] else None
+                memory = json.loads(saved["memory"]) if saved["memory"] else None
                 db.execute(
-                    "UPDATE memory_evaluations SET status='failed',error=?,"
-                    "version=version+1,updated=? WHERE id=? AND version=?",
-                    (code[:80], time.time(), row["id"], row["version"]),
+                    "UPDATE memory_evaluations SET status='failed',error=?,summary=?,"
+                    "version=version+1,updated=? WHERE id=? AND status='running'",
+                    (code[:80], json.dumps(_summary(baseline, memory), ensure_ascii=False),
+                     time.time(), row["id"]),
                 )
             LOG.warning("Memory evaluation %s failed: %s", row["id"], code)
         return True
