@@ -5,6 +5,7 @@ for (const feedback of [
   { decision: 'not_reproduced', note: '按步骤操作后未观察到异常。', button: '未能复现', status: '未能复现' },
 ]) {
 test(`analysis settings, automatic status, evidence and human reproduction on mobile (${feedback.decision})`, async ({ page }) => {
+  const deepseek = feedback.decision === 'not_reproduced';
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
   let enabled = false;
@@ -39,7 +40,10 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
       })),
     },
     coverage: { captured: 1, eligible: 1, complete: true },
-    events: [{ kind: 'handoff', agent: 'repository_analyst -> problem_investigator', created: 1 }],
+    events: [
+      { kind: 'handoff', agent: 'repository_analyst -> problem_investigator', created: 1 },
+      ...(deepseek ? [{ kind: 'provider_compatibility', agent: 'deepseek_chat', created: 1 }] : []),
+    ],
     findings: [{ id: 'finding_fixture', version: 1, status: 'waiting_reproduction', data: {
       title: '边界条件疑似处理错误', severity: 'P2', explanation: '这是浏览器测试中的模拟发现。',
       expected: '返回空列表', suspected_actual: '返回上一页', reproduction: ['输入超出范围的页码。'],
@@ -55,10 +59,10 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
     if (route.request().method() === 'POST') {
       const body = route.request().postDataJSON();
       expect(body.api_key).toBe('test-key-not-a-real-credential');
-      expect(body.reasoning_effort).toBe('auto');
+      expect(body.reasoning_effort).toBe(deepseek ? 'high' : 'auto');
       keySaved = true; enabled = true;
       Object.assign(provider, { ...body, has_key: true, version: 1,
-        output_protocol: 'json_object', finalization_mode: 'glm47_direct' });
+        output_protocol: 'json_object', finalization_mode: deepseek ? 'deepseek_direct' : 'glm47_direct' });
       delete (provider as Record<string, unknown>).api_key;
     }
     await route.fulfill({ json: provider });
@@ -131,17 +135,20 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await open();
   await expect(page.getByLabel('仓库自动分析').getByText('等待模型配置', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '运行配置', exact: true }).click();
-  await page.getByLabel('分析模型名称').fill('glm-4.7');
+  await page.getByLabel('分析模型名称').fill(deepseek ? 'deepseek-flash' : 'glm-4.7');
   await page.locator('label').filter({ hasText: '模型接口' }).locator('select').selectOption('chat_completions');
-  await page.locator('label').filter({ hasText: '模型服务地址' }).locator('input').fill('https://open.bigmodel.cn/api/paas/v4');
-  await page.getByLabel('推理强度').selectOption('auto');
+  await page.locator('label').filter({ hasText: '模型服务地址' }).locator('input').fill(
+    deepseek ? 'https://api.deepseek.com' : 'https://open.bigmodel.cn/api/paas/v4');
+  await page.getByLabel('推理强度').selectOption(deepseek ? 'high' : 'auto');
   await page.getByLabel('分析模型 API Key').fill('test-key-not-a-real-credential');
   await page.getByLabel('启用仓库自动分析').check();
   await page.getByRole('button', { name: '保存分析模型' }).click();
   await expect.poll(() => keySaved).toBe(true);
   await expect(page.getByLabel('分析模型 API Key')).toHaveValue('');
   await expect(page.getByText('已保存输出协议：JSON Object')).toBeVisible();
-  await expect(page.getByText('已保存报告模式：GLM-4.7 直接输出（分析阶段保持默认思考）')).toBeVisible();
+  await expect(page.getByText(deepseek
+    ? '已保存报告模式：DeepSeek 兼容模式（所有阶段关闭思考，推理强度设置不生效）'
+    : '已保存报告模式：GLM-4.7 直接输出（分析阶段保持默认思考）')).toBeVisible();
   await page.screenshot({ path: 'test-results/analysis-model-desktop.png', fullPage: true, animations: 'disabled' });
   await page.getByRole('button', { name: '仓库', exact: true }).click();
   await open();
@@ -157,6 +164,9 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await expect(panel.getByRole('alert')).toContainText('模型返回内容未通过 JSON 校验');
   await expect(panel.getByText('失败阶段：独立审查 · 耗时 135 秒')).toBeVisible();
   await panel.getByText(/^Agent 分析记录/).click();
+  if (deepseek) {
+    await expect(panel.getByText('DeepSeek 兼容模式：所有阶段关闭思考，推理强度设置不生效', { exact: false })).toBeVisible();
+  }
   await expect(panel.getByText('报告格式检查：不是合法 JSON', { exact: false })).toBeVisible();
   await expect(panel.getByText('报告诊断：工具调用被当作正文返回 · 正文 196 字符', { exact: false })).toBeVisible();
   await expect(panel.getByText('独立审查 · 使用已读取证据生成最终报告', { exact: false })).toBeVisible();

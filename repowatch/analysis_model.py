@@ -5,7 +5,7 @@ from dataclasses import replace
 from urllib.parse import urlsplit
 
 import httpx
-from agents import Model, OpenAIChatCompletionsModel, OpenAIResponsesModel
+from agents import FunctionTool, Model, OpenAIChatCompletionsModel, OpenAIResponsesModel
 from agents.exceptions import ModelBehaviorError
 from cryptography.fernet import InvalidToken
 from openai import AsyncOpenAI
@@ -26,7 +26,16 @@ PROVIDER_REQUEST_CODES = {
 }
 
 
+def deepseek_chat_compatibility(config):
+    url = urlsplit(config.get("base_url", ""))
+    return (config.get("api") == "chat_completions"
+            and url.scheme == "https" and url.hostname == "api.deepseek.com"
+            and url.port in (None, 443) and url.path.rstrip("/") in ("", "/v1", "/beta"))
+
+
 def effective_reasoning(config):
+    if deepseek_chat_compatibility(config):
+        return None
     effort = config.get("reasoning_effort", "auto")
     if effort == "auto":
         return "low" if config["model"].lower() in {"glm-5.3", "glm-5.3-flash"} else None
@@ -34,6 +43,8 @@ def effective_reasoning(config):
 
 
 def output_protocol(config):
+    if deepseek_chat_compatibility(config):
+        return "json_object"
     if (config["api"] == "chat_completions" and config["model"].lower() == "glm-4.7"
             and urlsplit(config["base_url"]).hostname in ("open.bigmodel.cn", "api.z.ai")):
         return "json_object"
@@ -49,6 +60,8 @@ def separate_review_schema_from_tools(config):
 
 
 def finalization_mode(config):
+    if deepseek_chat_compatibility(config):
+        return "deepseek_direct"
     if (output_protocol(config) == "json_object"
             and config.get("reasoning_effort", "auto") == "auto"):
         return "glm47_direct"
@@ -81,6 +94,29 @@ class JsonObjectChatModel(OpenAIChatCompletionsModel):
             # Let the provider enforce JSON syntax while the runner performs the
             # canonical Pydantic validation after receiving the text.
             kwargs["output_schema"] = None
+        return await super().get_response(*args, **kwargs)
+
+
+class DeepSeekChatModel(JsonObjectChatModel):
+    """Keep native forced tools usable on the official non-thinking chat API."""
+
+    async def get_response(self, *args, **kwargs):
+        settings = kwargs["model_settings"]
+        # Every stage may reach a forced tool/handoff. Keeping the whole run in
+        # non-thinking mode also avoids switching reasoning history mid-run.
+        kwargs["model_settings"] = replace(
+            settings, reasoning=None,
+            extra_body={**(settings.extra_body or {}), "thinking": {"type": "disabled"}},
+        )
+        # Strict tool schemas are a separate beta feature. Keep the original
+        # SDK tools and local argument validation; change only their wire flags.
+        kwargs["tools"] = [
+            replace(tool, strict_json_schema=False) if isinstance(tool, FunctionTool) else tool
+            for tool in kwargs["tools"]
+        ]
+        kwargs["handoffs"] = [
+            replace(handoff, strict_json_schema=False) for handoff in kwargs["handoffs"]
+        ]
         return await super().get_response(*args, **kwargs)
 
 
@@ -290,7 +326,10 @@ class AnalysisModel:
         ) as client:
             protocol = output_protocol(config)
             event("output_protocol", protocol)
-            if protocol == "json_object":
+            if deepseek_chat_compatibility(config):
+                event("provider_compatibility", "deepseek_chat")
+                delegate = DeepSeekChatModel(config["model"], client)
+            elif protocol == "json_object":
                 delegate = JsonObjectChatModel(
                     config["model"], client,
                     fast_finalization=finalization_mode(config) == "glm47_direct", event=event,
