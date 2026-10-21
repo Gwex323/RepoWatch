@@ -182,6 +182,11 @@ class Execution(EnvironmentReuse, ExecutionPipeline):
                 self.enqueue(db, env_id, "download")
         return self.get(env_id)
 
+    def active_pipeline(self, repo_id):
+        with self.store.connection() as db:
+            row = self._active_pipeline(db, repo_id=repo_id)
+        return dict(row) if row else None
+
     @staticmethod
     def editable(db, env_id, version):
         env = Execution.row(db, env_id)

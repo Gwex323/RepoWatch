@@ -495,6 +495,7 @@ pre { margin: 0; }
   display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 16px 0; }
 .execution-engine { color: #677587; font-size: 12px; }
 .issue-panel { border-top: 1px solid var(--line); padding: 24px 0; margin-top: 24px; min-width: 0; }
+.schedule-panel { border-top: 1px solid var(--line); padding: 24px 0; margin-top: 24px; min-width: 0; }
 .issue-list { border-top: 1px solid var(--line); }
 .issue-row { display: flex; align-items: center; gap: 14px; padding: 16px 0; border-bottom: 1px solid var(--line); }
 .issue-number { min-width: 44px; color: #738392; font-size: 11px; }

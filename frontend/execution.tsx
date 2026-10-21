@@ -55,6 +55,10 @@ type Issue = {
   id: string; number: number; title: string; state: string; url: string | null;
   updated_at: string | null;
 };
+type Schedule = {
+  repo_id: string; enabled: boolean; local_time: string; last_run_date: string;
+  last_status: string; last_detail: string; version: number;
+};
 const configLabels: Record<string, string> = {
   install_network: '安装时允许联网', install: '安装命令', test: '测试 / CLI 命令',
   start: '启动命令', port: '项目端口',
@@ -126,6 +130,13 @@ const errors: Record<string, string> = {
   pipeline_account_changed: '流水线绑定的 GitHub 身份已变化，已停止。',
   pipeline_configuration_changed: '配置已变化，旧流水线已停止，可从当前有效结果继续。',
   pipeline_stopped: '流水线已停止，不会自动重新执行。',
+  schedule_time_invalid: '巡检时间无效，请使用 00:00 到 23:59。',
+  schedule_changed: '巡检配置已变化，请刷新后重试。',
+  github_repository_required: '只有 GitHub 仓库可以启用每日巡检。',
+};
+const scheduleStatuses: Record<string, string> = {
+  idle: '待调度', paused: '已暂停', scheduled: '已调度',
+  skipped_active: '已有任务，跳过', failed: '调度失败',
 };
 const errorText = (value: string) => errors[value] ?? analysisErrorMessages[value]
   ?? '操作未完成，请查看对应步骤的执行记录。';
@@ -342,6 +353,53 @@ function IssuesPanel({ repo, api, environment, onAnalysisSubmitted }: {
   </section>;
 }
 
+function SchedulePanel({ repo, api }: { repo: { id: string }; api: Api }) {
+  const [schedule, setSchedule] = useState<Schedule | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    void api<Schedule>(`/repositories/${repo.id}/schedule`)
+      .then(value => { if (active) setSchedule(value); })
+      .catch(e => { if (active) setError(errorText((e as Error).message)); });
+    return () => { active = false; };
+  }, [api, repo.id]);
+  if (!schedule) return null;
+  return <section className="schedule-panel" aria-label="每日巡检">
+    <div className="section-heading">
+      <h2>每日巡检</h2>
+      <span className={`tag ${schedule.enabled ? 'green' : 'neutral'}`}>
+        {schedule.enabled ? '已启用' : '已暂停'}
+      </span>
+    </div>
+    <form className="execution-config" onSubmit={event => {
+      event.preventDefault();
+      setBusy(true); setError('');
+      void api<Schedule>(`/repositories/${repo.id}/schedule`, {
+        enabled: schedule.enabled, local_time: schedule.local_time, version: schedule.version,
+      }).then(value => {
+        setSchedule(value); setError('');
+      }).catch(e => setError(errorText((e as Error).message))).finally(() => setBusy(false));
+    }}>
+      <label className="checkbox-label">
+        <input type="checkbox" checked={schedule.enabled} disabled={busy}
+          onChange={event => setSchedule({ ...schedule, enabled: event.target.checked })} />
+        启用每日巡检
+      </label>
+      <label>
+        巡检时间
+        <input type="time" value={schedule.local_time} disabled={busy}
+          onChange={event => setSchedule({ ...schedule, local_time: event.target.value })} />
+      </label>
+      <button className="button secondary" disabled={busy}><Save size={15} />保存巡检配置</button>
+    </form>
+    <p className="diagnosis-meta">
+      最近调度：{schedule.last_run_date || '尚未调度'} · {scheduleStatuses[schedule.last_status] ?? schedule.last_status}
+    </p>
+    {error && <p className="error-inline" role="alert">{error}</p>}
+  </section>;
+}
+
 export function ExecutionPanel({ repo, api }: { repo: { id: string; name: string }; api: Api }) {
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [selected, setSelected] = useState('');
@@ -421,6 +479,7 @@ export function ExecutionPanel({ repo, api }: { repo: { id: string; name: string
     </div>
     <IssuesPanel repo={repo} api={api} environment={env ?? null}
       onAnalysisSubmitted={setIssueAnalysisId} />
+    <SchedulePanel repo={repo} api={api} />
     {error && <div className="error-inline" role="alert">{error}</div>}
     {!env ? <div className="empty"><Download size={28} /><p>尚未下载项目源码</p></div> : <>
       <label className="execution-version">环境版本<select value={selected} onChange={e => {
