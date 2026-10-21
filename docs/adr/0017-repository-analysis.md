@@ -349,3 +349,44 @@ secret-free failure reporting, memory scope and owner/CSRF gates.
 Browser tests cover model settings, secret-field clearing, report rendering,
 mobile layout and personal reproduction feedback. No test model result is
 inserted into the owner's real repository records.
+
+
+### DeepSeek Official Chat Compatibility (2026-10-21, Issue #33)
+
+The saved deepseek-flash Chat Completions configuration used high reasoning;
+the latest attempt failed on the first repository_analyst request with HTTP
+400. The persisted allowlisted event contains no rejected parameter, so it
+does not identify the exact upstream error. Code and the official contract
+establish an incompatible combination: mandatory reads use named tool_choice,
+while DeepSeek enables thinking by default and rejects named/required tool
+choices in that mode. Its Chat Completions response_format supports text and
+json_object; server-side strict function schemas require a separate beta mode.
+
+For HTTPS api.deepseek.com at the default port and root, /v1 or /beta base
+paths, Chat Completions now uses a dedicated JSON Object adapter. All requests
+explicitly disable thinking and omit reasoning_effort, including exploration,
+mandatory reads, handoffs, diagnosis and repair. Keeping the whole run in one
+mode avoids changing reasoning-history requirements midway through tool use.
+This applies even to a saved explicit effort: status reports effective effort
+as null, the WebUI explains the compatibility policy, and analysis records an
+allowlisted provider_compatibility event. Saved settings, credentials and their
+version are not migrated. Other hosts, paths, ports and Responses are unchanged.
+
+The adapter copies function tools and SDK handoffs with strict=false on the
+wire; it preserves their schemas, native handlers and original strict flags.
+Final reports use json_object with the existing prompt schema and strict local
+output/evidence validation. Mandatory reads, exact evidence checks, actual SDK
+handoffs, bounded correction/retry and human confirmation gates remain intact.
+Updating and restarting the backend applies the derived policy to existing
+configuration; failed attempts require an explicit retry.
+
+Request-body regression fixtures exercise mandatory execution/source reads,
+all three forced handoffs, JSON report success and invalid-report rejection
+for every saved effort, shared adapter selection for diagnosis/repair, and
+non-mutation of settings/tools/credentials. They do not call a live provider
+or establish production model quality or full end-to-end DeepSeek acceptance.
+
+Official contracts:
+https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/
+https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/
+https://api-docs.deepseek.com/zh-cn/guides/tool_calls/

@@ -146,6 +146,9 @@ function eventLabel(item: Analysis['events'][number]) {
     } catch { return '报告诊断已记录'; }
   }
   if (item.kind === 'output_protocol') return `输出协议：${item.agent === 'json_object' ? 'JSON Object' : 'JSON Schema'}`;
+  if (item.kind === 'provider_compatibility' && item.agent === 'deepseek_chat') {
+    return 'DeepSeek 兼容模式：所有阶段关闭思考，推理强度设置不生效';
+  }
   if (item.kind === 'provider_response') {
     try {
       const metadata = JSON.parse(item.agent) as { truncated?: boolean; output_tokens?: number; finish_reason?: string };
@@ -215,7 +218,9 @@ export function AnalysisModelSettings({ api }: { api: Api }) {
         已保存输出协议：{config.output_protocol === 'json_object' ? 'JSON Object' : 'JSON Schema'}
       </p>}
       {config.finalization_mode && <p className="diagnosis-meta">
-        已保存报告模式：{config.finalization_mode === 'glm47_direct' ? 'GLM-4.7 直接输出（分析阶段保持默认思考）' : '模型服务默认'}
+        已保存报告模式：{config.finalization_mode === 'deepseek_direct'
+          ? 'DeepSeek 兼容模式（所有阶段关闭思考，推理强度设置不生效）'
+          : config.finalization_mode === 'glm47_direct' ? 'GLM-4.7 直接输出（分析阶段保持默认思考）' : '模型服务默认'}
       </p>}
       <label>分析模型 API Key<input type="password" autoComplete="new-password" maxLength={1024}
         placeholder={config.has_key ? '已保存，留空保留' : ''} value={key} disabled={busy}
