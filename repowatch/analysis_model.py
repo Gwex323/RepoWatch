@@ -43,7 +43,7 @@ def effective_reasoning(config):
 
 
 def output_protocol(config):
-    if deepseek_chat_compatibility(config):
+    if deepseek_chat_compatibility(config) or separate_review_schema_from_tools(config):
         return "json_object"
     if (config["api"] == "chat_completions" and config["model"].lower() == "glm-4.7"
             and urlsplit(config["base_url"]).hostname in ("open.bigmodel.cn", "api.z.ai")):
@@ -55,6 +55,7 @@ def separate_review_schema_from_tools(config):
     url = urlsplit(config["base_url"])
     return (config["api"] == "chat_completions"
             and config["model"].lower() in {"glm-5.3", "glm-5.3-flash"}
+            and url.scheme == "https" and url.port in (None, 443)
             and url.hostname == "ark.cn-beijing.volces.com"
             and url.path.rstrip("/") == "/api/coding/v3")
 
@@ -62,6 +63,8 @@ def separate_review_schema_from_tools(config):
 def finalization_mode(config):
     if deepseek_chat_compatibility(config):
         return "deepseek_direct"
+    if separate_review_schema_from_tools(config):
+        return "provider_default"
     if (output_protocol(config) == "json_object"
             and config.get("reasoning_effort", "auto") == "auto"):
         return "glm47_direct"
@@ -78,6 +81,15 @@ class JsonObjectChatModel(OpenAIChatCompletionsModel):
     async def get_response(self, *args, **kwargs):
         schema = kwargs.get("output_schema")
         if schema is not None and not schema.is_plain_text():
+            # JSON mode enforces syntax only. Preserve the model's knowledge of
+            # the output contract when removing its wire-level JSON Schema.
+            contract = "\nReturn one JSON object matching this schema:\n" + json.dumps(
+                schema.json_schema(), ensure_ascii=False,
+            )
+            if args:
+                args = ((args[0] or "") + contract, *args[1:])
+            else:
+                kwargs["system_instructions"] = (kwargs.get("system_instructions") or "") + contract
             settings = kwargs["model_settings"]
             if (self.fast_finalization and not kwargs.get("tools") and not kwargs.get("handoffs")
                     and settings.tool_choice == "none" and settings.reasoning is None
