@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Check, FileSearch, Loader2, RefreshCw, Save, X } from 'lucide-react';
 import { RepairPanel } from './repair';
+import { ModelProvidersSettings, selectedModelLabel } from './model-providers';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Provider = {
@@ -8,6 +9,7 @@ type Provider = {
   reasoning_effort?: string; effective_reasoning_effort?: string | null;
   output_protocol?: string;
   finalization_mode?: string;
+  routing_version?: number;
 };
 type Finding = {
   id: string; status: string; version: number;
@@ -53,6 +55,7 @@ const statuses: Record<string, string> = {
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
   analysis_model_changed: '模型配置已变化，请刷新后重试。',
+  model_providers_changed: '供应商或智能体选择已变化，请刷新默认配置后重试。',
   analysis_model_key_required: '请填写分析模型的 API Key。',
   analysis_model_new_key_required: '更换服务地址时，请重新填写对应的 API Key。',
   analysis_model_key_unavailable: '无法读取模型密钥，请在运行配置中重新保存。',
@@ -109,6 +112,9 @@ const names: Record<string, string> = {
   reproduction_assistant: '复现辅助', independent_reviewer: '独立审查',
 };
 function eventLabel(item: Analysis['events'][number]) {
+  if (item.kind === 'agent_model') {
+    return selectedModelLabel(item.agent, names);
+  }
   const name = names[item.agent] ?? item.agent;
   if (item.kind === 'attempt') return '开始新一次分析';
   if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
@@ -197,13 +203,21 @@ export function AnalysisModelSettings({ api }: { api: Api }) {
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
   useEffect(() => { void api<Provider>('/analysis-model').then(setConfig).catch(() => setNotice('无法读取模型配置')); }, [api]);
-  return <section className="analysis-model-section">
+  return <><ModelProvidersSettings api={api} legacyVersion={config?.version} />
+    <details className="legacy-model-config"><summary>原有默认模型配置</summary>
+    <section className="analysis-model-section">
     <div className="section-heading"><h2><FileSearch size={18} />仓库分析模型</h2>
       <span className="tag neutral">{config?.enabled ? '已配置 · 调用时验证' : '未启用'}</span></div>
+    <button type="button" className="button secondary" disabled={busy} onClick={() => {
+      setBusy(true); setNotice('');
+      void api<Provider>('/analysis-model').then(setConfig).catch(() => setNotice('无法读取模型配置'))
+        .finally(() => setBusy(false));
+    }}>刷新默认配置</button>
     {config && <form className="execution-config" onSubmit={e => {
       e.preventDefault(); setBusy(true); setNotice('');
       void api<Provider>('/analysis-model', {
         version: config.version, enabled: config.enabled, model: config.model,
+        routing_version: config.routing_version,
         base_url: config.base_url, api: config.api, api_key: key,
         reasoning_effort: config.reasoning_effort ?? 'auto',
       }).then(value => { setConfig(value); setNotice(value.enabled ? '已保存，等待中的分析将自动继续。' : '已保存，自动分析已停用。'); })
@@ -242,9 +256,10 @@ export function AnalysisModelSettings({ api }: { api: Api }) {
         <button className="button secondary" disabled={busy}><Save size={15} />保存分析模型</button>
       </div>
       <p className="diagnosis-meta">启用后会将限定范围的源码、执行日志和仓库记忆发送到此模型服务。密钥保存在本机加密存储中。</p>
+      <p className="diagnosis-meta">保存此配置后，默认模型将切换到本配置；各智能体单独选择的供应商保持不变。</p>
     </form>}
     {notice && <p role="status">{notice}</p>}
-  </section>;
+  </section></details></>;
 }
 
 function FindingItem({ analysis, finding, api, refresh }: {

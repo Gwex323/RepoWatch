@@ -28,6 +28,7 @@ from .analysis_model import REQUEST_TIMEOUT_SECONDS, OutputTruncated
 from .diagnosis import evidence_matches, fingerprint, redact, redact_values
 from .historical_review import MAX_HISTORICAL_FINDINGS, historical_results, historical_snapshot
 from .memory import Memory, capture_repair_fix, compact_experience
+from .model_providers import model_for_role, reasoning_for_role
 from .store import Conflict, Missing, uid
 
 ROLES = ("repository_analyst", "problem_investigator",
@@ -810,39 +811,46 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
 
     models = {
         role: StageModel(
-            model, role, budgets[role], event, retries, deadline,
+            model_for_role(model, role), role, budgets[role], event, retries, deadline,
             final_input=compact_review_input if role == ROLES[-1] else None,
             review_evidence=review_evidence if role == ROLES[-1] else None,
             required_read=required_read if role == ROLES[0] else None,
-            separate_schema_from_tools=getattr(model, "separate_schema_from_tools", False),
-            retry_handoff_mismatch=getattr(model, "retry_handoff_mismatch", False),
+            separate_schema_from_tools=getattr(
+                model_for_role(model, role), "separate_schema_from_tools", False,
+            ),
+            retry_handoff_mismatch=getattr(
+                model_for_role(model, role), "retry_handoff_mismatch", False,
+            ),
         )
         for role in ROLES
     }
-    reasoning = Reasoning(effort=reasoning_effort) if reasoning_effort else None
+    def reasoning(role):
+        effort = reasoning_for_role(model, role, reasoning_effort)
+        return Reasoning(effort=effort) if effort else None
+
     reviewer = Agent(
         name=ROLES[3], model=models[ROLES[3]], tools=tools, output_type=Review,
         instructions=boundary + "Independently challenge prior claims, remove weak or duplicate "
         "findings, and return the final review. Findings remain unconfirmed until human feedback.",
-        model_settings=ModelSettings(max_tokens=5000, reasoning=reasoning),
+        model_settings=ModelSettings(max_tokens=5000, reasoning=reasoning(ROLES[3])),
     )
     reproduction = Agent(
         name=ROLES[2], model=models[ROLES[2]], tools=tools, handoffs=[reviewer],
         instructions=boundary + "Prepare reproducible steps and prerequisites, then hand off "
         "to independent_reviewer.",
-        model_settings=ModelSettings(max_tokens=3000, reasoning=reasoning),
+        model_settings=ModelSettings(max_tokens=3000, reasoning=reasoning(ROLES[2])),
     )
     investigator = Agent(
         name=ROLES[1], model=models[ROLES[1]], tools=tools, handoffs=[reproduction],
         instructions=boundary + "Investigate concrete code paths and failure conditions. "
         "Hand off to reproduction_assistant even when no suspected defect is found.",
-        model_settings=ModelSettings(max_tokens=3000, reasoning=reasoning),
+        model_settings=ModelSettings(max_tokens=3000, reasoning=reasoning(ROLES[1])),
     )
     analyst = Agent(
         name=ROLES[0], model=models[ROLES[0]], tools=tools, handoffs=[investigator],
         instructions=boundary + "Map entry points and execution evidence, choose relevant "
         "files, then hand off to problem_investigator.",
-        model_settings=ModelSettings(max_tokens=3000, reasoning=reasoning),
+        model_settings=ModelSettings(max_tokens=3000, reasoning=reasoning(ROLES[0])),
     )
     intro = {key: value for key, value in context.items() if key != "files"}
     intro["source_index"] = [

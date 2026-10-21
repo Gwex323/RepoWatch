@@ -90,6 +90,13 @@ evidence or owner confirmation.
 
 ## Provider Configuration
 
+Issue #47 adds a saved provider catalog and workflow-scoped agent selections.
+See [供应商与智能体模型](../model-providers.md) for the import format and routing contract.
+The original single-model settings below remain a preserved fallback. Each run
+resolves and freezes its role models, keys and reasoning settings before opening
+clients; subsequent configuration edits cannot redirect an in-flight role.
+Memory evaluations compare routing versions and all role-model identities.
+
 The owner configures endpoint, API mode, model and a dedicated API key in
 the WebUI. Both Responses and Chat Completions adapters are available. The
 provider must support tools and structured output; saving settings is not a

@@ -135,6 +135,7 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await open();
   await expect(page.getByLabel('仓库自动分析').getByText('等待模型配置', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '运行配置', exact: true }).click();
+  await page.getByText('原有默认模型配置', { exact: true }).click();
   await page.getByLabel('分析模型名称').fill(deepseek ? 'deepseek-flash' : 'glm-4.7');
   await page.locator('label').filter({ hasText: '模型接口' }).locator('select').selectOption('chat_completions');
   await page.locator('label').filter({ hasText: '模型服务地址' }).locator('input').fill(

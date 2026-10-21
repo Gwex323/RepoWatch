@@ -26,6 +26,7 @@ from .github_accounts import GitHubAccounts, GitHubError
 from .github_issues import GitHubIssues
 from .memory import Memory
 from .memory_evaluation import MemoryEvaluations
+from .model_providers import ModelProviders
 from .repairs import Repairs
 from .repository_analysis import Analyses
 from .repository_source import ExecutionError
@@ -112,12 +113,49 @@ class ExecutionConfigBody(StrictBody):
 
 class AnalysisModelBody(StrictBody):
     version: int = Field(ge=0, strict=True)
+    routing_version: int | None = Field(default=None, ge=0, strict=True)
     enabled: bool
     model: str = Field(min_length=1, max_length=200)
     base_url: str = Field(min_length=1, max_length=500)
     api: Literal["responses", "chat_completions"]
     reasoning_effort: Literal["auto", "default", "low", "medium", "high", "max"] = "auto"
     api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+
+
+class ProviderModelBody(StrictBody):
+    model: str = Field(min_length=1, max_length=200)
+    reasoning_effort: Literal["auto", "default", "low", "medium", "high", "max"] = "auto"
+
+
+class ProviderBody(StrictBody):
+    name: str = Field(min_length=1, max_length=80)
+    base_url: str = Field(min_length=1, max_length=500)
+    api: Literal["responses", "chat_completions"] = "chat_completions"
+    api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+    models: list[ProviderModelBody] = Field(min_length=1, max_length=40)
+
+
+class ProviderSaveBody(ProviderBody):
+    version: int = Field(ge=0, strict=True)
+
+
+class ProviderImportBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+    providers: list[ProviderBody] = Field(min_length=1, max_length=25)
+
+
+class ProviderVersionBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+
+
+class AgentModelChoice(StrictBody):
+    provider_id: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+
+
+class AgentModelsBody(ProviderVersionBody):
+    enabled: bool = Field(strict=True)
+    routes: dict[str, AgentModelChoice | None] = Field(max_length=10)
 
 
 class FindingFeedbackBody(StrictBody):
@@ -157,6 +195,7 @@ def create_app(
     github = GitHubAccounts(store, client=github_client, vault=credential_vault)
     issues = GitHubIssues(store, github)
     analysis_model = AnalysisModel(store, github)
+    model_providers = ModelProviders(store, github)
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
                           diagnoser=execution_diagnoser or AnalysisModelDiagnoser(analysis_model))
     repairs = Repairs(
@@ -269,7 +308,8 @@ def create_app(
         # Pydantic's default error payload can echo rejected secret input.
         if request.url.path.startswith("/api/github/"):
             return JSONResponse({"detail": "github_invalid_input"}, 422)
-        if request.url.path.startswith("/api/analysis-model"):
+        if request.url.path.startswith(("/api/analysis-model", "/api/model-providers",
+                                        "/api/agent-models")):
             return JSONResponse({"detail": "model_invalid_input"}, 422)
         return await request_validation_exception_handler(request, exc)
 
@@ -357,12 +397,43 @@ def create_app(
 
     @app.get("/api/analysis-model")
     def analysis_model_status():
-        return analysis_model.status()
+        return analysis_model.legacy_status()
 
     @app.post("/api/analysis-model")
     def configure_analysis_model(body: AnalysisModelBody):
         values = body.model_dump(exclude={"api_key"})
         return analysis_model.save(**values, api_key=body.api_key.get_secret_value())
+
+    @app.get("/api/model-providers")
+    def provider_catalog():
+        return model_providers.state()
+
+    def provider_values(body):
+        return {**body.model_dump(exclude={"api_key", "version"}),
+                "api_key": body.api_key.get_secret_value()}
+
+    @app.post("/api/model-providers")
+    def create_provider(body: ProviderSaveBody):
+        return model_providers.save(version=body.version, **provider_values(body))
+
+    @app.post("/api/model-providers/import")
+    def import_providers(body: ProviderImportBody):
+        return model_providers.import_providers(
+            version=body.version, providers=[provider_values(p) for p in body.providers],
+        )
+
+    @app.post("/api/model-providers/{provider_id}/delete")
+    def delete_provider(provider_id: str, body: ProviderVersionBody):
+        return model_providers.delete(provider_id, body.version)
+
+    @app.post("/api/model-providers/{provider_id}")
+    def update_provider(provider_id: str, body: ProviderSaveBody):
+        return model_providers.save(version=body.version, provider_id=provider_id,
+                                    **provider_values(body))
+
+    @app.post("/api/agent-models")
+    def configure_agent_models(body: AgentModelsBody):
+        return model_providers.configure(**body.model_dump())
 
     @app.get("/api/repair-settings")
     def repair_settings():

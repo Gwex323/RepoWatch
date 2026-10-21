@@ -1,6 +1,7 @@
 """Owner-configured analysis provider; credentials never enter repository containers."""
 
 import json
+from contextlib import AsyncExitStack
 from dataclasses import replace
 from urllib.parse import urlsplit
 
@@ -10,12 +11,12 @@ from agents.exceptions import ModelBehaviorError
 from cryptography.fernet import InvalidToken
 from openai import AsyncOpenAI
 
+from .model_providers import ModelProviders, validate_model_config
 from .store import Conflict
 
 REQUEST_TIMEOUT_SECONDS = 120
 REQUEST_TIMEOUT = httpx.Timeout(REQUEST_TIMEOUT_SECONDS, connect=10, write=30, pool=10)
 REPAIR_REQUEST_TIMEOUT_SECONDS = 450
-REASONING_EFFORTS = {"auto", "default", "low", "medium", "high", "max"}
 PROVIDER_REQUEST_FIELDS = {
     "tools", "tool_choice", "response_format", "parallel_tool_calls",
     "reasoning_effort", "max_tokens",
@@ -233,9 +234,8 @@ class AnalysisModel:
     def __init__(self, store, credentials):
         self.store, self.credentials = store, credentials
 
-    def status(self):
-        with self.store.connection() as db:
-            row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
+    @staticmethod
+    def _legacy_status(row):
         if not row:
             return {"enabled": False, "model": "", "base_url": "https://api.openai.com/v1",
                     "api": "responses", "has_key": False, "version": 0,
@@ -249,27 +249,38 @@ class AnalysisModel:
                 "has_key": bool(row["encrypted_key"]),
                 "version": row["version"]}
 
-    def save(self, *, version, enabled, model, base_url, api, api_key, reasoning_effort="auto"):
-        model, base_url, api_key = model.strip(), base_url.strip().rstrip("/"), api_key.strip()
-        try:
-            url = urlsplit(base_url)
-            valid = (
-                bool(url.hostname) and not url.username and not url.password
-                and not url.query and not url.fragment
-                and (url.port is None or 1 <= url.port <= 65535)
-                and (url.scheme == "https" or url.scheme == "http"
-                     and url.hostname in ("localhost", "127.0.0.1", "::1"))
-            )
-        except ValueError:
-            valid = False
-        if (not valid or not model or api not in ("responses", "chat_completions")
-                or reasoning_effort not in REASONING_EFFORTS
-                or model.lower() == "glm-5.3" and reasoning_effort == "medium"):
-            raise Conflict("analysis_model_invalid")
-        config = {"enabled": enabled, "model": model, "base_url": base_url, "api": api,
-                  "reasoning_effort": reasoning_effort}
+    def legacy_status(self):
+        with self.store.connection() as db:
+            db.execute("BEGIN")
+            row = ModelProviders.legacy(db)
+            return {**self._legacy_status(row),
+                    "routing_version": ModelProviders.settings(db)["version"]}
+
+    def status(self):
+        with self.store.connection() as db:
+            db.execute("BEGIN")
+            legacy = self._legacy_status(ModelProviders.legacy(db))
+            settings = ModelProviders.settings(db)
+            routes = json.loads(settings["routes"])
+            selected = (ModelProviders.resolve(db, routes["default"])
+                        if "default" in routes else None)
+            config = selected["config"] if selected else legacy
+            return {**legacy, **config, "enabled": ModelProviders.enabled(db, settings),
+                    "has_key": bool(selected["encrypted_key"]) if selected else legacy["has_key"],
+                    "effective_reasoning_effort": effective_reasoning(config),
+                    "output_protocol": output_protocol(config),
+                    "finalization_mode": finalization_mode(config),
+                    "routing_version": settings["version"]}
+
+    def save(self, *, version, enabled, model, base_url, api, api_key, reasoning_effort="auto",
+             routing_version=None):
+        config = {**validate_model_config(model, base_url, api, reasoning_effort),
+                  "enabled": enabled}
+        base_url, api_key = config["base_url"], api_key.strip()
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if routing_version is not None:
+                ModelProviders.check_version(db, routing_version)
             row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
             if version != (row["version"] if row else 0):
                 raise Conflict("analysis_model_changed")
@@ -288,7 +299,8 @@ class AnalysisModel:
                 "version=excluded.version",
                 (json.dumps(config), encrypted, version + 1),
             )
-        return self.status()
+            ModelProviders.legacy_changed(db, enabled)
+        return self.legacy_status()
 
     async def analyze(self, context, event):
         from .repository_analysis import run_analysis
@@ -300,6 +312,7 @@ class AnalysisModel:
 
         return await self._run(
             run_repair, context, event, workspace=workspace,
+            workflow="repair",
             request_timeout_seconds=REPAIR_REQUEST_TIMEOUT_SECONDS,
         )
 
@@ -309,63 +322,111 @@ class AnalysisModel:
         async def runner(model, value, _event, *, reasoning_effort=None):
             return await run_agents(model, value, reasoning_effort=reasoning_effort)
 
-        return await self._run(runner, context, lambda *_: None)
+        return await self._run(runner, context, lambda *_: None, workflow="diagnosis")
 
     async def _run(self, runner, context, event, *,
-                   request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
+                   request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, workflow="analysis", **options):
+        from .model_providers import AGENT_ROLES
+
         with self.store.connection() as db:
-            row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
-            if not row or not json.loads(row["config"])["enabled"]:
+            db.execute("BEGIN")
+            settings = ModelProviders.settings(db)
+            if not ModelProviders.enabled(db, settings):
                 raise Conflict("analysis_model_required")
+            routes = json.loads(settings["routes"])
+            selected = {"default": ModelProviders.resolve(db, routes.get("default"))}
+            for key in AGENT_ROLES:
+                if key.startswith(workflow + "."):
+                    selected[key.split(".", 1)[1]] = ModelProviders.resolve(
+                        db, routes.get(key, routes.get("default")),
+                    )
             cipher = self.credentials.cipher(db)
             if cipher is None:
                 raise Conflict("analysis_model_key_unavailable")
             try:
-                secret = cipher.decrypt(row["encrypted_key"].encode()).decode()
+                secrets = {role: cipher.decrypt(item["encrypted_key"].encode()).decode()
+                           for role, item in selected.items()}
             except (InvalidToken, UnicodeError):
                 raise Conflict("analysis_model_key_unavailable") from None
-        config = json.loads(row["config"])
-        observation = {}
+            legacy = ModelProviders.legacy(db)
+            legacy_version = legacy["version"] if legacy else 0
+        config = selected["default"]["config"]
+        models, opened, identities = {}, {}, {}
+        async with AsyncExitStack() as stack:
+            for role, item in selected.items():
+                value = item["config"]
+                cache_key = (item["provider_id"], value["model"])
+                if cache_key not in opened:
+                    observation = {}
 
-        async def observe(response):
-            await observe_response(response, observation, event)
+                    async def observe(response, observation=observation):
+                        await observe_response(response, observation, event)
 
-        # A separate transport prevents ambient credentials/proxies and cross-host redirects.
-        async with AsyncOpenAI(
-            api_key=secret, base_url=config["base_url"], max_retries=0,
-            timeout=httpx.Timeout(request_timeout_seconds, connect=10, write=30, pool=10),
-            http_client=httpx.AsyncClient(
-                trust_env=False, follow_redirects=False, event_hooks={"response": [observe]},
-            ),
-        ) as client:
-            protocol = output_protocol(config)
-            event("output_protocol", protocol)
-            if deepseek_chat_compatibility(config):
-                event("provider_compatibility", "deepseek_chat")
-                delegate = DeepSeekChatModel(config["model"], client)
-            elif protocol == "json_object":
-                delegate = JsonObjectChatModel(
-                    config["model"], client,
-                    fast_finalization=finalization_mode(config) == "glm47_direct", event=event,
-                )
-            else:
-                adapter = (
-                    OpenAIResponsesModel if config["api"] == "responses"
-                    else OpenAIChatCompletionsModel
-                )
-                delegate = adapter(config["model"], client)
-            model = ObservedModel(
-                delegate, observation,
-                separate_schema_from_tools=separate_review_schema_from_tools(config),
-                retry_handoff_mismatch=deepseek_chat_compatibility(config),
-            )
+                    # Each endpoint gets its own key; redirects/proxies cannot forward it.
+                    client = await stack.enter_async_context(AsyncOpenAI(
+                        api_key=secrets[role], base_url=value["base_url"], max_retries=0,
+                        timeout=httpx.Timeout(request_timeout_seconds,
+                                              connect=10, write=30, pool=10),
+                        http_client=httpx.AsyncClient(
+                            trust_env=False, follow_redirects=False,
+                            event_hooks={"response": [observe]},
+                        ),
+                    ))
+                    protocol = output_protocol(value)
+                    if deepseek_chat_compatibility(value):
+                        event("provider_compatibility", "deepseek_chat")
+                        delegate = DeepSeekChatModel(value["model"], client)
+                    elif protocol == "json_object":
+                        delegate = JsonObjectChatModel(
+                            value["model"], client,
+                            fast_finalization=finalization_mode(value) == "glm47_direct",
+                            event=event,
+                        )
+                    else:
+                        adapter = (OpenAIResponsesModel if value["api"] == "responses"
+                                   else OpenAIChatCompletionsModel)
+                        delegate = adapter(value["model"], client)
+                    observed = ObservedModel(
+                        delegate, observation,
+                        separate_schema_from_tools=separate_review_schema_from_tools(value),
+                        retry_handoff_mismatch=deepseek_chat_compatibility(value),
+                    )
+                    observed.reasoning_effort = effective_reasoning(value)
+                    opened[cache_key] = observed
+                models[role] = opened[cache_key]
+                if role != "default":
+                    identities[role] = {key: item[key] for key in (
+                        "provider_id", "provider_name", "provider_version",
+                    )}
+                    identities[role].update(value)
+                    identities[role].pop("enabled", None)
+                    identities[role]["effective_reasoning_effort"] = effective_reasoning(value)
+                    event("agent_model", json.dumps({"role": role, **identities[role]},
+                                                    ensure_ascii=False))
+            model = models["default"]
+            model.role_models = {role: value for role, value in models.items() if role != "default"}
+            event("output_protocol", output_protocol(config))
             result = await runner(
-                model, context, event, reasoning_effort=effective_reasoning(config),
-                **options,
+                model, context, event, reasoning_effort=effective_reasoning(config), **options,
             )
-        # The key is not part of the prompt, but never persist a provider-echoed credential.
-        result = json.loads(json.dumps(result).replace(secret, "[REDACTED]"))
+        # Redact every selected key, including a credential echoed by another provider.
+        secret_values = sorted(set(secrets.values()), key=len, reverse=True)
+
+        def redact_credentials(value):
+            if isinstance(value, str):
+                for secret in secret_values:
+                    value = value.replace(secret, "[REDACTED]")
+                return value
+            if isinstance(value, list):
+                return [redact_credentials(item) for item in value]
+            if isinstance(value, dict):
+                return {key: redact_credentials(item) for key, item in value.items()}
+            return value
+
+        result = redact_credentials(json.loads(json.dumps(result)))
         result["model"] = config["model"]
-        result["model_version"] = row["version"]
+        result["model_version"] = legacy_version
         result["reasoning_effort"] = effective_reasoning(config)
+        result["routing_version"] = settings["version"]
+        result["agent_models"] = identities
         return result

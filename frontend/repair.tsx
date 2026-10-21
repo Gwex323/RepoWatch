@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, GitPullRequest, Loader2, RefreshCw, Save, Wrench } from 'lucide-react';
+import { selectedModelLabel } from './model-providers';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Settings = { enabled: boolean; model_enabled: boolean; version: number; max_attempts: number };
@@ -356,6 +357,7 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
         {task.events.map((event, i) => <li key={i}>{new Date(event.created * 1000).toLocaleTimeString('zh-CN')}
           {' · '}{event.kind === 'failure' ? message(event.value) :
             event.kind === 'failure_details' ? failureDetails(event.value) :
+            event.kind === 'agent_model' ? selectedModelLabel(event.value, labels) :
             event.kind === 'provider_response' ? providerEvent(event.value) :
             event.kind === 'source_blocked' ? sourceBlock(event.value) :
             event.kind === 'source_unavailable' ? unavailableSource(event.value) :
