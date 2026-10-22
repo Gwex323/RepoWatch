@@ -22,11 +22,6 @@
 - 仓库页提供每日巡检总览，集中查看各仓库的巡检时间、最近调度状态、失败详情
   和跳过原因；未启用巡检的仓库不会被隐藏。
 
-真实流程共有五个角色：仓库分析 `repository_analyst`、问题调查 `problem_investigator`、
-复现辅助 `reproduction_assistant`、代码修复 `repair_agent`、独立审查 `independent_reviewer`。
-分析使用仓库分析、问题调查、复现辅助与独立审查四个阶段，诊断复用分析、复现辅助和审查，修复使用代码修复与审查。
-Issue/PR 发布由后端服务执行，不额外注册 PR 撰写 Agent。模型服务可由多个阶段共用。
-
 已接入真实仓库的受控自动修复与发布：仅对本人确认复现的问题执行，
 先在隔离源码副本中修改并运行新增回归测试、完整测试，再经过独立审查，
 由后端创建带标记的 Issue 和 PR。默认开关关闭，启用后不再逐问题审批；
@@ -34,6 +29,43 @@ PR 合并仍由项目拥有者在 GitHub 中完成。
 
 以下能力尚未启用：自动合并操作。
 任何自动合并操作均不在系统权限内。
+
+## Agent 角色与模型配置
+
+当前代码按角色名去重后共有 **5 个 Agent 角色**，以 `repowatch/roles.py` 为准：
+
+| 角色 | 标识 | 实际职责 | 参与流程 |
+| --- | --- | --- | --- |
+| 仓库分析 | `repository_analyst` | 分析源码入口、执行依据与相关文件；诊断时定位配置和日志中的故障原因 | 仓库分析、环境诊断 |
+| 问题调查 | `problem_investigator` | 追踪具体代码路径和触发条件，调查疑似缺陷 | 仓库分析 |
+| 复现辅助 | `reproduction_assistant` | 整理复现步骤和前置条件；诊断时提出有日志依据的环境处理建议 | 仓库分析、环境诊断 |
+| 代码修复 | `repair_agent` | 读取源码、生成修改及新增回归测试，提交隔离验证并提供修改摘要 | 自动修复 |
+| 独立审查 | `independent_reviewer` | 复核分析发现和诊断建议；修复时读取实际差异与验证日志，给出结论和风险 | 仓库分析、环境诊断、自动修复 |
+
+真实流程按需创建 Agent 并通过 SDK 原生 handoff 交接：
+
+```text
+仓库分析：repository_analyst → problem_investigator → reproduction_assistant → independent_reviewer
+环境诊断：repository_analyst → reproduction_assistant → independent_reviewer
+自动修复：repair_agent → independent_reviewer
+```
+
+三个流程分别有 4、3、2 个 Agent 创建位置，复用上述五种角色。
+同名角色在不同任务中的实例、不同阶段的调用记录，不会增加角色种类；
+复现辅助也不代替用户本人确认复现。
+
+正常启动的工作台通过“运行配置 → 仓库分析模型”保存**一组模型配置**，
+由仓库分析、模型环境诊断和自动修复共用。服务地址、模型名称、API Key、接口类型
+与推理强度统一配置，无需为每个角色或每个阶段重复填写。未启用时，分析等待配置，
+环境故障仍可显示本地规则建议；自动修复另有独立开关。
+
+### PR 由谁编写和创建
+
+真实流程没有独立的 `pr_author` 角色。`repair_agent` 提供代码修改和修改摘要，
+`independent_reviewer` 提供审查结论、风险与限制。
+后端 `Repairs.publish()` 将问题说明、复现步骤、修改摘要、验证结果和审查意见
+按模板整理为发布正文；`GitHubPublisher.publish()` 创建远程提交、分支、Issue 和 PR。
+Agent 不持有 GitHub 发布工具，发布前仍需满足本人复现确认、测试及独立审查等条件。
 
 ## GitHub 账号连接
 
@@ -193,7 +225,7 @@ GitHub 令牌需要相应内容、Issue、PR 权限；读取成功不代表可�
 owner 手动断言解决不写修复经验，避免无可验证修复内容的记录污染后续分析。
 主流程已在本机 Windows 环境完成真实模型与真实 GitHub 写入的端到端验收，覆盖
 GitHub 账号连接、仓库导入与下载、测试、源码分析、人工复现以及 Issue 和 PR 创建。
-模拟模型、模拟 GitHub 和真实 Docker 自建样例继续用于回归验证。此项验收不代表
+模拟模型、模拟 GitHub 和 Docker 隔离测试项目继续用于开发回归验证。此项验收不代表
 其他仓库、模型服务或操作系统组合均已验证。
 详见 [自动修复设计记录](docs/adr/0018-automatic-repair.md)。
 
@@ -248,21 +280,11 @@ HTTP 状态、操作类别、接口要求的权限、配额和等待时间，不
 测试／启动失败仍正常显示“失败原因与建议”。诊断本身不执行命令、不修改源码，也不
 代替问题复现或测试结果。
 
-复杂故障可启用真实模型诊断，在启动服务的环境中设置：
-
-```powershell
-$env:REPOWATCH_DIAGNOSIS_ENABLED = "1"
-$env:REPOWATCH_DIAGNOSIS_MODEL = "<模型名称>"
-$env:REPOWATCH_DIAGNOSIS_API_KEY = "<专用模型密钥>"
-$env:REPOWATCH_DIAGNOSIS_BASE_URL = "https://api.openai.com/v1"
-$env:REPOWATCH_DIAGNOSIS_API = "responses"
-.\scripts\start.ps1 -Background
-```
-
-不要把真实密钥提交到仓库。兼容服务可将 API 模式设为 `chat_completions`；
-服务和模型需要支持工具调用及结构化输出。地址只接受 HTTPS 或本机 HTTP。
-目前通过启动环境配置，尚无 WebUI 模型配置表单，也不会自动使用通用的
-`OPENAI_API_KEY`。修改后需要重启服务，页面会显示是否配置完成。
+复杂故障的模型诊断由默认应用入口接入 `AnalysisModelDiagnoser`，复用
+“运行配置 → 仓库分析模型”中已启用的模型和密钥，无需另配诊断供应商或
+`REPOWATCH_DIAGNOSIS_*` 环境变量。未配置模型时只使用本地规则建议。
+服务和模型需要支持工具调用及结构化输出，地址只接受 HTTPS 或本机 HTTP。
+页面会显示诊断模型是否可用；不要把真实密钥提交到仓库。
 
 真实诊断复用三个角色，以 SDK 原生 handoff 依次交接：
 `repository_analyst → reproduction_assistant → independent_reviewer`。
@@ -302,6 +324,10 @@ npm.cmd run build
 
 ## 真实任务入口
 
+新安装的仓库列表、问题列表和运行记录初始为空，不预置演示仓库或任务。
+先添加自己的 GitHub 仓库并连接账号，再下载固定版本源码；
+“问题与复现”和“运行记录”由后续真实任务产生。
+
 登记 GitHub 仓库并连接账号后，通过“管理运行环境”下载源码、测试和启动；
 完成执行后进入真实模型分析。可同步真实 GitHub Issue 并以现有环境发起源码分析。
 “问题与复现”显示真实分析发现，点击进入该仓库的分析面板查看依据、记录复现结果。
@@ -323,23 +349,6 @@ npm.cmd run build
 已完成的真实分析可发起成对记忆 A/B 评测：同一源码快照分别以无记忆和同版本记忆分析，
 输出发现、路径、调用量和耗时的结构化摘要。结果用于人工比较，不改变原分析或修复授权。
 记忆检索使用字面匹配；老化提示不会自动归档记录。
-
-### 固定记忆评测
-
-仓库附带八个已知缺陷和四个正常对照固定样本。启用“运行配置 → 仓库分析模型”后，
-可在项目根目录运行以下命令；评测会调用已配置的真实模型：
-
-```powershell
-.\.venv\Scripts\python.exe -m scripts.validate_memory --case pagination
-.\.venv\Scripts\python.exe -m scripts.validate_memory
-```
-
-第一条先检查单个样本和模型兼容性，第二条运行全部十二个样本；完整运行会调用
-十二对真实模型分析并产生费用。每次运行创建独立的
-`data/memory-validation/memory-validation-*.json`，保存两种变体的脱敏报告、失败码、
-调用数、耗时、逐样本差异、全套汇总与人工核查线索。样本源码哈希不匹配会在模型调用前停止；
-评分答案不会送给模型。结果是小样本观察记录，需人工核查发现是否真正命中缺陷。
-固定入口只读取本机模型配置和样本源码，不启动样本项目或触发修复、发布。
 
 记忆与任务共用 `data/repowatch.db`，迁移时随数据库一起保留。
 请勿在知识内容中填写密码、API Key 或其他凭据。
@@ -377,7 +386,8 @@ npm.cmd run test:e2e
 `test-results/`。测试会在独立数据库中设置测试密码、登记测试仓库并验证真实流程界面，
 但不访问或执行该仓库。
 
-实际 Docker 验证只运行项目自带的三种语言样例，需要已启动的 Linux 引擎：
+实际 Docker 验证只运行 `tests/fixtures/` 下的三种语言隔离测试项目，
+需要已启动的 Linux 引擎：
 
 ```powershell
 $env:REPOWATCH_DOCKER_TESTS = "1"
@@ -387,6 +397,25 @@ Remove-Item Env:REPOWATCH_DOCKER_TESTS
 
 普通后台测试默认跳过这些容器测试。真实 Docker 测试会下载官方镜像，
 完成后清理测试容器、数据卷和网络。不要对个人实例数据库运行测试。
+
+### 开发用固定记忆评测
+
+固定评测位于开发脚本 `scripts/validate_memory.py`，测试输入保存在
+`tests/fixtures/memory_evaluation/`，不在工作台初始化时登记仓库或排队任务。
+其中包含八个已知缺陷和四个正常对照，用于比较记忆检索效果。
+启用“运行配置 → 仓库分析模型”后，可在项目根目录手动运行：
+
+```powershell
+.\.venv\Scripts\python.exe -m scripts.validate_memory --case pagination
+.\.venv\Scripts\python.exe -m scripts.validate_memory
+```
+
+第一条检查单个用例和模型兼容性，第二条运行全部十二个用例；完整运行会调用
+十二对真实模型分析并产生费用。每次运行创建独立的
+`data/memory-validation/memory-validation-*.json`，保存两种变体的脱敏报告、失败码、
+调用数、耗时、逐用例差异、全套汇总与人工核查线索。源码哈希不匹配会在模型调用前停止；
+评分答案不会送给模型。结果需人工核查发现是否真正命中缺陷。
+脚本只读取本机模型配置和测试源码，不启动测试项目或触发修复、发布。
 
 ## Linux 准备
 
@@ -418,11 +447,14 @@ repowatch/
   diagnosis.py    失败证据、本地规则和可选 SDK 多 Agent 诊断
   repository_analysis.py  源码分析队列、只读工具、原生交接和真实问题反馈
   analysis_model.py       仓库分析模型配置与加密凭据
+  repairs.py             持久化修复队列、验证及发布正文整理
+  repair_model.py        代码修复与独立审查 Agent
+  github_contributions.py  受控 GitHub 提交、分支、Issue 和 PR 创建
   repository_source.py  GitHub 源码下载、归档校验与命令识别
   docker_runtime.py     受限制的 Docker 执行和预览访问
 frontend/         WebUI
 tests/            后台和浏览器测试
-scripts/          Windows 启动脚本
+scripts/          Windows 启动脚本与开发用固定记忆评测
 docs/             需求、架构决策和分阶段计划
 ```
 
