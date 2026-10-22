@@ -3,28 +3,11 @@
 import json
 
 from .model_urls import valid_model_base_url
+from .roles import FLOW_ROLES, ROLE_DETAILS, ROLES
 from .store import Conflict, Missing, uid
 
 REASONING_EFFORTS = {"auto", "default", "low", "medium", "high", "max"}
-AGENT_ROLES = {
-    "analysis.repository_analyst": "仓库分析 · 仓库分析员",
-    "analysis.problem_investigator": "仓库分析 · 问题调查员",
-    "analysis.reproduction_assistant": "仓库分析 · 复现辅助员",
-    "analysis.independent_reviewer": "仓库分析 · 独立审查员",
-    "repair.repair_agent": "自动修复 · 代码修复员",
-    "repair.independent_reviewer": "自动修复 · 独立审查员",
-    "diagnosis.repository_analyst": "运行诊断 · 原因分析员",
-    "diagnosis.reproduction_assistant": "运行诊断 · 方案辅助员",
-    "diagnosis.independent_reviewer": "运行诊断 · 独立审查员",
-}
-
-
-def model_for_role(model, role):
-    return getattr(model, "role_models", {}).get(role, model)
-
-
-def reasoning_for_role(model, role, default=None):
-    return getattr(model_for_role(model, role), "reasoning_effort", default)
+AGENT_ROLES = {role: ROLE_DETAILS[role]["name"] for role in ROLES}
 
 
 def validate_model_config(model, base_url, api, reasoning_effort="auto"):
@@ -40,18 +23,53 @@ def validate_model_config(model, base_url, api, reasoning_effort="auto"):
 
 
 def initialize(db):
-    db.executescript("""
+    db.execute("""
         CREATE TABLE IF NOT EXISTS model_providers (
             id TEXT PRIMARY KEY, name TEXT NOT NULL, base_url TEXT NOT NULL,
             api TEXT NOT NULL, models TEXT NOT NULL, encrypted_key TEXT NOT NULL,
             version INTEGER NOT NULL
-        );
+        )
+    """)
+    db.execute("""
         CREATE TABLE IF NOT EXISTS agent_model_settings (
             id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL,
             enabled INTEGER, routes TEXT NOT NULL
-        );
-        INSERT OR IGNORE INTO agent_model_settings VALUES(1,0,NULL,'{}');
+        )
     """)
+    db.execute("INSERT OR IGNORE INTO agent_model_settings VALUES(1,0,NULL,'{}')")
+    marker = "model_provider_five_roles_v1"
+    if db.execute("SELECT 1 FROM settings WHERE key=?", (marker,)).fetchone():
+        return
+    settings = dict(db.execute("SELECT * FROM agent_model_settings WHERE id=1").fetchone())
+    old = json.loads(settings["routes"])
+    routes = {"default": old["default"]} if old.get("default") else {}
+    notes = []
+    legacy = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
+    legacy_config = json.loads(legacy["config"]) if legacy else {}
+    legacy_config.pop("enabled", None)
+    flow_names = {"analysis": "仓库分析", "repair": "自动修复", "diagnosis": "环境诊断"}
+    for role in ROLES:
+        choices = [("角色", old[role])] if old.get(role) else []
+        choices.extend((flow_names[flow], old[f"{flow}.{role}"])
+                       for flow in ("analysis", "repair", "diagnosis")
+                       if role in FLOW_ROLES[flow] and old.get(f"{flow}.{role}"))
+        if choices:
+            routes[role] = choices[0][1]
+            if len({json.dumps(choice, sort_keys=True) for _, choice in choices}) > 1:
+                notes.append(f"{AGENT_ROLES[role]}：旧流程选择不同，已采用{choices[0][0]}中的选择，"
+                             "可在角色卡片中修改。")
+        direct = db.execute("SELECT * FROM agent_models WHERE role=?", (role,)).fetchone()
+        if (direct and direct["encrypted_key"] and (old.get("default") or choices)
+                and (json.loads(direct["config"]) != legacy_config
+                     or not legacy or direct["encrypted_key"] != legacy["encrypted_key"])):
+            routes[role] = {"direct": True}
+            notes.append(f"{AGENT_ROLES[role]}：保留此前单独保存的角色配置。")
+    db.execute("INSERT OR IGNORE INTO settings VALUES(?,?)",
+               ("model_provider_routes_before_five_roles", json.dumps(settings)))
+    db.execute("UPDATE agent_model_settings SET routes=?,version=version+1 WHERE id=1",
+               (json.dumps(routes),))
+    db.execute("INSERT INTO settings VALUES(?,?)", (marker, json.dumps(notes)))
+    db.execute("UPDATE analysis_model SET version=version+1 WHERE id=1")
 
 
 class ModelProviders:
@@ -70,8 +88,7 @@ class ModelProviders:
     @classmethod
     def enabled(cls, db, settings):
         legacy = cls.legacy(db)
-        return (bool(settings["enabled"]) if settings["enabled"] is not None
-                else bool(legacy and json.loads(legacy["config"])["enabled"]))
+        return bool(legacy and json.loads(legacy["config"]).get("enabled"))
 
     @classmethod
     def resolve(cls, db, route):
@@ -102,11 +119,52 @@ class ModelProviders:
                           "api": r["api"], "models": json.loads(r["models"]),
                           "has_key": bool(r["encrypted_key"]), "version": r["version"]}
                          for r in db.execute("SELECT * FROM model_providers ORDER BY rowid")]
+            notes = db.execute("SELECT value FROM settings WHERE key=?",
+                               ("model_provider_five_roles_v1",)).fetchone()
             return {"version": settings["version"], "enabled": self.enabled(db, settings),
                     "routes": json.loads(settings["routes"]), "roles": AGENT_ROLES,
                     "providers": providers,
                     "legacy_available": bool(legacy and legacy["encrypted_key"]),
-                    "legacy_model": json.loads(legacy["config"])["model"] if legacy else ""}
+                    "legacy_model": json.loads(legacy["config"]).get("model", "") if legacy else "",
+                    "migration_notes": json.loads(notes["value"]) if notes else []}
+
+    @classmethod
+    def role_rows(cls, db):
+        """Resolve all roles in the caller's transaction, keeping credentials encrypted."""
+        settings = cls.settings(db)
+        routes = json.loads(settings["routes"])
+        saved = {row["role"]: dict(row) for row in db.execute("SELECT * FROM agent_models")}
+        rows = {}
+        for role in ROLES:
+            row = {"role": role, "config": "{}", "encrypted_key": "", "version": 0,
+                   **saved.get(role, {}), "provider_id": None,
+                   "provider_name": "角色独立配置", "provider_version": 0,
+                   "selection_choice": routes.get(role), "routing_version": settings["version"]}
+            choice = routes.get(role) or routes.get("default")
+            if choice and not choice.get("direct"):
+                try:
+                    resolved = cls.resolve(db, choice)
+                    row.update({key: resolved[key] for key in (
+                        "encrypted_key", "provider_id", "provider_name", "provider_version",
+                    )})
+                    row["config"] = json.dumps(resolved["config"])
+                except Conflict as exc:
+                    row.update(encrypted_key="", selection_error=str(exc))
+            rows[role] = row
+        return rows
+
+    @staticmethod
+    def bump_revision(db):
+        db.execute("UPDATE agent_model_settings SET version=version+1 WHERE id=1")
+        db.execute("INSERT INTO analysis_model VALUES(1,?, '',1) ON CONFLICT(id) "
+                   "DO UPDATE SET version=analysis_model.version+1",
+                   (json.dumps({"enabled": False}),))
+
+    @staticmethod
+    def touch_roles(db, roles):
+        for role in roles:
+            db.execute("INSERT INTO agent_models VALUES(?, '{}', '',1) ON CONFLICT(role) "
+                       "DO UPDATE SET version=agent_models.version+1", (role,))
 
     @staticmethod
     def check_version(db, version):
@@ -150,8 +208,8 @@ class ModelProviders:
             raise Conflict("analysis_model_new_key_required")
         routes = json.loads(self.settings(db)["routes"])
         names = {m["model"] for m in value["models"]}
-        if any(r and r["provider_id"] == provider_id and r["model"] not in names
-               for r in routes.values()):
+        if provider_id and any(r and r.get("provider_id") == provider_id
+                               and r.get("model") not in names for r in routes.values()):
             raise Conflict("model_provider_in_use")
         if value["api_key"]:
             encrypted = self.credentials.cipher(db, create=True).encrypt(
@@ -173,7 +231,7 @@ class ModelProviders:
             db.execute("BEGIN IMMEDIATE")
             self.check_version(db, version)
             self._write(db, normalized, provider_id)
-            db.execute("UPDATE agent_model_settings SET version=version+1 WHERE id=1")
+            self.bump_revision(db)
         return self.state()
 
     def import_providers(self, *, version, providers):
@@ -185,19 +243,19 @@ class ModelProviders:
             self.check_version(db, version)
             for value in values:
                 self._write(db, value)
-            db.execute("UPDATE agent_model_settings SET version=version+1 WHERE id=1")
+            self.bump_revision(db)
         return self.state()
 
     def delete(self, provider_id, version):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             settings = self.check_version(db, version)
-            if any(r and r["provider_id"] == provider_id
+            if any(r and r.get("provider_id") == provider_id
                    for r in json.loads(settings["routes"]).values()):
                 raise Conflict("model_provider_in_use")
             if not db.execute("DELETE FROM model_providers WHERE id=?", (provider_id,)).rowcount:
                 raise Missing("Model provider not found.")
-            db.execute("UPDATE agent_model_settings SET version=version+1 WHERE id=1")
+            self.bump_revision(db)
         return self.state()
 
     def configure(self, *, version, enabled, routes):
@@ -206,20 +264,53 @@ class ModelProviders:
         routes = {key: value for key, value in routes.items() if value is not None}
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
-            self.check_version(db, version)
-            for route in routes.values():
-                if not self.resolve(db, route)["encrypted_key"]:
-                    raise Conflict("analysis_model_key_required")
-            if enabled and not self.resolve(db, routes.get("default"))["encrypted_key"]:
+            settings = self.check_version(db, version)
+            self._set_routes(db, settings, routes)
+            legacy = self.legacy(db)
+            config = json.loads(legacy["config"])
+            config["enabled"] = enabled
+            db.execute("UPDATE analysis_model SET config=? WHERE id=1", (json.dumps(config),))
+            db.execute("UPDATE agent_model_settings SET enabled=? WHERE id=1", (int(enabled),))
+        return self.state()
+
+    @classmethod
+    def _set_routes(cls, db, settings, routes):
+        for key, route in routes.items():
+            if route.get("direct"):
+                if key == "default" or route != {"direct": True}:
+                    raise Conflict("model_agent_invalid")
+            elif not cls.resolve(db, route)["encrypted_key"]:
                 raise Conflict("analysis_model_key_required")
-            db.execute("UPDATE agent_model_settings SET enabled=?,routes=?,version=version+1 "
-                       "WHERE id=1", (int(enabled), json.dumps(routes)))
+        old = json.loads(settings["routes"])
+        changed = [role for role in ROLES if old.get(role) != routes.get(role)
+                   or not routes.get(role) and old.get("default") != routes.get("default")]
+        cls.touch_roles(db, changed)
+        db.execute("UPDATE agent_model_settings SET routes=? WHERE id=1", (json.dumps(routes),))
+        cls.bump_revision(db)
+
+    def select(self, *, version, role, choice):
+        if role not in (*ROLES, "default"):
+            raise Conflict("model_agent_invalid")
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            settings = self.check_version(db, version)
+            routes = json.loads(settings["routes"])
+            if choice is None:
+                routes.pop(role, None)
+            else:
+                routes[role] = choice
+            self._set_routes(db, settings, routes)
         return self.state()
 
     @staticmethod
-    def legacy_changed(db, enabled):
+    def direct_changed(db, role):
         settings = ModelProviders.settings(db)
         routes = json.loads(settings["routes"])
-        routes.pop("default", None)
+        routes[role] = {"direct": True}
+        db.execute("UPDATE agent_model_settings SET routes=?,version=version+1 WHERE id=1",
+                   (json.dumps(routes),))
+
+    @staticmethod
+    def legacy_changed(db, enabled):
         db.execute("UPDATE agent_model_settings SET enabled=?,routes=?,version=version+1 "
-                   "WHERE id=1", (int(enabled), json.dumps(routes)))
+                   "WHERE id=1", (int(enabled), "{}"))

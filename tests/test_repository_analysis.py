@@ -1358,7 +1358,7 @@ def test_automatic_queue_waits_for_model_then_resumes_once(service):  # noqa: F8
     assert len([e for e in result["events"] if e["kind"] == "handoff"]) == 3
     assert asyncio.run(analyses.tick()) is False
     assert len(analyses.list(env["id"])) == 1
-    assert execution.store.dashboard()["runs"] == []
+    assert execution.store.dashboard()["findings"][0]["id"] == result["findings"][0]["id"]
 
 
 def test_real_feedback_requires_personal_confirmation_and_never_repairs(service):  # noqa: F811

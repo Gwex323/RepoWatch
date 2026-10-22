@@ -225,6 +225,7 @@ def test_probe_apis_require_owner_csrf_and_mask_invalid_secret_input(tmp_path):
         invalid = client.post(path, headers=headers, json={"api_key": "private-key"})
         assert invalid.status_code == 422 and "private-key" not in invalid.text
         before = client.get("/api/model-providers").json()
+        body["version"] = before["version"]
         result = client.post(path, headers=headers, json=body)
         assert result.status_code == 200 and result.json()["models"] == ["discovered-model"]
         result = client.post("/api/model-providers/test-connection", headers=headers,

@@ -28,7 +28,7 @@ test('desktop project: detect, confirm partial offline scope and never launch GU
   let confirmed = false;
   await page.route('**/api/dashboard', route => route.fulfill({ json: {
     repositories: [{ id: 'repo_desktop', name: 'fixture/desktop', kind: 'github',
-      url: 'https://github.com/fixture/desktop', language: 'Python' }], runs: [], events: [],
+      url: 'https://github.com/fixture/desktop', language: 'Python' }], findings: [], events: [], counts: { waiting: 0, active: 0, published_prs: 0 },
   } }));
   await page.route('**/api/execution/readiness', route => route.fulfill({ json: { ready: true, reason: '' } }));
   await page.route('**/api/repositories/repo_desktop/environments', route => route.fulfill({ json: [env] }));

@@ -37,7 +37,7 @@ test('provider editor discovers models without a name and tests one selected mod
     await page.getByRole('button', { name: '创建并进入' }).click();
   } else await page.getByRole('button', { name: '进入工作空间' }).click();
   await page.getByRole('button', { name: '运行配置', exact: true }).click();
-  const panel = page.getByRole('region', { name: '供应商与智能体模型' });
+  const panel = page.getByRole('region', { name: '模型供应商', exact: true });
   await panel.getByRole('button', { name: '新增供应商' }).click();
   const editor = panel.getByRole('form', { name: '供应商编辑' });
   await editor.getByLabel('供应商 baseURL').fill('https://first.example/v1');

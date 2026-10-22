@@ -22,15 +22,11 @@ from repowatch.app import create_app
 from repowatch.diagnosis import run_agents
 from repowatch.github_accounts import GitHubAccounts
 from repowatch.memory_evaluation import _model_consistent, model_identity
-from repowatch.model_providers import (
-    AGENT_ROLES,
-    ModelProviders,
-    model_for_role,
-    reasoning_for_role,
-)
+from repowatch.model_providers import ModelProviders
 from repowatch.repair_model import run_repair
 from repowatch.repair_workspace import RepairWorkspace
 from repowatch.repository_analysis import run_analysis
+from repowatch.roles import FLOW_ROLES, model_for_role, reasoning_for_role
 from repowatch.store import Conflict, Store
 
 
@@ -75,7 +71,7 @@ def test_saved_keys_are_encrypted_kept_on_edit_and_not_returned(catalog):
         ]
     configure(providers, {"default": choice(edited)})
     assert engine.status()["enabled"] and engine.status()["model"] == "general-model"
-    assert engine.legacy_status()["version"] == 0
+    assert engine.status()["role_models"]["repository_analyst"]["provider_id"] == raw["id"]
     reopened = ModelProviders(Store(providers.store.path), providers.credentials)
     assert reopened.state() == providers.state()
 
@@ -96,16 +92,17 @@ def test_invalid_provider_does_not_change_catalog(catalog, changes):
 
 def test_import_is_atomic_and_optimistic_versions_prevent_overwrite(catalog):
     providers, _ = catalog
+    before = providers.state()
     duplicate = [provider(), provider()]
     with pytest.raises(Conflict, match="name_exists"):
-        providers.import_providers(version=0, providers=duplicate)
-    assert providers.state()["providers"] == [] and providers.state()["version"] == 0
-    saved = providers.import_providers(version=0, providers=[
+        providers.import_providers(version=before["version"], providers=duplicate)
+    assert providers.state() == before
+    saved = providers.import_providers(version=before["version"], providers=[
         provider(), provider("供应商乙", "http://127.0.0.1:8080/v1", "synthetic-other-key"),
     ])
     assert len(saved["providers"]) == 2
     with pytest.raises(Conflict, match="model_providers_changed"):
-        providers.save(version=0, **provider(name="过期编辑"))
+        providers.save(version=before["version"], **provider(name="过期编辑"))
     assert providers.state() == saved
 
 
@@ -119,7 +116,7 @@ def test_key_rotation_endpoint_changes_and_referenced_models_are_protected(catal
     providers, _ = catalog
     saved = create(providers)
     chosen = choice(saved, "specialized-model")
-    state = configure(providers, {"default": choice(saved), "repair.repair_agent": chosen})
+    state = configure(providers, {"default": choice(saved), "repair_agent": chosen})
     provider_id = chosen["provider_id"]
     with pytest.raises(Conflict, match="new_key_required"):
         providers.save(version=state["version"], provider_id=provider_id,
@@ -131,28 +128,30 @@ def test_key_rotation_endpoint_changes_and_referenced_models_are_protected(catal
         providers.delete(provider_id, state["version"])
     updated = providers.save(version=state["version"], provider_id=provider_id,
                              **provider(url="https://changed.example/v1", key="new-key"))
-    assert updated["routes"]["repair.repair_agent"] == chosen
+    assert updated["routes"]["repair_agent"] == chosen
     configure(providers, {}, enabled=False)
     assert providers.delete(provider_id, providers.state()["version"])["providers"] == []
 
 
 def test_legacy_configuration_survives_upgrade_and_default_switches(catalog):
     providers, engine = catalog
-    legacy = engine.save(version=0, enabled=True, model="old-model", api="responses",
-                         base_url="https://old.example/v1", api_key="old-secret")
+    engine.save(version=0, enabled=True, model="old-model", api="responses",
+                base_url="https://old.example/v1", api_key="old-secret")
     with providers.store.connection() as db:
         original = dict(db.execute("SELECT * FROM analysis_model").fetchone())
     assert providers.state()["legacy_available"] and providers.state()["enabled"]
     saved = create(providers)
-    configure(providers, {"default": choice(saved), "repair.repair_agent": choice(saved)})
+    configure(providers, {"default": choice(saved), "repair_agent": choice(saved)})
     assert engine.status()["model"] == "general-model"
     with providers.store.connection() as db:
-        assert dict(db.execute("SELECT * FROM analysis_model").fetchone()) == original
-    engine.save(version=legacy["version"], enabled=False, model="old-model", api="responses",
-                base_url="https://old.example/v1", api_key="")
+        current = dict(db.execute("SELECT * FROM analysis_model").fetchone())
+        assert current["config"] == original["config"]
+        assert current["encrypted_key"] == original["encrypted_key"]
+        assert current["version"] > original["version"]
+    engine.save(version=engine.status()["version"], enabled=False, model="old-model",
+                api="responses", base_url="https://old.example/v1", api_key="")
     assert engine.status()["model"] == "old-model" and not engine.status()["enabled"]
-    assert "default" not in providers.state()["routes"]
-    assert "repair.repair_agent" in providers.state()["routes"]
+    assert providers.state()["routes"] == {}
 
 
 @pytest.mark.parametrize("case", ["role", "provider", "model", "key", "default"])
@@ -167,7 +166,7 @@ def test_invalid_assignments_cannot_enable_partial_configuration(catalog, case):
     elif case == "model":
         routes["default"]["model"] = "missing"
     elif case == "default":
-        routes = {"repair.repair_agent": choice(saved)}
+        routes = {"default": {"direct": True}}
     with pytest.raises(Conflict):
         configure(providers, routes)
     assert not providers.state()["enabled"]
@@ -179,9 +178,11 @@ def test_real_transport_routes_keys_models_and_freezes_current_run(catalog, monk
     saved = create(providers)
     saved = create(providers, name="供应商乙", base_url="https://second.example/v1",
                    api_key="synthetic-second-key")
-    roles = [key.split(".")[1] for key in AGENT_ROLES if key.startswith(workflow + ".")]
+    roles = FLOW_ROLES[workflow]
     chosen = choice(saved, "specialized-model", 1)
-    configure(providers, {"default": choice(saved), f"{workflow}.{roles[-1]}": chosen})
+    configure(providers, {"default": choice(saved), roles[-1]: chosen})
+    snapshot_version = engine.status()["version"]
+    snapshot_provider_version = saved["providers"][1]["version"]
     requests, clients, events = [], [], []
 
     async def transport(request):
@@ -212,7 +213,7 @@ def test_real_transport_routes_keys_models_and_freezes_current_run(catalog, monk
         providers.save(version=providers.state()["version"], provider_id=chosen["provider_id"],
                        **provider("供应商乙", "https://changed.example/v1", "rotated-key"))
         for role in roles:
-            effort = reasoning_for_role(model, role, reasoning_effort)
+            effort = reasoning_for_role(reasoning_effort, role)
             await model_for_role(model, role).get_response(
                 system_instructions="Synthetic transport test", input="safe input",
                 model_settings=ModelSettings(
@@ -222,17 +223,18 @@ def test_real_transport_routes_keys_models_and_freezes_current_run(catalog, monk
             )
         return {"summary": "synthetic-first-key and synthetic-second-key"}
 
-    result = asyncio.run(engine._run(runner, {}, lambda *e: events.append(e), workflow=workflow))
+    result = asyncio.run(engine._run(runner, {}, lambda *e: events.append(e), flow=workflow))
     assert [r[0] for r in requests] == ["first.example"] * (len(roles)-1) + ["second.example"]
     assert requests[-1][1] == "Bearer synthetic-second-key"
     assert requests[-1][2]["model"] == "specialized-model"
     assert requests[-1][2]["reasoning_effort"] == "high"
     assert all(r[1] == "Bearer synthetic-first-key" for r in requests[:-1])
     assert "synthetic-" not in result["summary"]
-    assert result["agent_models"][roles[-1]]["base_url"] == "https://second.example/v1"
-    assert result["routing_version"] < providers.state()["version"]
-    assert model_identity(engine)[-1] == providers.state()["version"]
-    assert len(clients) == 2 and all(client.is_closed for _, client in clients)
+    assert result["role_models"][roles[-1]]["provider_id"] == chosen["provider_id"]
+    assert result["role_models"][roles[-1]]["provider_version"] == snapshot_provider_version
+    assert result["model_version"] == snapshot_version < engine.status()["version"]
+    assert model_identity(engine)[-1] == engine.status()["role_models"]
+    assert len(clients) == len(roles) and all(client.is_closed for _, client in clients)
     assert "synthetic-second-key" not in json.dumps(events)
 
 
@@ -254,19 +256,21 @@ class RoleProbe(Model):
 
 @pytest.mark.parametrize("workflow", ["analysis", "repair", "diagnosis"])
 def test_native_sdk_graphs_use_each_role_delegate_and_reasoning(tmp_path, workflow):
-    roles = [key.split(".")[1] for key in AGENT_ROLES if key.startswith(workflow + ".")]
+    roles = FLOW_ROLES[workflow]
     shared = {"analysis": ReviewModel(), "repair": RepairModel(),
               "diagnosis": DiagnosticModel()}[workflow]
     seen = []
-    shared.role_models = {role: RoleProbe(shared, role, seen, "high" if i else None)
-                          for i, role in enumerate(roles)}
+    models = {role: RoleProbe(shared, role, seen, "high" if i else None)
+              for i, role in enumerate(roles)}
+    efforts = {role: model.reasoning_effort for role, model in models.items()}
     if workflow == "analysis":
-        result = asyncio.run(run_analysis(shared, {"files": {"app.py": "print('ok')"},
-            "config": {}, "jobs": [], "test_result": None}, lambda *_: None))
+        result = asyncio.run(run_analysis(models, {"files": {"app.py": "print('ok')"},
+            "config": {}, "jobs": [], "test_result": None}, lambda *_: None,
+            reasoning_effort=efforts))
     elif workflow == "diagnosis":
-        result = asyncio.run(run_agents(shared, {
+        result = asyncio.run(run_agents(models, {
             "log": UNKNOWN_LOG, "manifests": {}, "config": {},
-        }))
+        }, reasoning_effort=efforts))
     else:
         source = tmp_path / "environment/source"
         source.mkdir(parents=True)
@@ -277,14 +281,15 @@ def test_native_sdk_graphs_use_each_role_delegate_and_reasoning(tmp_path, workfl
                                     runtime=RepairRuntime())
         workspace = RepairWorkspace(execution, "repair_" + "b" * 16,
             {"id": "synthetic", "config": {"language": "python", "test": "suite"}}, lambda: None)
-        result = asyncio.run(run_repair(shared, {"finding": {}, "confirmation": {}},
-                                       lambda *_: None, workspace=workspace))
+        result = asyncio.run(run_repair(models, {"finding": {}, "confirmation": {}},
+                                       lambda *_: None, workspace=workspace,
+                                       reasoning_effort=efforts))
     assert set(seen) == set(roles) and result["handoffs"]
 
 
 def test_evaluation_rejects_different_role_models_even_when_default_matches():
-    first = {"report": {"model": "same", "routing_version": 4, "agent_models": {"a": "first"}}}
-    second = {"report": {"model": "same", "routing_version": 4, "agent_models": {"a": "other"}}}
+    first = {"report": {"model": "same", "model_version": 4, "role_models": {"a": "first"}}}
+    second = {"report": {"model": "same", "model_version": 4, "role_models": {"a": "other"}}}
     assert not _model_consistent(first, second)
 
 
@@ -293,16 +298,17 @@ def test_selected_deepseek_role_keeps_its_own_handoff_policy(catalog):
     saved = create(providers)
     saved = create(providers, name="DeepSeek", base_url="https://api.deepseek.com/v1")
     configure(providers, {"default": choice(saved),
-                          "analysis.problem_investigator": choice(saved, index=1)})
+                          "problem_investigator": choice(saved, index=1)})
 
     async def runner(model, *args, **kwargs):
-        assert not model.retry_handoff_mismatch
+        assert not model_for_role(model, "repository_analyst").retry_handoff_mismatch
         chosen = model_for_role(model, "problem_investigator")
-        assert chosen.retry_handoff_mismatch and chosen.reasoning_effort is None
+        assert chosen.retry_handoff_mismatch
+        assert reasoning_for_role(kwargs["reasoning_effort"], "problem_investigator") is None
         assert not model_for_role(model, "independent_reviewer").retry_handoff_mismatch
         return {}
 
-    asyncio.run(engine._run(runner, {}, lambda *_: None))
+    asyncio.run(engine._run(runner, {}, lambda *_: None, flow="analysis"))
 
 
 def test_handoff_retry_is_selected_per_role_in_the_native_graph(monkeypatch):
@@ -326,24 +332,22 @@ def test_handoff_retry_is_selected_per_role_in_the_native_graph(monkeypatch):
                 )
             return response
 
-    shared.role_models = {"problem_investigator": HandoffProbe(
-        shared, "problem_investigator", [], None,
-    )}
-    report = asyncio.run(run_analysis(shared, {"files": {"app.py": "print('ok')"},
+    models = {role: shared for role in FLOW_ROLES["analysis"]}
+    models["problem_investigator"] = HandoffProbe(shared, "problem_investigator", [], None)
+    report = asyncio.run(run_analysis(models, {"files": {"app.py": "print('ok')"},
         "config": {}, "jobs": [], "test_result": None}, lambda *e: events.append(e)))
     assert len(report["handoffs"]) == 3
     assert events.count(("handoff_retry", "problem_investigator")) == 1
 
 
-def test_stale_legacy_editor_cannot_overwrite_a_new_default_selection(catalog):
+def test_stale_role_editor_cannot_overwrite_a_new_default_selection(catalog):
     providers, engine = catalog
-    legacy = engine.legacy_status()
+    role = engine.configuration()["roles"][0]
     saved = create(providers)
     configure(providers, {"default": choice(saved)})
-    with pytest.raises(Conflict, match="model_providers_changed"):
-        engine.save(version=0, routing_version=legacy["routing_version"], enabled=True,
-                    model="stale", api="responses", base_url="https://old.example/v1",
-                    api_key="old-key")
+    with pytest.raises(Conflict, match="analysis_model_changed"):
+        engine.save_role(role["role"], version=role["version"], model="stale", api="responses",
+                         base_url="https://old.example/v1", api_key="old-key")
     assert engine.status()["model"] == "general-model"
 
 
@@ -353,7 +357,7 @@ def test_all_clients_close_when_workflow_raises_or_is_cancelled(catalog, monkeyp
     saved = create(providers)
     saved = create(providers, name="供应商乙", base_url="https://second.example/v1")
     configure(providers, {"default": choice(saved),
-                          "analysis.independent_reviewer": choice(saved, index=1)})
+                          "independent_reviewer": choice(saved, index=1)})
     clients = []
 
     def client(**kwargs):
@@ -367,8 +371,8 @@ def test_all_clients_close_when_workflow_raises_or_is_cancelled(catalog, monkeyp
         raise asyncio.CancelledError if cancel else RuntimeError("synthetic stop")
 
     with pytest.raises(asyncio.CancelledError if cancel else RuntimeError):
-        asyncio.run(engine._run(runner, {}, lambda *_: None))
-    assert len(clients) == 2 and all(c.is_closed() for c in clients)
+        asyncio.run(engine._run(runner, {}, lambda *_: None, flow="analysis"))
+    assert len(clients) == len(FLOW_ROLES["analysis"]) and all(c.is_closed() for c in clients)
 
 
 def test_echoed_escaped_short_keys_are_redacted_without_corrupting_output_fields(catalog):
@@ -380,7 +384,7 @@ def test_echoed_escaped_short_keys_are_redacted_without_corrupting_output_fields
     async def runner(*args, **kwargs):
         return {"approved": True, "summary": secret, "nested": [secret]}
 
-    result = asyncio.run(engine._run(runner, {}, lambda *_: None))
+    result = asyncio.run(engine._run(runner, {}, lambda *_: None, flow="analysis"))
     assert result["approved"] and result["summary"] == "[REDACTED]"
     assert result["nested"] == ["[REDACTED]"]
 
@@ -391,22 +395,24 @@ def test_provider_api_requires_owner_csrf_and_never_echoes_secret(tmp_path):
         assert client.get("/api/model-providers").status_code == 401
         session = client.post("/api/setup", json={"password": "owner-test-password"}).json()
         headers = {"x-csrf-token": session["csrf"]}
-        payload = {"version": 0, **provider()}
+        version = client.get("/api/model-providers").json()["version"]
+        payload = {"version": version, **provider()}
         assert client.post("/api/model-providers", json=payload).status_code == 403
         invalid = client.post("/api/model-providers/import", headers=headers, json={
-            "version": 0, "providers": [{**provider(key="private-import-key"), "extra": True}],
+            "version": version,
+            "providers": [{**provider(key="private-import-key"), "extra": True}],
         })
         assert invalid.status_code == 422 and "private-import-key" not in invalid.text
         missing_name = provider(key="private-missing-field-key")
         missing_name.pop("name")
         invalid = client.post("/api/model-providers/import", headers=headers,
-                              json={"version": 0, "providers": [missing_name]})
+                              json={"version": version, "providers": [missing_name]})
         assert invalid.status_code == 422 and "private-missing-field-key" not in invalid.text
         response = client.post("/api/model-providers", headers=headers, json=payload)
         assert response.status_code == 200 and "synthetic-first-key" not in response.text
         saved = response.json()
         selected = {"version": saved["version"], "enabled": True,
-                    "routes": {"default": choice(saved), "repair.repair_agent": choice(saved)}}
+                    "routes": {"default": choice(saved), "repair_agent": choice(saved)}}
         assert client.post("/api/agent-models", json=selected).status_code == 403
         assert client.post("/api/agent-models", headers=headers, json=selected).status_code == 200
         assert app.state.analysis_model.status()["enabled"]

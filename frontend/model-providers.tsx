@@ -1,25 +1,29 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Download, Loader2, Plus, PlugZap, Save, Trash2 } from 'lucide-react';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Model = { model: string; reasoning_effort: string };
 type Provider = { id: string; name: string; base_url: string; api: string;
   has_key: boolean; models: Model[]; version: number };
-type Choice = { provider_id: string; model: string };
-type Catalog = { version: number; enabled: boolean; legacy_available: boolean; legacy_model: string;
-  providers: Provider[]; roles: Record<string, string>; routes: Record<string, Choice | null> };
+export type ProviderChoice = { provider_id: string; model: string };
+export type RoleChoice = ProviderChoice | { direct: true };
+export type ProviderCatalog = { version: number; enabled: boolean; legacy_available: boolean; legacy_model: string;
+  providers: Provider[]; roles: Record<string, string>; routes: Record<string, RoleChoice | null>;
+  migration_notes: string[] };
 type Draft = { id?: string; name: string; base_url: string; api: string; api_key: string;
   has_key: boolean; models: Model[]; registry_version: number };
 
 const blank = (): Draft => ({ name: '', base_url: '', api: 'chat_completions', api_key: '',
   has_key: false, models: [{ model: '', reasoning_effort: 'auto' }], registry_version: 0 });
-const encode = (choice?: Choice | null) => choice ? JSON.stringify([choice.provider_id, choice.model]) : '';
-const decode = (value: string): Choice | null => {
+export const encodeChoice = (choice?: RoleChoice | null) => !choice ? '' : 'direct' in choice
+  ? 'direct' : JSON.stringify([choice.provider_id, choice.model]);
+export const decodeChoice = (value: string): RoleChoice | null => {
   if (!value) return null;
+  if (value === 'direct') return { direct: true };
   const [provider_id, model] = JSON.parse(value) as [string, string];
   return { provider_id, model };
 };
-const errors: Record<string, string> = {
+export const providerErrors: Record<string, string> = {
   model_invalid_input: '配置或导入字段不符合要求，请对照示例检查名称、地址、模型与接口类型。',
   model_provider_invalid: '请检查供应商地址、模型名称和推理强度，模型不可重复。',
   model_provider_name_exists: '供应商名称已存在，请使用其他名称。',
@@ -54,18 +58,13 @@ const importExample = JSON.stringify({ providers: [{ name: '我的供应商',
   base_url: 'https://api.example.com/v1', api: 'chat_completions', api_key: '',
   models: [{ model: 'my-model', reasoning_effort: 'auto' }] }] }, null, 2);
 
-export function selectedModelLabel(value: string, labels: Record<string, string>) {
-  try {
-    const selected = JSON.parse(value);
-    return `${labels[selected.role] ?? selected.role} · ${selected.provider_name} / ${selected.model}`;
-  } catch { return '已选择本次模型'; }
-}
-
-export function ModelProvidersSettings({ api, legacyVersion }: { api: Api; legacyVersion?: number }) {
-  const [catalog, setCatalog] = useState<Catalog | null>(null);
+export function ModelProvidersSettings({ api, catalog, onChange, disabled = false }: {
+  api: Api; catalog: ProviderCatalog | null; onChange: (value: ProviderCatalog) => void; disabled?: boolean;
+}) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [importText, setImportText] = useState('');
-  const [busy, setBusy] = useState(false);
+  const [pending, setBusy] = useState(false);
+  const busy = pending || disabled;
   const [notice, setNotice] = useState('');
   const [probeBusy, setProbeBusy] = useState<'models' | 'connection' | null>(null);
   const [probeNotice, setProbeNotice] = useState('');
@@ -103,54 +102,34 @@ export function ModelProvidersSettings({ api, legacyVersion }: { api: Api; legac
       }
     } catch (error) {
       if (kind === 'models') { setDiscovered([]); setCheckedModels([]); }
-      setProbeNotice(errors[(error as Error).message] ?? '检测未完成，请检查配置后重试。');
+      setProbeNotice(providerErrors[(error as Error).message] ?? '检测未完成，请检查配置后重试。');
     } finally { setBusy(false); setProbeBusy(null); }
   };
-  const load = () => api<Catalog>('/model-providers').then(setCatalog);
-  useEffect(() => {
-    let active = true;
-    void api<Catalog>('/model-providers').then(value => { if (active) setCatalog(value); })
-      .catch(() => { if (active) setNotice('无法读取供应商配置，请刷新重试。'); });
-    return () => { active = false; };
-  }, [api, legacyVersion]);
+  const load = async () => {
+    setBusy(true);
+    try { onChange(await api<ProviderCatalog>('/model-providers')); }
+    catch { setNotice('无法读取供应商配置，请刷新重试。'); }
+    finally { setBusy(false); }
+  };
   const save = async (path: string, body: unknown, success: string) => {
     setBusy(true); setNotice('');
     try {
-      setCatalog(await api<Catalog>(path, body));
+      onChange(await api<ProviderCatalog>(path, body));
       setNotice(success);
       return true;
     } catch (error) {
-      setNotice(errors[(error as Error).message] ?? '操作未完成，请检查配置后重试。');
+      setNotice(providerErrors[(error as Error).message] ?? '操作未完成，请检查配置后重试。');
       return false;
     } finally { setBusy(false); }
   };
-  const options = () => catalog?.providers.map(p => <optgroup key={p.id} label={p.name}>
-    {p.models.map(m => <option key={m.model} value={encode({ provider_id: p.id, model: m.model })}
-      disabled={!p.has_key}>{p.name} / {m.model}{!p.has_key ? '（未保存密钥）' : ''}</option>)}
-  </optgroup>);
-  const endpoint = (choice?: Choice | null) => {
-    const selected = choice ?? catalog?.routes.default;
-    return selected ? catalog?.providers.find(p => p.id === selected.provider_id)?.base_url
-      : catalog?.legacy_available ? `原有默认配置 / ${catalog.legacy_model}` : '尚未选择默认模型';
-  };
-  const selection = (key: string, label: string) => <label key={key} className="agent-model-choice">
-    <span>{label}</span>
-    <select aria-label={label} value={encode(catalog?.routes[key])} disabled={busy}
-      onChange={e => catalog && setCatalog({ ...catalog,
-        routes: { ...catalog.routes, [key]: decode(e.target.value) } })}>
-      <option value="">{key === 'default' ? (catalog?.legacy_available
-        ? `使用原有默认配置 / ${catalog.legacy_model}` : '请选择默认模型') : '使用默认模型'}</option>
-      {options()}
-    </select>
-    <small>{endpoint(catalog?.routes[key])}</small>
-  </label>;
-  return <section className="model-providers" aria-label="供应商与智能体模型">
-    <div className="section-heading"><h2>供应商与智能体模型</h2>
+  return <section className="model-providers" aria-label="模型供应商">
+    <div className="section-heading"><h2>模型供应商</h2>
       <button type="button" className="button secondary" disabled={busy}
-        onClick={() => { setNotice(''); void load().catch(() => setNotice('刷新配置失败')); }}>刷新配置</button></div>
-    <p>保存多个模型服务，并按智能体的工作内容选择模型。未单独选择的智能体使用默认模型。</p>
+        onClick={() => { setNotice(''); void load(); }}>刷新供应商</button></div>
+    <p>集中维护供应商、API Key 和模型列表，再在下方为五个角色分别选择。支持新增、JSON 导入、模型拉取和连接测试。</p>
     {notice && <p role="status">{notice}</p>}
     {catalog && <>
+      {catalog.migration_notes.map(note => <p className="diagnosis-meta" key={note}>{note}</p>)}
       <div className="provider-list">
         {catalog.providers.length === 0 && <p className="diagnosis-meta">尚未保存供应商，可新增或导入。</p>}
         {catalog.providers.map(provider => <article key={provider.id} className="provider-card">
@@ -274,22 +253,6 @@ export function ModelProvidersSettings({ api, legacyVersion }: { api: Api; legac
           } catch { setNotice('JSON 格式不正确，请检查后重试。'); }
         }}><Download size={15} />导入供应商</button>
       </details>
-      <form className="execution-config agent-model-form" aria-label="智能体模型选择" onSubmit={e => {
-        e.preventDefault(); void save('/agent-models', { version: catalog.version,
-          enabled: catalog.enabled, routes: catalog.routes }, '智能体模型选择已保存，下次任务生效。');
-      }}>
-        <h3>智能体模型选择</h3>
-        {selection('default', '默认供应商与模型')}
-        {['analysis', 'repair', 'diagnosis'].map(group => <fieldset key={group}>
-          <legend>{{ analysis: '仓库分析', repair: '自动修复', diagnosis: '运行诊断' }[group]}</legend>
-          <div className="agent-model-grid">{Object.entries(catalog.roles)
-            .filter(([key]) => key.startsWith(group + '.')).map(([key, name]) => selection(key, name))}</div>
-        </fieldset>)}
-        <label className="checkbox-label"><input type="checkbox" checked={catalog.enabled} disabled={busy}
-          onChange={e => setCatalog({ ...catalog, enabled: e.target.checked })} />启用智能体模型调用</label>
-        <button className="button secondary" disabled={busy}><Save size={15} />保存智能体选择</button>
-        <p className="diagnosis-meta">配置适用于后续任务，运行中的任务保留启动时的模型选择。保存不会发起模型请求，自动修复仍需单独启用。</p>
-      </form>
     </>}
   </section>;
 }

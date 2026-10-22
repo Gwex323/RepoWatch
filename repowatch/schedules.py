@@ -87,7 +87,7 @@ class RepositorySchedules:
                 "COALESCE(s.last_detail,'') AS last_detail "
                 "FROM repositories r "
                 "LEFT JOIN repository_schedules s ON s.repo_id=r.id "
-                "ORDER BY r.created"
+                "WHERE r.kind='github' ORDER BY r.created"
             ).fetchall()
         result = []
         for row in rows:
@@ -103,7 +103,8 @@ class RepositorySchedules:
         with self.store.connection() as db:
             row = db.execute(
                 "SELECT COUNT(*) AS total,SUM(enabled) AS enabled_count "
-                "FROM repository_schedules"
+                "FROM repository_schedules s JOIN repositories r ON r.id=s.repo_id "
+                "WHERE r.kind='github'"
             ).fetchone()
         enabled_count = row["enabled_count"] or 0
         return {
@@ -185,7 +186,7 @@ class RepositorySchedules:
                 row["repo_id"] for row in db.execute(
                     "SELECT s.repo_id FROM repository_schedules s "
                     "JOIN repositories r ON r.id=s.repo_id "
-                    "WHERE s.enabled=1 ORDER BY r.created"
+                    "WHERE s.enabled=1 AND r.kind='github' ORDER BY r.created"
                 )
             ]
         return [result for repo_id in repo_ids if (result := self.trigger(repo_id))]

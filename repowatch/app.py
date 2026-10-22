@@ -28,12 +28,12 @@ from .memory import Memory
 from .memory_evaluation import MemoryEvaluations
 from .model_providers import ModelProviders
 from .provider_probe import ProviderProbe
-from .repairs import Repairs
-from .repository_analysis import Analyses
+from .repairs import REPAIR_MAX_ATTEMPTS, Repairs
+from .repository_analysis import MAX_TURNS, Analyses
 from .repository_source import ExecutionError
+from .roles import ROLES
 from .schedules import RepositorySchedules
 from .store import SDK_VERSION, Conflict, Missing, Store
-from .workflow import ROLES, Worker
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -48,19 +48,6 @@ class PasswordBody(StrictBody):
 
 class RepositoryBody(StrictBody):
     url: str = Field(max_length=300)
-
-
-class ObservationBody(StrictBody):
-    total: int = Field(ge=0, le=10000, strict=True)
-    page: int = Field(ge=1, le=1000, strict=True)
-    size: int = Field(ge=1, le=100, strict=True)
-
-
-class ConfirmationBody(StrictBody):
-    decision: Literal["confirmed", "not_reproduced"]
-    revision: str = Field(min_length=64, max_length=64)
-    personally_reproduced: bool = False
-    note: str = Field(default="", max_length=2000)
 
 
 class MemoryBody(StrictBody):
@@ -114,13 +101,26 @@ class ExecutionConfigBody(StrictBody):
 
 class AnalysisModelBody(StrictBody):
     version: int = Field(ge=0, strict=True)
-    routing_version: int | None = Field(default=None, ge=0, strict=True)
     enabled: bool
     model: str = Field(min_length=1, max_length=200)
     base_url: str = Field(min_length=1, max_length=500)
     api: Literal["responses", "chat_completions"]
     reasoning_effort: Literal["auto", "default", "low", "medium", "high", "max"] = "auto"
     api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+
+
+class AgentModelBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+    model: str = Field(min_length=1, max_length=200)
+    base_url: str = Field(min_length=1, max_length=500)
+    api: Literal["responses", "chat_completions"]
+    reasoning_effort: Literal["auto", "default", "low", "medium", "high", "max"] = "auto"
+    api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+
+
+class ModelEnabledBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+    enabled: bool = Field(strict=True)
 
 
 class ProviderModelBody(StrictBody):
@@ -157,14 +157,26 @@ class ProviderProbeBody(ProviderVersionBody):
     model: str = Field(default="", max_length=200)
 
 
-class AgentModelChoice(StrictBody):
+class ProviderModelChoice(StrictBody):
     provider_id: str = Field(min_length=1, max_length=100)
     model: str = Field(min_length=1, max_length=200)
 
 
-class AgentModelsBody(ProviderVersionBody):
+class DirectModelChoice(StrictBody):
+    direct: Literal[True]
+
+
+class RoleSelectionBody(ProviderVersionBody):
+    choice: ProviderModelChoice | DirectModelChoice | None
+
+
+class DefaultSelectionBody(ProviderVersionBody):
+    choice: ProviderModelChoice | None
+
+
+class AgentSelectionsBody(ProviderVersionBody):
     enabled: bool = Field(strict=True)
-    routes: dict[str, AgentModelChoice | None] = Field(max_length=10)
+    routes: dict[str, ProviderModelChoice | DirectModelChoice | None] = Field(max_length=6)
 
 
 class FindingFeedbackBody(StrictBody):
@@ -209,7 +221,8 @@ def create_app(
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
                           diagnoser=execution_diagnoser or AnalysisModelDiagnoser(analysis_model))
     repairs = Repairs(
-        execution, repair_engine or analysis_model, github, publisher=repair_publisher,
+        execution, repair_engine or analysis_model.for_flow("repair"), github,
+        publisher=repair_publisher,
     )
     analyses = Analyses(execution, analysis_engine or analysis_model, repairs)
     memory_evaluations = MemoryEvaluations(analyses, analysis_engine or analysis_model)
@@ -219,7 +232,6 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
-        worker = asyncio.create_task(Worker(store).run()) if start_worker else None
         executor = asyncio.create_task(execution.run()) if start_worker else None
         diagnostics = asyncio.create_task(execution.diagnoses.run()) if start_worker else None
         analyst = asyncio.create_task(analyses.run()) if start_worker else None
@@ -254,16 +266,13 @@ def create_app(
             schedule_worker.cancel()
             with suppress(asyncio.CancelledError):
                 await schedule_worker
-        if worker:
-            worker.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker
 
     app = FastAPI(title="RepoWatch", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.store = store
     app.state.execution = execution
     app.state.analyses = analyses
     app.state.analysis_model = analysis_model
+    app.state.model_providers = model_providers
     app.state.memory_evaluations = memory_evaluations
     app.state.repairs = repairs
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
@@ -318,8 +327,8 @@ def create_app(
         # Pydantic's default error payload can echo rejected secret input.
         if request.url.path.startswith("/api/github/"):
             return JSONResponse({"detail": "github_invalid_input"}, 422)
-        if request.url.path.startswith(("/api/analysis-model", "/api/model-providers",
-                                        "/api/agent-models")):
+        if request.url.path.startswith(("/api/analysis-model", "/api/agent-models",
+                                        "/api/model-providers")):
             return JSONResponse({"detail": "model_invalid_input"}, 422)
         return await request_validation_exception_handler(request, exc)
 
@@ -377,9 +386,11 @@ def create_app(
             "phase": 3,
             "sdk_version": SDK_VERSION,
             "roles": ROLES,
-            "model_mode": "deterministic_fixture",
+            "agent_models": analysis_model.configuration(),
+            "model_mode": "configured_provider",
             "external_model_calls": (execution.diagnoses.engine.status()["enabled"]
-                                     or analyses.engine.status()["enabled"]),
+                                     or analyses.engine.status()["enabled"]
+                                     or repairs.settings()["model_enabled"]),
             "repository_analysis": analyses.engine.status(),
             "execution_diagnosis": execution.diagnoses.engine.status(),
             "github_publication": repairs.settings()["enabled"],
@@ -388,17 +399,17 @@ def create_app(
             "external_repository_execution": True,
             "existing_issue_intake": True,
             "reproduction_policy": {
-                "discovered": "human", "existing_issue": "automatic", "merge": "owner_only",
+                "discovered": "human", "existing_issue": "human", "merge": "owner_only",
             },
             "schedule": schedules.summary(),
             "tracing_export": False,
             "storage": "SQLite",
             "runtime": "Python",
             "platform": platform.system(),
-            "max_turns": 24,
-            "max_attempts": 3,
+            "max_turns": MAX_TURNS,
+            "max_attempts": REPAIR_MAX_ATTEMPTS,
             "memory": {"enabled": True, "scope": "repository_and_exact_revision",
-                       "retrieval": "role_categories", "semantic_search": False},
+                       "retrieval": "literal_relevance_and_recency", "semantic_search": False},
         }
 
     @app.get("/api/github/accounts")
@@ -407,12 +418,35 @@ def create_app(
 
     @app.get("/api/analysis-model")
     def analysis_model_status():
-        return analysis_model.legacy_status()
+        return analysis_model.status()
 
     @app.post("/api/analysis-model")
     def configure_analysis_model(body: AnalysisModelBody):
         values = body.model_dump(exclude={"api_key"})
         return analysis_model.save(**values, api_key=body.api_key.get_secret_value())
+
+    @app.get("/api/agent-models")
+    def agent_models():
+        return analysis_model.configuration()
+
+    @app.post("/api/agent-models")
+    def configure_agent_selections(body: AgentSelectionsBody):
+        return model_providers.configure(**body.model_dump())
+
+    @app.post("/api/agent-models/settings")
+    def enable_agent_models(body: ModelEnabledBody):
+        return analysis_model.enable(**body.model_dump())
+
+    @app.post("/api/agent-models/{role}")
+    def configure_agent_model(role: str, body: AgentModelBody):
+        values = body.model_dump(exclude={"api_key"})
+        return analysis_model.save_role(role, **values, api_key=body.api_key.get_secret_value())
+
+    @app.post("/api/agent-models/{role}/selection")
+    def select_agent_model(role: str, body: RoleSelectionBody):
+        if role == "default":
+            raise Conflict("model_agent_invalid")
+        return model_providers.select(role=role, **body.model_dump())
 
     @app.get("/api/model-providers")
     def provider_catalog():
@@ -431,6 +465,10 @@ def create_app(
         return model_providers.import_providers(
             version=body.version, providers=[provider_values(p) for p in body.providers],
         )
+
+    @app.post("/api/model-providers/default")
+    def select_default_model(body: DefaultSelectionBody):
+        return model_providers.select(role="default", **body.model_dump())
 
     def probe_values(body):
         return {**body.model_dump(exclude={"api_key"}),
@@ -452,10 +490,6 @@ def create_app(
     def update_provider(provider_id: str, body: ProviderSaveBody):
         return model_providers.save(version=body.version, provider_id=provider_id,
                                     **provider_values(body))
-
-    @app.post("/api/agent-models")
-    def configure_agent_models(body: AgentModelsBody):
-        return model_providers.configure(**body.model_dump())
 
     @app.get("/api/repair-settings")
     def repair_settings():
@@ -654,14 +688,6 @@ def create_app(
             raise HTTPException(422, "Invalid repository name.")
         return store.add_repository(path[1:], "https://github.com" + path)
 
-    @app.post("/api/repositories/{repo_id}/runs")
-    async def start_run(repo_id: str, body: StrictBody | None = None):
-        return {"run_id": store.start_run(repo_id)}
-
-    @app.post("/api/samples/existing-issue/runs")
-    async def start_issue_sample(body: StrictBody | None = None):
-        return {"run_id": store.start_issue_sample()}
-
     @app.get("/api/repositories/{repo_id}/memories")
     async def memories(
         repo_id: str,
@@ -712,30 +738,6 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=100),
     ):
         return memory.aging(repo_id, revision=revision, days=days, limit=limit)
-
-    @app.get("/api/runs/{run_id}/memories")
-    async def memory_reads(run_id: str):
-        return memory.reads(run_id)
-
-    @app.get("/api/runs/{run_id}")
-    async def run_detail(run_id: str):
-        return store.details(run_id)
-
-    @app.post("/api/runs/{run_id}/experiment")
-    async def observe(run_id: str, body: ObservationBody):
-        return store.observe(run_id, body.total, body.page, body.size)
-
-    @app.post("/api/runs/{run_id}/confirmation")
-    async def confirm(run_id: str, body: ConfirmationBody):
-        if body.decision == "confirmed" and not body.personally_reproduced:
-            raise HTTPException(422, "Personal reproduction must be explicitly confirmed.")
-        changed = store.confirm(run_id, body.decision, body.revision, body.note.strip())
-        return {"accepted": True, "changed": changed, "run": store.run(run_id)}
-
-    @app.post("/api/runs/{run_id}/retry")
-    async def retry(run_id: str):
-        store.retry(run_id)
-        return {"queued": True}
 
     assets = ROOT / "dist/assets"
     if assets.exists():

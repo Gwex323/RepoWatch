@@ -16,9 +16,28 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   let evidenceFailure = false;
   let prerequisiteFailure = false;
   let recoveringHandoff = false;
-  const provider = { enabled: false, model: '', base_url: 'https://api.openai.com/v1',
+  const provider = { model: '', base_url: 'https://api.openai.com/v1',
     api: 'responses', has_key: false, version: 0, output_protocol: 'json_schema',
-    finalization_mode: 'provider_default' };
+    reasoning_effort: 'auto', effective_reasoning_effort: null, configured: false,
+    finalization_mode: 'provider_default', role: 'repository_analyst', name: '仓库分析',
+    description: '分析源码入口和执行证据。', flows: ['仓库分析', '环境诊断'] };
+  const roleModels = [provider, ...[
+    ['problem_investigator', '问题调查'], ['reproduction_assistant', '复现辅助'],
+    ['repair_agent', '代码修复'], ['independent_reviewer', '独立审查'],
+  ].map(([role, name]) => ({ ...provider, role, name, model: 'test-only', configured: true,
+    has_key: true, version: 1 }))];
+  let configurationVersion = 0;
+  const configuration = () => ({
+    enabled, version: configurationVersion, roles: roleModels,
+    flows: Object.fromEntries(Object.entries({
+      analysis: ['repository_analyst', 'problem_investigator', 'reproduction_assistant', 'independent_reviewer'],
+      diagnosis: ['repository_analyst', 'reproduction_assistant', 'independent_reviewer'],
+      repair: ['repair_agent', 'independent_reviewer'],
+    }).map(([flow, required]) => {
+      const missing_roles = required.filter(role => !roleModels.find(item => item.role === role)?.configured);
+      return [flow, { ready: missing_roles.length === 0, missing_roles }];
+    })),
+  });
   const analysis = {
     id: 'analysis_fixture', version: 1, revision: 'a'.repeat(40), status: 'waiting_model',
     current: true, created: Date.now() / 1000, error: null,
@@ -55,17 +74,21 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
     test_result: { exit_code: 0, revision: 'a'.repeat(40) },
     config: { language: 'python', install: '', test: 'python -m pytest', start: '', port: 8000,
       install_network: false, detected: true } };
-  await page.route('**/api/analysis-model', async route => {
-    if (route.request().method() === 'POST') {
-      const body = route.request().postDataJSON();
-      expect(body.api_key).toBe('test-key-not-a-real-credential');
-      expect(body.reasoning_effort).toBe(deepseek ? 'high' : 'auto');
-      keySaved = true; enabled = true;
-      Object.assign(provider, { ...body, has_key: true, version: 1,
-        output_protocol: 'json_object', finalization_mode: deepseek ? 'deepseek_direct' : 'glm47_direct' });
-      delete (provider as Record<string, unknown>).api_key;
-    }
-    await route.fulfill({ json: provider });
+  await page.route('**/api/agent-models', route => route.fulfill({ json: configuration() }));
+  await page.route('**/api/agent-models/repository_analyst', async route => {
+    const body = route.request().postDataJSON();
+    expect(body.api_key).toBe('test-key-not-a-real-credential');
+    expect(body.reasoning_effort).toBe(deepseek ? 'high' : 'auto');
+    keySaved = true; configurationVersion += 1;
+    Object.assign(provider, { ...body, has_key: true, configured: true, version: 1,
+      output_protocol: 'json_object', finalization_mode: deepseek ? 'deepseek_direct' : 'glm47_direct' });
+    delete (provider as Record<string, unknown>).api_key;
+    await route.fulfill({ json: configuration() });
+  });
+  await page.route('**/api/agent-models/settings', async route => {
+    enabled = route.request().postDataJSON().enabled;
+    configurationVersion += 1;
+    await route.fulfill({ json: configuration() });
   });
   await page.route('**/api/execution/readiness', route => route.fulfill({ json: { ready: true } }));
   await page.route('**/api/**/environments', route => route.fulfill({ json: [env] }));
@@ -135,21 +158,21 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await open();
   await expect(page.getByLabel('仓库自动分析').getByText('等待模型配置', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: '运行配置', exact: true }).click();
-  await page.getByText('原有默认模型配置', { exact: true }).click();
-  await page.getByLabel('分析模型名称').fill(deepseek ? 'deepseek-flash' : 'glm-4.7');
-  await page.locator('label').filter({ hasText: '模型接口' }).locator('select').selectOption('chat_completions');
-  await page.locator('label').filter({ hasText: '模型服务地址' }).locator('input').fill(
+  const modelCard = page.locator('.agent-model-card').filter({ hasText: 'repository_analyst' });
+  await modelCard.getByLabel('模型名称', { exact: true }).fill(deepseek ? 'deepseek-flash' : 'glm-4.7');
+  await modelCard.getByLabel('模型接口', { exact: true }).selectOption('chat_completions');
+  await modelCard.getByLabel('模型服务地址', { exact: true }).fill(
     deepseek ? 'https://api.deepseek.com' : 'https://open.bigmodel.cn/api/paas/v4');
-  await page.getByLabel('推理强度').selectOption(deepseek ? 'high' : 'auto');
-  await page.getByLabel('分析模型 API Key').fill('test-key-not-a-real-credential');
-  await page.getByLabel('启用仓库自动分析').check();
-  await page.getByRole('button', { name: '保存分析模型' }).click();
+  await modelCard.getByLabel('推理强度').selectOption(deepseek ? 'high' : 'auto');
+  await modelCard.getByLabel('API Key', { exact: true }).fill('test-key-not-a-real-credential');
+  await modelCard.getByRole('button', { name: '保存仓库分析模型' }).click();
   await expect.poll(() => keySaved).toBe(true);
-  await expect(page.getByLabel('分析模型 API Key')).toHaveValue('');
-  await expect(page.getByText('已保存输出协议：JSON Object')).toBeVisible();
-  await expect(page.getByText(deepseek
-    ? '已保存报告模式：DeepSeek 兼容模式（所有阶段关闭思考，推理强度设置不生效）'
-    : '已保存报告模式：GLM-4.7 直接输出（分析阶段保持默认思考）')).toBeVisible();
+  await modelCard.getByText(/^当前模型：/).click();
+  await expect(modelCard.getByLabel('API Key', { exact: true })).toHaveValue('');
+  await expect(modelCard.getByText('已保存输出协议：JSON Object', { exact: false })).toBeVisible();
+  await expect(modelCard.getByText(deepseek
+    ? 'DeepSeek 兼容模式，推理强度不生效' : 'GLM-4.7 直接报告模式', { exact: false })).toBeVisible();
+  await page.getByLabel('启用模型工作流').check();
   await page.screenshot({ path: 'test-results/analysis-model-desktop.png', fullPage: true, animations: 'disabled' });
   await page.getByRole('button', { name: '仓库', exact: true }).click();
   await open();

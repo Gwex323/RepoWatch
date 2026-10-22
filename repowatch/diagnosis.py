@@ -226,7 +226,7 @@ class HandoffAudit(RunHooks):
 
 
 def agents_for(model, reasoning_effort=None):
-    from .model_providers import model_for_role, reasoning_for_role
+    from .roles import FLOW_ROLES, model_for_role, reasoning_for_role
 
     boundary = (
         "Diagnose a failed repository environment operation in Chinese. "
@@ -237,14 +237,15 @@ def agents_for(model, reasoning_effort=None):
         "containers, mounting host paths, disabling security or passing credentials. "
         "Only install networking can be suggested; tests and projects remain isolated. "
     )
-    def reasoning(role):
-        effort = reasoning_for_role(model, role, reasoning_effort)
-        return Reasoning(effort=effort) if effort else None
-
+    reasoning = {role: Reasoning(effort=effort) if effort else None
+                 for role in FLOW_ROLES["diagnosis"]
+                 if (effort := reasoning_for_role(reasoning_effort, role)) is not None}
     reviewer = Agent(
         name="independent_reviewer", model=model_for_role(model, "independent_reviewer"),
         output_type=Advice,
-        model_settings=ModelSettings(max_tokens=2000, reasoning=reasoning("independent_reviewer")),
+        model_settings=ModelSettings(
+            max_tokens=2000, reasoning=reasoning.get("independent_reviewer"),
+        ),
         instructions=boundary + "Review the evidence and recommendations critically. "
         "Quote evidence verbatim from the supplied log or manifest. Mark uncertainty "
         "honestly. Only propose a minimal supported command/port/install-network patch; "
@@ -254,7 +255,7 @@ def agents_for(model, reasoning_effort=None):
         name="reproduction_assistant", model=model_for_role(model, "reproduction_assistant"),
         handoffs=[reviewer],
         model_settings=ModelSettings(tool_choice="required", max_tokens=1500,
-                                     reasoning=reasoning("reproduction_assistant")),
+                                     reasoning=reasoning.get("reproduction_assistant")),
         instructions=boundary + "Propose concrete environment remediation based on the "
         "observed evidence and hand off to independent_reviewer.",
     )
@@ -262,7 +263,7 @@ def agents_for(model, reasoning_effort=None):
         name="repository_analyst", model=model_for_role(model, "repository_analyst"),
         handoffs=[assistant],
         model_settings=ModelSettings(tool_choice="required", max_tokens=1500,
-                                     reasoning=reasoning("repository_analyst")),
+                                     reasoning=reasoning.get("repository_analyst")),
         instructions=boundary + "Identify the likely root cause from the configuration, "
         "logs and manifests, then hand off to reproduction_assistant.",
     )
@@ -340,7 +341,7 @@ class AnalysisModelDiagnoser:
         self.analysis_model = analysis_model
 
     def status(self):
-        config = self.analysis_model.status()
+        config = self.analysis_model.status("diagnosis")
         available = bool(config.get("enabled") and config.get("has_key")
                          and config.get("model"))
         return {"enabled": available, "model": config["model"] if available else None,
