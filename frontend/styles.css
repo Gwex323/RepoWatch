@@ -643,6 +643,11 @@ pre { margin: 0; }
 .model-providers select { min-width: 0; max-width: 100%; }
 .model-providers .checkbox-label { flex-direction: row; align-items: center; }
 .model-providers input { margin-top: 0 !important; }
+.provider-probe { display: grid; gap: 14px; padding: 16px; border: 1px solid var(--line); border-radius: 6px; min-width: 0; }
+.provider-probe .execution-actions { flex-wrap: wrap; }
+.discovered-models { display: grid; gap: 14px; min-width: 0; }
+.discovered-model-list { display: grid; gap: 10px; max-height: 240px; overflow-y: auto; }
+.discovered-model-list label span { overflow-wrap: anywhere; min-width: 0; }
 .provider-import { display: grid; min-width: 0; }
 .provider-import summary, .legacy-model-config > summary { cursor: pointer; padding: 10px 0; line-height: 1.8; }
 .provider-import pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: #eff3f6; }

@@ -27,6 +27,7 @@ from .github_issues import GitHubIssues
 from .memory import Memory
 from .memory_evaluation import MemoryEvaluations
 from .model_providers import ModelProviders
+from .provider_probe import ProviderProbe
 from .repairs import Repairs
 from .repository_analysis import Analyses
 from .repository_source import ExecutionError
@@ -148,6 +149,14 @@ class ProviderVersionBody(StrictBody):
     version: int = Field(ge=0, strict=True)
 
 
+class ProviderProbeBody(ProviderVersionBody):
+    provider_id: str | None = Field(default=None, min_length=1, max_length=100)
+    base_url: str = Field(min_length=1, max_length=500)
+    api: Literal["responses", "chat_completions"] = "chat_completions"
+    api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+    model: str = Field(default="", max_length=200)
+
+
 class AgentModelChoice(StrictBody):
     provider_id: str = Field(min_length=1, max_length=100)
     model: str = Field(min_length=1, max_length=200)
@@ -185,7 +194,7 @@ class ScheduleBody(StrictBody):
 def create_app(
     db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
     execution_runtime=None, repository_source=None, execution_diagnoser=None, analysis_engine=None,
-    repair_engine=None, repair_publisher=None,
+    repair_engine=None, repair_publisher=None, provider_probe_transport=None,
 ) -> FastAPI:
     # Windows registry MIME mappings may label .js as text/plain.
     mimetypes.add_type("text/javascript", ".js")
@@ -196,6 +205,7 @@ def create_app(
     issues = GitHubIssues(store, github)
     analysis_model = AnalysisModel(store, github)
     model_providers = ModelProviders(store, github)
+    provider_probe = ProviderProbe(model_providers, transport=provider_probe_transport)
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
                           diagnoser=execution_diagnoser or AnalysisModelDiagnoser(analysis_model))
     repairs = Repairs(
@@ -421,6 +431,18 @@ def create_app(
         return model_providers.import_providers(
             version=body.version, providers=[provider_values(p) for p in body.providers],
         )
+
+    def probe_values(body):
+        return {**body.model_dump(exclude={"api_key"}),
+                "api_key": body.api_key.get_secret_value()}
+
+    @app.post("/api/model-providers/discover")
+    async def discover_provider_models(body: ProviderProbeBody):
+        return await provider_probe.discover(**probe_values(body))
+
+    @app.post("/api/model-providers/test-connection")
+    async def test_provider_connection(body: ProviderProbeBody):
+        return await provider_probe.test_connection(**probe_values(body))
 
     @app.post("/api/model-providers/{provider_id}/delete")
     def delete_provider(provider_id: str, body: ProviderVersionBody):

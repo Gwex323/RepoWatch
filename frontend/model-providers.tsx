@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Download, Plus, Save, Trash2 } from 'lucide-react';
+import { Download, Loader2, Plus, PlugZap, Save, Trash2 } from 'lucide-react';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Model = { model: string; reasoning_effort: string };
@@ -30,6 +30,22 @@ const errors: Record<string, string> = {
   model_provider_limit: '最多保存 25 个供应商，每个最多 40 个模型。',
   analysis_model_new_key_required: '更换 baseURL 时请填写对应的新 API Key。',
   analysis_model_key_required: '所选供应商尚未保存 API Key。',
+  analysis_model_key_unavailable: '无法读取已保存的密钥，请重新填写 API Key。',
+  analysis_model_invalid: '请检查 baseURL 和接口类型。',
+  model_probe_key_invalid: 'API Key 格式不正确，请去除换行或非英文字符。',
+  model_probe_model_required: '请先选择或填写测试模型。',
+  model_probe_authentication: '供应商拒绝了 API Key，请检查密钥。',
+  model_probe_forbidden: '供应商拒绝访问，请检查密钥和模型权限。',
+  model_probe_rate_limited: '供应商限流或额度不足，请稍后重试。',
+  model_probe_models_unsupported: '供应商不支持当前地址的模型列表接口，可手动填写模型并进行连接测试。',
+  model_probe_not_found: '供应商未找到接口或模型，请检查 baseURL、接口类型和模型名称。',
+  model_probe_request_rejected: '供应商拒绝了测试参数，请检查接口类型和模型名称。',
+  model_probe_redirect: '供应商返回了跳转，请填写最终服务地址后重试。',
+  model_probe_service_error: '供应商服务暂时异常，请稍后重试。',
+  model_probe_unreachable: '无法连接供应商，请检查地址与网络。',
+  model_probe_timeout: '供应商响应超时，请稍后重试。',
+  model_probe_response_limit: '供应商响应过大，请手动填写模型。',
+  model_probe_invalid_response: '供应商返回内容不符合所选接口格式，请检查服务地址和接口类型。',
   analysis_model_required: '请先选择默认供应商和模型，或保存原有默认配置。',
   model_agent_invalid: '智能体选择无效，请刷新配置。',
   secure_storage_unavailable: '本机系统凭据库不可用，密钥尚未保存。',
@@ -51,6 +67,45 @@ export function ModelProvidersSettings({ api, legacyVersion }: { api: Api; legac
   const [importText, setImportText] = useState('');
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
+  const [probeBusy, setProbeBusy] = useState<'models' | 'connection' | null>(null);
+  const [probeNotice, setProbeNotice] = useState('');
+  const [discovered, setDiscovered] = useState<string[]>([]);
+  const [modelSearch, setModelSearch] = useState('');
+  const [checkedModels, setCheckedModels] = useState<string[]>([]);
+  const [testModel, setTestModel] = useState('');
+  const openEditor = (value: Draft) => {
+    setDraft(value); setNotice(''); setProbeNotice(''); setDiscovered([]);
+    setCheckedModels([]); setModelSearch(''); setTestModel(value.models[0]?.model ?? '');
+  };
+  const updateEndpoint = (changes: Partial<Draft>) => {
+    if (draft) setDraft({ ...draft, ...changes });
+    setProbeNotice(''); setDiscovered([]); setCheckedModels([]);
+  };
+  const probe = async (kind: 'models' | 'connection') => {
+    if (!draft) return;
+    const targetModel = testModel.trim() || draft.models.find(m => m.model.trim())?.model || '';
+    setBusy(true); setProbeBusy(kind); setProbeNotice('');
+    try {
+      const result = await api<{ models?: string[]; truncated?: boolean; connected?: boolean; latency_ms?: number }>(
+        `/model-providers/${kind === 'models' ? 'discover' : 'test-connection'}`, {
+          version: draft.registry_version, provider_id: draft.id, base_url: draft.base_url,
+          api: draft.api, api_key: draft.api_key, model: kind === 'connection' ? targetModel : '',
+        });
+      if (kind === 'models') {
+        if (!Array.isArray(result.models)) throw new Error('model_probe_invalid_response');
+        setDiscovered(result.models ?? []); setCheckedModels([]); setModelSearch('');
+        setProbeNotice(result.models?.length
+          ? `已拉取 ${result.models.length} 个模型，请选择要添加的模型。${result.truncated ? '列表未全部返回，仍可手动填写其他模型。' : ''}`
+          : '供应商未返回可用模型，可手动填写。');
+      } else {
+        if (!result.connected) throw new Error('model_probe_invalid_response');
+        setProbeNotice(`连接成功：${targetModel}，已收到模型接口响应，耗时 ${result.latency_ms ?? 0} 毫秒。`);
+      }
+    } catch (error) {
+      if (kind === 'models') { setDiscovered([]); setCheckedModels([]); }
+      setProbeNotice(errors[(error as Error).message] ?? '检测未完成，请检查配置后重试。');
+    } finally { setBusy(false); setProbeBusy(null); }
+  };
   const load = () => api<Catalog>('/model-providers').then(setCatalog);
   useEffect(() => {
     let active = true;
@@ -105,7 +160,7 @@ export function ModelProvidersSettings({ api, legacyVersion }: { api: Api; legac
           <p>{provider.api === 'responses' ? 'Responses' : 'Chat Completions'} · {provider.models.map(m => m.model).join('、')}</p>
           <div className="execution-actions">
             <button type="button" className="button secondary" disabled={busy}
-              onClick={() => { setNotice(''); setDraft({ ...provider, api_key: '', registry_version: catalog.version,
+              onClick={() => { openEditor({ ...provider, api_key: '', registry_version: catalog.version,
                 models: provider.models.map(m => ({ ...m })) }); }}>编辑 {provider.name}</button>
             <button type="button" className="button secondary" disabled={busy}
               onClick={() => void save(`/model-providers/${provider.id}/delete`,
@@ -114,7 +169,7 @@ export function ModelProvidersSettings({ api, legacyVersion }: { api: Api; legac
         </article>)}
       </div>
       <button type="button" className="button secondary" disabled={busy || catalog.providers.length >= 25}
-        onClick={() => { setNotice(''); setDraft({ ...blank(), registry_version: catalog.version }); }}><Plus size={15} />新增供应商</button>
+        onClick={() => openEditor({ ...blank(), registry_version: catalog.version })}><Plus size={15} />新增供应商</button>
       {draft && <form className="execution-config provider-editor" aria-label="供应商编辑" onSubmit={e => {
         e.preventDefault();
         void save(draft.id ? `/model-providers/${draft.id}` : '/model-providers', {
@@ -126,15 +181,54 @@ export function ModelProvidersSettings({ api, legacyVersion }: { api: Api; legac
           <label>供应商名称<input required maxLength={80} value={draft.name} disabled={busy}
             onChange={e => setDraft({ ...draft, name: e.target.value })} /></label>
           <label>供应商接口<select value={draft.api} disabled={busy}
-            onChange={e => setDraft({ ...draft, api: e.target.value })}>
+            onChange={e => updateEndpoint({ api: e.target.value })}>
             <option value="chat_completions">Chat Completions</option><option value="responses">Responses</option>
           </select></label>
         </div>
         <label>供应商 baseURL<input required type="url" maxLength={500} placeholder="https://api.example.com/v1"
-          value={draft.base_url} disabled={busy} onChange={e => setDraft({ ...draft, base_url: e.target.value })} /></label>
+          value={draft.base_url} disabled={busy} onChange={e => updateEndpoint({ base_url: e.target.value })} /></label>
         <label>供应商 API Key<input type="password" autoComplete="new-password" maxLength={1024}
           placeholder={draft.has_key ? '已保存，留空保留；更换地址需重新填写' : '填写此供应商的 API Key'}
-          value={draft.api_key} disabled={busy} onChange={e => setDraft({ ...draft, api_key: e.target.value })} /></label>
+          value={draft.api_key} disabled={busy} onChange={e => updateEndpoint({ api_key: e.target.value })} /></label>
+        <div className="provider-probe">
+          <div className="execution-actions">
+            <button type="button" className="button secondary" disabled={busy}
+              onClick={() => void probe('models')}>{probeBusy === 'models'
+                ? <Loader2 size={15} className="spin" /> : <Download size={15} />}拉取供应商模型</button>
+            <button type="button" className="button secondary" disabled={busy}
+              onClick={() => void probe('connection')}>{probeBusy === 'connection'
+                ? <Loader2 size={15} className="spin" /> : <PlugZap size={15} />}连接测试</button>
+          </div>
+          <label>连接测试模型<input list="provider-test-models" maxLength={200} value={testModel}
+            placeholder="填写模型名称，留空使用下方第一个模型" disabled={busy}
+            onChange={e => { setTestModel(e.target.value); setProbeNotice(''); }} /></label>
+          <datalist id="provider-test-models">{[...new Set([...draft.models.map(m => m.model), ...discovered])]
+            .filter(Boolean).map(model => <option key={model} value={model} />)}</datalist>
+          <p className="diagnosis-meta">连接测试会发起一次少量输出的模型请求，仅验证基础连接；工具调用与交接需在智能体运行时验证。检测不会保存配置。</p>
+          {probeNotice && <p role="status">{probeNotice}</p>}
+          {!!discovered.length && <div className="discovered-models">
+            <label>筛选拉取的模型<input value={modelSearch} disabled={busy}
+              onChange={e => setModelSearch(e.target.value)} /></label>
+            <div className="discovered-model-list">{discovered.filter(model => model.toLowerCase().includes(modelSearch.toLowerCase()))
+              .map(model => {
+                const existing = draft.models.some(m => m.model.trim() === model);
+                return <label className="checkbox-label" key={model}>
+                  <input type="checkbox" aria-label={`选择模型 ${model}`} checked={existing || checkedModels.includes(model)}
+                    disabled={busy || existing} onChange={e => setCheckedModels(e.target.checked
+                      ? [...checkedModels, model] : checkedModels.filter(item => item !== model))} />
+                  <span>{model}{existing ? '（已添加）' : ''}</span>
+                </label>;
+              })}</div>
+            <button type="button" className="button secondary" disabled={busy || !checkedModels.length}
+              onClick={() => {
+                const models = draft.models.filter(m => m.model.trim());
+                const additions = checkedModels.filter(model => !models.some(m => m.model.trim() === model));
+                if (models.length + additions.length > 40) { setProbeNotice('每个供应商最多保存 40 个模型，请减少选择。'); return; }
+                setDraft({ ...draft, models: [...models, ...additions.map(model => ({ model, reasoning_effort: 'auto' }))] });
+                setCheckedModels([]); setProbeNotice('所选模型已加入编辑内容，保存供应商后生效。');
+              }}>添加所选模型（{checkedModels.length}）</button>
+          </div>}
+        </div>
         <fieldset><legend>供应商模型</legend>
           {draft.models.map((model, index) => <div className="provider-model-row" key={index}>
             <label>模型名称 {index + 1}<input required maxLength={200} value={model.model} disabled={busy}
