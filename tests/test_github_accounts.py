@@ -223,9 +223,6 @@ def test_repository_check_is_read_only_and_does_not_claim_write_access(setup):
     assert "permissions" not in result
     assert remote.calls[-1].url.path == "/repos/alice/project"
     before = len(remote.calls)
-    with pytest.raises(GitHubError, match="github_repository_required"):
-        service.check_repository(101, 1, "repo_fixture")
-    assert len(remote.calls) == before
     with store.connection() as db:
         db.execute("UPDATE repositories SET url='https://evil.example' WHERE id=?", (repo["id"],))
     with pytest.raises(GitHubError, match="github_repository_required"):

@@ -4,8 +4,8 @@ import shutil
 
 import pytest
 
-from repowatch.memory_validation import DEFAULT_CASES, load_cases, run_suite
 from repowatch.repository_analysis import ROLES
+from scripts.validate_memory import DEFAULT_CASES, load_cases, run_suite
 
 
 class ValidationEngine:

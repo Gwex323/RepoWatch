@@ -3,24 +3,12 @@
 import json
 import re
 import time
-from itertools import zip_longest
 
-from . import fixture
 from .diagnosis import redact_values
-from .store import Conflict, Missing, reproduction_evidence, uid
+from .store import Conflict, Missing, uid
 
 KNOWLEDGE_CATEGORIES = ("architecture", "setup", "testing")
 CATEGORIES = (*KNOWLEDGE_CATEGORIES, "bug", "fix", "investigation")
-ROLE_CATEGORIES = {
-    "repository_analyst": ("architecture", "setup", "testing", "bug"),
-    "problem_investigator": ("bug", "investigation", "testing", "architecture"),
-    "reproduction_assistant": ("setup", "testing", "bug", "investigation"),
-    "repair_agent": ("fix", "bug", "architecture", "testing"),
-    "independent_reviewer": ("testing", "bug", "fix", "investigation"),
-    "pr_author": ("bug", "fix", "testing"),
-}
-CONTEXT_LIMIT = 6000
-ENTRY_LIMIT = 6
 METRIC_VERSION = "structured_effect_v1"
 AGING_DEFAULT_DAYS = 90
 
@@ -50,7 +38,6 @@ def initialize(db):
                 ('architecture','setup','testing','bug','fix','investigation')),
             title TEXT NOT NULL, content TEXT NOT NULL, revision TEXT NOT NULL,
             source TEXT NOT NULL CHECK(source IN ('owner','workflow')),
-            source_run_id TEXT REFERENCES runs(id),
             source_key TEXT NOT NULL,
             evidence TEXT NOT NULL DEFAULT '{}',
             status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived')),
@@ -66,27 +53,7 @@ def initialize(db):
             record TEXT NOT NULL, created REAL NOT NULL,
             PRIMARY KEY(memory_id, version)
         );
-        CREATE TABLE IF NOT EXISTS memory_reads (
-            run_id TEXT NOT NULL REFERENCES runs(id), agent TEXT NOT NULL,
-            memory_id TEXT NOT NULL, version INTEGER NOT NULL, created REAL NOT NULL,
-            PRIMARY KEY(run_id, agent, memory_id, version),
-            FOREIGN KEY(memory_id, version) REFERENCES memory_history(memory_id, version)
-        );
     """)
-    db.execute("BEGIN IMMEDIATE")
-    if not db.execute("SELECT 1 FROM settings WHERE key='memory_backfill_v1'").fetchone():
-        # Only import the known fixture's current-revision, authoritative evidence.
-        runs = db.execute(
-            "SELECT runs.id,runs.status FROM runs JOIN repositories ON "
-            "repositories.id=runs.repo_id WHERE repositories.kind='fixture' "
-            "AND runs.revision=? AND runs.confirmation IS NOT NULL",
-            (fixture.REVISION,),
-        ).fetchall()
-        for run in runs:
-            capture_reproduction(db, run["id"])
-            if run["status"] == "demo_completed":
-                capture_fix(db, run["id"])
-        db.execute("INSERT INTO settings VALUES ('memory_backfill_v1','done')")
 
 
 def decoded(row):
@@ -105,97 +72,20 @@ def audit(db, memory_id, action):
 
 
 def insert(db, *, repo_id, category, title, content, revision, source,
-           source_key, source_run_id=None, evidence=None):
+           source_key, evidence=None):
     memory_id, now = uid("mem"), time.time()
     cursor = db.execute(
         "INSERT OR IGNORE INTO memories "
-        "(id,repo_id,category,title,content,revision,source,source_run_id,source_key,"
-        "evidence,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-        (memory_id, repo_id, category, title, content, revision, source, source_run_id,
-         source_key, json.dumps(evidence or {}), now, now),
+        "(id,repo_id,category,title,content,revision,source,source_key,"
+        "evidence,created,updated) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (memory_id, repo_id, category, title, content, revision, source, source_key,
+         json.dumps(evidence or {}), now, now),
     )
     if cursor.rowcount:
         audit(db, memory_id, "created")
     return db.execute(
         "SELECT * FROM memories WHERE repo_id=? AND source_key=?", (repo_id, source_key)
     ).fetchone()
-
-
-def capture_reproduction(db, run_id):
-    run = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-    if run["source_kind"] == "existing_issue":
-        try:
-            evidence = reproduction_evidence(run)
-        except Conflict:
-            return
-        insert(
-            db, repo_id=run["repo_id"], revision=run["revision"], source="workflow",
-            source_run_id=run_id, source_key=f"run:{run_id}:reproduction", category="bug",
-            title="Existing Issue sample automatically reproduced",
-            content="The workflow reproduced the trusted pagination Issue sample. "
-                    "This is automatic fixture evidence, not owner confirmation.",
-            evidence={**evidence, "scope": "trusted pagination fixture"},
-        )
-        return
-    confirmation = json.loads(run["confirmation"]) if run["confirmation"] else None
-    if not confirmation or confirmation["revision"] != run["revision"]:
-        return
-    observation = confirmation.get("observation")
-    confirmed = confirmation["decision"] == "confirmed"
-    if confirmed and (
-        not observation or not observation["reproduced"]
-        or observation["revision"] != run["revision"]
-    ):
-        return
-    summary = (
-        "The owner reproduced the controlled pagination discrepancy at this revision."
-        if confirmed else
-        "The owner did not confirm this finding. This does not prove the bug is absent."
-    )
-    if observation:
-        summary += " Observation: " + json.dumps({
-            key: observation[key] for key in ("input", "expected", "actual", "reproduced")
-        })
-    insert(
-        db, repo_id=run["repo_id"], revision=run["revision"], source="workflow",
-        source_run_id=run_id, source_key=f"run:{run_id}:reproduction",
-        category="bug" if confirmed else "investigation",
-        title="Page-window reproduction " + ("confirmed" if confirmed else "not confirmed"),
-        content=summary,
-        evidence={"decision": confirmation["decision"], "observation": observation,
-                  "scope": "trusted pagination fixture", "actor": confirmation["actor"]},
-    )
-
-
-def capture_fix(db, run_id):
-    run = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-    try:
-        evidence = reproduction_evidence(run)
-    except Conflict:
-        return
-    artifacts = {
-        row["kind"]: json.loads(row["content"])
-        for row in db.execute("SELECT * FROM artifacts WHERE run_id=?", (run_id,))
-    }
-    verification = artifacts.get("verification", {})
-    if (
-        not artifacts.get("patch_draft") or verification.get("failed") != 0
-        or verification.get("passed", 0) < 1
-    ):
-        return
-    insert(
-        db, repo_id=run["repo_id"], revision=run["revision"], source="workflow",
-        source_run_id=run_id, source_key=f"run:{run_id}:fix", category="fix",
-        title="Controlled pagination patch passed fixture checks",
-        content=(
-            "Remove the fallback that resets an out-of-range start to the preceding page. "
-            "The predefined patch passed local fixture assertions only; "
-            "it is not a published or merged repository fix."
-        ),
-        evidence={"verification": verification, "artifacts": ["patch_draft", "verification"],
-                  "reproduction_actor": evidence["actor"], "source_kind": run["source_kind"],
-                  "published": False, "merged": False},
-    )
 
 
 def capture_repair_fix(db, repair):
@@ -408,16 +298,16 @@ class Memory:
             return {}
         marks = ",".join("?" for _ in memory_ids)
         rows = db.execute(
-            f"SELECT memory_id,count(DISTINCT run_id) AS read_count,max(created) AS last_read "
-            f"FROM memory_reads WHERE memory_id IN ({marks}) GROUP BY memory_id",
+            "SELECT json_extract(CASE WHEN m.type='object' THEN m.value ELSE '{}' END,"
+            "'$.id') AS memory_id,count(DISTINCT a.id) AS read_count,"
+            "max(a.created) AS last_read FROM repository_analyses a,"
+            "json_each(CASE WHEN json_valid(a.context) THEN a.context ELSE '{}' END,"
+            "'$.memories') m WHERE memory_id IN (" + marks + ") GROUP BY memory_id",
             memory_ids,
         ).fetchall()
-        return {
-            row["memory_id"]: {
-                "read_count": row["read_count"],
-                "last_read": row["last_read"],
-            } for row in rows
-        }
+        return {row["memory_id"]: {
+            "read_count": row["read_count"], "last_read": row["last_read"],
+        } for row in rows}
 
     @staticmethod
     def rank(rows, context=None, read_stats=None):
@@ -478,50 +368,6 @@ class Memory:
             score(row), _row_data(row)["updated"], _row_data(row)["id"],
         ),
                       reverse=True)
-
-    def context(self, run_id, role):
-        categories = ROLE_CATEGORIES[role]
-        with self.store.connection() as db:
-            # Selection and its audit record use one snapshot, including concurrent archives.
-            db.execute("BEGIN IMMEDIATE")
-            run = db.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-            if not run:
-                raise Missing("Run not found.")
-            selected, size = [], 2
-            candidates = [
-                db.execute(
-                    "SELECT * FROM memories WHERE repo_id=? AND revision=? AND status='active' "
-                    "AND category=? ORDER BY updated DESC,id LIMIT ?",
-                    (run["repo_id"], run["revision"], category, ENTRY_LIMIT),
-                ).fetchall()
-                for category in categories
-            ]
-            memory_ids = [row["id"] for group in candidates for row in group]
-            read_stats = self.read_stats(db, memory_ids)
-            candidates = [self.rank(group, None, read_stats) for group in candidates]
-            # Round-robin prevents daily bug records from crowding out setup/test knowledge.
-            for group in zip_longest(*candidates):
-                for row in group:
-                    if row is None:
-                        continue
-                    item = {
-                        "id": row["id"], "version": row["version"], "category": row["category"],
-                        "title": row["title"], "content": row["content"], "source": row["source"],
-                        "source_run_id": row["source_run_id"], "revision": row["revision"],
-                    }
-                    experience = compact_experience(row)
-                    if experience:
-                        item["experience"] = experience
-                    encoded = json.dumps(item, ensure_ascii=False)
-                    if len(selected) >= ENTRY_LIMIT or size + len(encoded) + 2 > CONTEXT_LIMIT:
-                        continue
-                    selected.append(item)
-                    size += len(encoded) + 2
-                    db.execute(
-                        "INSERT OR IGNORE INTO memory_reads VALUES (?,?,?,?,?)",
-                        (run_id, role, row["id"], row["version"], time.time()),
-                    )
-        return json.dumps(selected, ensure_ascii=False)
 
     def metrics(self, repo_id, *, revision=""):
         """Return bounded outcome counts for memory-assisted and baseline runs."""
@@ -608,15 +454,15 @@ class Memory:
                 clauses.append("m.revision=?")
                 params.append(revision)
             rows = db.execute(
-                "SELECT m.*,COALESCE(r.read_count,0) AS read_count,r.last_read "
-                "FROM memories m LEFT JOIN (SELECT memory_id,count(DISTINCT run_id) "
-                "AS read_count,max(created) AS last_read FROM memory_reads "
-                "GROUP BY memory_id) r ON r.memory_id=m.id WHERE "
-                + " AND ".join(clauses)
-                + " ORDER BY r.last_read IS NULL DESC,COALESCE(r.last_read,m.updated) ASC,"
-                "m.updated ASC LIMIT ?",
-                (*params, max(1, min(limit, 100))),
+                "SELECT m.* FROM memories m WHERE " + " AND ".join(clauses), params,
             ).fetchall()
+            stats = self.read_stats(db, [row["id"] for row in rows])
+        rows = [{**dict(row), "read_count": stats.get(row["id"], {}).get("read_count", 0),
+                 "last_read": stats.get(row["id"], {}).get("last_read")} for row in rows]
+        rows.sort(key=lambda row: (
+            row["last_read"] is not None, row["last_read"] or row["updated"], row["updated"],
+        ))
+        rows = rows[:max(1, min(limit, 100))]
         now = time.time()
         items = []
         for row in rows:
@@ -639,14 +485,3 @@ class Memory:
                 ),
             })
         return {"items": items, "total": len(items), "threshold_days": days}
-
-    def reads(self, run_id):
-        self.store.run(run_id)
-        with self.store.connection() as db:
-            rows = db.execute(
-                "SELECT r.*, h.record FROM memory_reads r JOIN memory_history h "
-                "ON h.memory_id=r.memory_id AND h.version=r.version "
-                "WHERE r.run_id=? ORDER BY r.created,r.memory_id",
-                (run_id,),
-            ).fetchall()
-            return [{**dict(row), "record": json.loads(row["record"])} for row in rows]

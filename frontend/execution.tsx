@@ -400,10 +400,12 @@ function SchedulePanel({ repo, api }: { repo: { id: string }; api: Api }) {
   </section>;
 }
 
-export function ExecutionPanel({ repo, api }: { repo: { id: string; name: string }; api: Api }) {
+export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
+  repo: { id: string; name: string }; api: Api; initialEnvId?: string;
+}) {
   const [environments, setEnvironments] = useState<Environment[]>([]);
-  const [selected, setSelected] = useState('');
-  const selectedRef = useRef('');
+  const [selected, setSelected] = useState(initialEnvId);
+  const selectedRef = useRef(initialEnvId);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [issueAnalysisId, setIssueAnalysisId] = useState('');
   const [busy, setBusy] = useState(false);

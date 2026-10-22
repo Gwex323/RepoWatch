@@ -26,12 +26,12 @@ from .github_accounts import GitHubAccounts, GitHubError
 from .github_issues import GitHubIssues
 from .memory import Memory
 from .memory_evaluation import MemoryEvaluations
-from .repairs import Repairs
-from .repository_analysis import Analyses
+from .repairs import REPAIR_MAX_ATTEMPTS, Repairs
+from .repository_analysis import MAX_TURNS, Analyses
 from .repository_source import ExecutionError
+from .roles import ROLES
 from .schedules import RepositorySchedules
 from .store import SDK_VERSION, Conflict, Missing, Store
-from .workflow import ROLES, Worker
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -46,19 +46,6 @@ class PasswordBody(StrictBody):
 
 class RepositoryBody(StrictBody):
     url: str = Field(max_length=300)
-
-
-class ObservationBody(StrictBody):
-    total: int = Field(ge=0, le=10000, strict=True)
-    page: int = Field(ge=1, le=1000, strict=True)
-    size: int = Field(ge=1, le=100, strict=True)
-
-
-class ConfirmationBody(StrictBody):
-    decision: Literal["confirmed", "not_reproduced"]
-    revision: str = Field(min_length=64, max_length=64)
-    personally_reproduced: bool = False
-    note: str = Field(default="", max_length=2000)
 
 
 class MemoryBody(StrictBody):
@@ -170,7 +157,6 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
-        worker = asyncio.create_task(Worker(store).run()) if start_worker else None
         executor = asyncio.create_task(execution.run()) if start_worker else None
         diagnostics = asyncio.create_task(execution.diagnoses.run()) if start_worker else None
         analyst = asyncio.create_task(analyses.run()) if start_worker else None
@@ -205,10 +191,6 @@ def create_app(
             schedule_worker.cancel()
             with suppress(asyncio.CancelledError):
                 await schedule_worker
-        if worker:
-            worker.cancel()
-            with suppress(asyncio.CancelledError):
-                await worker
 
     app = FastAPI(title="RepoWatch", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.store = store
@@ -327,7 +309,7 @@ def create_app(
             "phase": 3,
             "sdk_version": SDK_VERSION,
             "roles": ROLES,
-            "model_mode": "deterministic_fixture",
+            "model_mode": "configured_provider",
             "external_model_calls": (execution.diagnoses.engine.status()["enabled"]
                                      or analyses.engine.status()["enabled"]),
             "repository_analysis": analyses.engine.status(),
@@ -338,17 +320,17 @@ def create_app(
             "external_repository_execution": True,
             "existing_issue_intake": True,
             "reproduction_policy": {
-                "discovered": "human", "existing_issue": "automatic", "merge": "owner_only",
+                "discovered": "human", "existing_issue": "human", "merge": "owner_only",
             },
             "schedule": schedules.summary(),
             "tracing_export": False,
             "storage": "SQLite",
             "runtime": "Python",
             "platform": platform.system(),
-            "max_turns": 24,
-            "max_attempts": 3,
+            "max_turns": MAX_TURNS,
+            "max_attempts": REPAIR_MAX_ATTEMPTS,
             "memory": {"enabled": True, "scope": "repository_and_exact_revision",
-                       "retrieval": "role_categories", "semantic_search": False},
+                       "retrieval": "literal_relevance_and_recency", "semantic_search": False},
         }
 
     @app.get("/api/github/accounts")
@@ -561,14 +543,6 @@ def create_app(
             raise HTTPException(422, "Invalid repository name.")
         return store.add_repository(path[1:], "https://github.com" + path)
 
-    @app.post("/api/repositories/{repo_id}/runs")
-    async def start_run(repo_id: str, body: StrictBody | None = None):
-        return {"run_id": store.start_run(repo_id)}
-
-    @app.post("/api/samples/existing-issue/runs")
-    async def start_issue_sample(body: StrictBody | None = None):
-        return {"run_id": store.start_issue_sample()}
-
     @app.get("/api/repositories/{repo_id}/memories")
     async def memories(
         repo_id: str,
@@ -619,30 +593,6 @@ def create_app(
         limit: int = Query(default=50, ge=1, le=100),
     ):
         return memory.aging(repo_id, revision=revision, days=days, limit=limit)
-
-    @app.get("/api/runs/{run_id}/memories")
-    async def memory_reads(run_id: str):
-        return memory.reads(run_id)
-
-    @app.get("/api/runs/{run_id}")
-    async def run_detail(run_id: str):
-        return store.details(run_id)
-
-    @app.post("/api/runs/{run_id}/experiment")
-    async def observe(run_id: str, body: ObservationBody):
-        return store.observe(run_id, body.total, body.page, body.size)
-
-    @app.post("/api/runs/{run_id}/confirmation")
-    async def confirm(run_id: str, body: ConfirmationBody):
-        if body.decision == "confirmed" and not body.personally_reproduced:
-            raise HTTPException(422, "Personal reproduction must be explicitly confirmed.")
-        changed = store.confirm(run_id, body.decision, body.revision, body.note.strip())
-        return {"accepted": True, "changed": changed, "run": store.run(run_id)}
-
-    @app.post("/api/runs/{run_id}/retry")
-    async def retry(run_id: str):
-        store.retry(run_id)
-        return {"queued": True}
 
     assets = ROOT / "dist/assets"
     if assets.exists():

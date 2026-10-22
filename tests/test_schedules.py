@@ -140,12 +140,7 @@ def test_schedule_overview_includes_all_repositories(schedule_service):
 
     overview = schedules.list()
 
-    assert overview[0] == {
-        "repo_id": "repo_fixture", "repository": "samples / page-window",
-        "kind": "fixture", "enabled": False, "local_time": "09:00",
-        "last_run_date": "", "last_status": "paused", "last_detail": "",
-    }
-    assert overview[1:] == [
+    assert overview == [
         {
             "repo_id": repo["id"], "repository": "alice/project", "kind": "github",
             "enabled": True, "local_time": "08:30", "last_run_date": "",
