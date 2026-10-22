@@ -3,10 +3,9 @@ import { Archive, ArrowLeft, ArrowRight, BookOpen, History, Pencil, Plus, Refres
 
 export type MemoryRecord = {
   id: string; repo_id: string; category: string; title: string; content: string;
-  revision: string; source: 'owner' | 'workflow'; source_run_id: string | null;
+  revision: string; source: 'owner' | 'workflow';
   evidence: Record<string, unknown>; status: string; version: number; updated: number;
 };
-export type MemoryRead = { agent: string; memory_id: string; version: number; record: MemoryRecord };
 type MemoryHistory = { version: number; action: string; record: MemoryRecord };
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Repo = { id: string; name: string };
@@ -22,27 +21,15 @@ type MemoryAging = {
 };
 const categories: Record<string, string> = {
   architecture: '项目结构', setup: '环境与启动', testing: '测试约定',
-  bug: '已复现问题', fix: '样例修复经验', investigation: '未确认记录',
+  bug: '已复现问题', fix: '修复经验', investigation: '未确认记录',
 };
 const blank = (revision: string): Draft => ({ category: 'architecture', title: '', content: '', revision });
 const sourceName = (item: MemoryRecord) => item.source === 'owner' ? '手工知识 · 未验证' :
-  item.category === 'bug' ? (item.evidence.actor === 'workflow' ? '自动验证记录 · 受控样例' : '人工复现记录 · 受控样例') :
-    item.category === 'fix' ? '断言通过 · 受控样例' : '未能复现 · 非排除结论';
+  item.category === 'fix' ? (item.evidence.merged ? '已合并修复经验' : '修复记录') :
+    item.category === 'bug' ? '问题复现记录' : '调查记录';
 
-export function MemoryReads({ reads, roleName }: { reads: MemoryRead[]; roleName: (name: string) => string }) {
-  return <div className="memory-read-list">
-    {!reads.length ? <div className="empty"><BookOpen size={28} /><p>暂无记忆引用</p></div> :
-      reads.map(read => <article className="memory-entry" key={`${read.agent}:${read.memory_id}:${read.version}`}>
-        <div className="memory-meta"><span className="tag neutral">{roleName(read.agent)}</span>
-          <span>{categories[read.record.category]}</span><span>v{read.version}</span></div>
-        <h3>{read.record.title}</h3><p>{read.record.content}</p>
-        <div className="memory-meta"><span>{sourceName(read.record)}</span><code>{read.record.revision}</code></div>
-      </article>)}
-  </div>;
-}
-
-export function MemoryView({ repositories, revisions, api, onRun }: {
-  repositories: Repo[]; revisions: Record<string, string>; api: Api; onRun: (id: string) => void;
+export function MemoryView({ repositories, api }: {
+  repositories: Repo[]; api: Api;
 }) {
   const [selected, setSelected] = useState(repositories[0]?.id ?? '');
   return <section className="memory-page">
@@ -51,13 +38,13 @@ export function MemoryView({ repositories, revisions, api, onRun }: {
         {repositories.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
       </select></label>
     </div>
-    {selected && <RepositoryMemory key={selected} repoId={selected} revision={revisions[selected] ?? ''}
-      api={api} onRun={onRun} />}
+    {selected && <RepositoryMemory key={selected} repoId={selected} revision={''}
+      api={api} />}
   </section>;
 }
 
-function RepositoryMemory({ repoId, revision, api, onRun }: {
-  repoId: string; revision: string; api: Api; onRun: (id: string) => void;
+function RepositoryMemory({ repoId, revision, api }: {
+  repoId: string; revision: string; api: Api;
 }) {
   const [items, setItems] = useState<MemoryRecord[]>([]);
   const [total, setTotal] = useState(0);
@@ -201,8 +188,8 @@ function RepositoryMemory({ repoId, revision, api, onRun }: {
         </div>
         <p>{item.content}</p>
         <div className="memory-meta"><span>代码版本</span><code>{item.revision}</code>
-          {item.source_run_id && <button className="text-link" onClick={() => onRun(item.source_run_id!)}>
-            来源任务<ArrowRight size={13} /></button>}</div>
+          {typeof item.evidence.pr === 'string' && /^https:\/\/github\.com\//.test(item.evidence.pr) &&
+            <a className="text-link" href={item.evidence.pr} target="_blank" rel="noreferrer">来源 PR<ArrowRight size={13} /></a>}</div>
         {!!Object.keys(item.evidence).length && <details className="memory-evidence"><summary>验证证据</summary>
           <pre>{JSON.stringify(item.evidence, null, 2)}</pre></details>}
         {history?.id === item.id && <div className="memory-history">

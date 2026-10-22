@@ -55,7 +55,7 @@ def test_network_disabled_is_diagnosed_before_misleading_package_error(service):
     assert "pypi.org" in report["evidence"][0]
     assert report["handoffs"] == []
     assert not env["config"]["install_network"]
-    assert execution.store.dashboard()["runs"] == []
+    assert execution.store.dashboard()["findings"] == []
     assert env["state"] == "setup_failed" and not env["installed"]
 
 

@@ -12,11 +12,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .analysis_model import AnalysisModel
-from .diagnosis import redact_values
-from .github_accounts import GitHubAccounts
-from .memory import Memory
-from .memory_evaluation import _summary, model_identity, run_variant
+from repowatch.analysis_model import AnalysisModel
+from repowatch.diagnosis import redact_values
+from repowatch.github_accounts import GitHubAccounts
+from repowatch.memory import Memory
+from repowatch.memory_evaluation import _summary, model_identity, run_variant
 
 DEFAULT_CASES = Path(__file__).resolve().parents[1] / "tests/fixtures/memory_evaluation/cases.json"
 DEFAULT_DB = Path(__file__).resolve().parents[1] / "data/repowatch.db"
@@ -187,7 +187,7 @@ async def run_suite(manifest_path, output_dir, engine, *, selected=None):
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         "model": {key: status.get(key) for key in
                   ("model", "base_url", "api", "version", "output_protocol",
-                   "reasoning_effort")},
+                   "reasoning_effort", "role_models")},
         "cases": {},
     }
     identity = model_identity(engine)

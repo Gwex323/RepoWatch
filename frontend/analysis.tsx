@@ -1,14 +1,9 @@
 import { useEffect, useState } from 'react';
-import { Check, FileSearch, Loader2, RefreshCw, Save, X } from 'lucide-react';
+import { Check, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { RepairPanel } from './repair';
+import { agentModelEvent } from './agent-models';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
-type Provider = {
-  enabled: boolean; model: string; base_url: string; api: string; has_key: boolean; version: number;
-  reasoning_effort?: string; effective_reasoning_effort?: string | null;
-  output_protocol?: string;
-  finalization_mode?: string;
-};
 type Finding = {
   id: string; status: string; version: number;
   data: {
@@ -110,6 +105,7 @@ const names: Record<string, string> = {
 };
 function eventLabel(item: Analysis['events'][number]) {
   const name = names[item.agent] ?? item.agent;
+  if (item.kind === 'model_configuration') return agentModelEvent(item.agent);
   if (item.kind === 'attempt') return '开始新一次分析';
   if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
   if (item.kind === 'handoff_retry') return `${name} · 指定交接未通过，使用同一轮证据重试一次`;
@@ -189,62 +185,6 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'evidence') return '读取运行记录';
   if (item.kind === 'handoff') return item.agent.split(' -> ').map(value => names[value] ?? value).join(' → ');
   return name;
-}
-
-export function AnalysisModelSettings({ api }: { api: Api }) {
-  const [config, setConfig] = useState<Provider | null>(null);
-  const [key, setKey] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [notice, setNotice] = useState('');
-  useEffect(() => { void api<Provider>('/analysis-model').then(setConfig).catch(() => setNotice('无法读取模型配置')); }, [api]);
-  return <section className="analysis-model-section">
-    <div className="section-heading"><h2><FileSearch size={18} />仓库分析模型</h2>
-      <span className="tag neutral">{config?.enabled ? '已配置 · 调用时验证' : '未启用'}</span></div>
-    {config && <form className="execution-config" onSubmit={e => {
-      e.preventDefault(); setBusy(true); setNotice('');
-      void api<Provider>('/analysis-model', {
-        version: config.version, enabled: config.enabled, model: config.model,
-        base_url: config.base_url, api: config.api, api_key: key,
-        reasoning_effort: config.reasoning_effort ?? 'auto',
-      }).then(value => { setConfig(value); setNotice(value.enabled ? '已保存，等待中的分析将自动继续。' : '已保存，自动分析已停用。'); })
-        .catch(e => setNotice(errorMessage(e.message))).finally(() => { setKey(''); setBusy(false); });
-    }}>
-      <div className="execution-config-row">
-        <label>分析模型名称<input required maxLength={200} value={config.model} disabled={busy}
-          onChange={e => setConfig({ ...config, model: e.target.value })} /></label>
-        <label>模型接口<select value={config.api} disabled={busy} onChange={e => setConfig({ ...config, api: e.target.value })}>
-          <option value="responses">Responses</option><option value="chat_completions">Chat Completions</option>
-        </select></label>
-      </div>
-      <label>推理强度<select value={config.reasoning_effort ?? 'auto'} disabled={busy}
-        onChange={e => setConfig({ ...config, reasoning_effort: e.target.value })}>
-        <option value="auto">自动（按模型适配）</option>
-        <option value="default">模型服务默认</option>
-        <option value="low">低</option><option value="medium" disabled={config.model.toLowerCase() === 'glm-5.3'}>中</option>
-        <option value="high">高</option><option value="max">最高</option>
-      </select></label>
-      <label>模型服务地址<input required type="url" maxLength={500} value={config.base_url} disabled={busy}
-        onChange={e => setConfig({ ...config, base_url: e.target.value })} /></label>
-      {config.output_protocol && <p className="diagnosis-meta">
-        已保存输出协议：{config.output_protocol === 'json_object' ? 'JSON Object' : 'JSON Schema'}
-      </p>}
-      {config.finalization_mode && <p className="diagnosis-meta">
-        已保存报告模式：{config.finalization_mode === 'deepseek_direct'
-          ? 'DeepSeek 兼容模式（所有阶段关闭思考，推理强度设置不生效）'
-          : config.finalization_mode === 'glm47_direct' ? 'GLM-4.7 直接输出（分析阶段保持默认思考）' : '模型服务默认'}
-      </p>}
-      <label>分析模型 API Key<input type="password" autoComplete="new-password" maxLength={1024}
-        placeholder={config.has_key ? '已保存，留空保留' : ''} value={key} disabled={busy}
-        onChange={e => setKey(e.target.value)} /></label>
-      <div className="execution-config-footer">
-        <label className="checkbox-label"><input type="checkbox" checked={config.enabled} disabled={busy}
-          onChange={e => setConfig({ ...config, enabled: e.target.checked })} />启用仓库自动分析</label>
-        <button className="button secondary" disabled={busy}><Save size={15} />保存分析模型</button>
-      </div>
-      <p className="diagnosis-meta">启用后会将限定范围的源码、执行日志和仓库记忆发送到此模型服务。密钥保存在本机加密存储中。</p>
-    </form>}
-    {notice && <p role="status">{notice}</p>}
-  </section>;
 }
 
 function FindingItem({ analysis, finding, api, refresh }: {
@@ -362,7 +302,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       {analyses.map(item => <option key={item.id} value={item.id}>{new Date(item.created * 1000).toLocaleString('zh-CN')} · {statuses[item.status]}</option>)}
     </select></label>}
     {error && <p role="alert">{error}</p>}
-    {analysis?.status === 'waiting_model' && <p className="error-inline">请在“运行配置 → 仓库分析模型”保存并启用模型，任务将自动继续。</p>}
+    {analysis?.status === 'waiting_model' && <p className="error-inline">请在“运行配置 → 智能体模型配置”配置分析所需的四个角色，并启用模型工作流，任务将自动继续。</p>}
     {analysis?.status === 'running' && <p><Loader2 size={14} className="spin" /> {names[stage ?? ''] ?? '正在准备源码与执行证据'}</p>}
     {analysis?.status === 'running' &&
       ['timeout_retry', 'retry_call', 'output_retry', 'format_retry', 'evidence_retry'].includes(analysis.events.at(-1)?.kind ?? '') &&

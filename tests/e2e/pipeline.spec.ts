@@ -102,7 +102,7 @@ test('automatic pipeline: download consent, missing start, preserved tests, acce
   await expect(flow).toContainText('等待模型配置');
   await expect(panel.getByText('访问地址已检查：HTTP 200')).toBeVisible();
   await expect(panel.getByRole('link', { name: '打开项目' })).toHaveAttribute('href', env.url);
-  await expect(flow.getByText('请启用仓库分析模型，流水线将自动继续。')).toBeVisible();
+  await expect(flow.getByText('请配置分析所需角色的模型并启用模型工作流，流水线将自动继续。')).toBeVisible();
   await page.screenshot({ path: 'test-results/pipeline-analysis-mobile.png', fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   await panel.getByRole('button', { name: '停止项目或任务' }).click();

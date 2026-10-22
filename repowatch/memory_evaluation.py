@@ -19,7 +19,7 @@ from .store import Conflict, Missing, uid
 LOG = logging.getLogger(__name__)
 REFERENCE_LIMIT = 6
 RECOVERY_GRACE_SECONDS = ANALYSIS_TIMEOUT_SECONDS + 60
-MODEL_IDENTITY_KEYS = ("model", "base_url", "api", "version", "reasoning_effort")
+MODEL_IDENTITY_KEYS = ("model", "base_url", "api", "version", "reasoning_effort", "role_models")
 
 
 def model_identity(engine):
@@ -29,7 +29,7 @@ def model_identity(engine):
 
 def _model_consistent(baseline, memory):
     first, second = baseline["report"], memory["report"]
-    for key in ("model", "model_version", "reasoning_effort"):
+    for key in ("model", "model_version", "reasoning_effort", "role_models"):
         if first.get(key) != second.get(key):
             return False
     return True
