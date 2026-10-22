@@ -73,7 +73,7 @@ const errors: Record<string, string> = {
   repair_patch_limit: '补丁超过大小限制。',
   repair_source_limit: '源码超过下载范围限制，请重新下载并分析。',
   repair_handoff_incomplete: '修复与独立审查未完成规定交接。',
-  repair_review_evidence_required: '独立审查未读取验证证据，自动纠正后仍未完成；已阻止发布。',
+  repair_review_evidence_required: '独立审查未读取验证证据，已阻止发布。',
   repair_output_invalid: '修复模型返回格式无效。',
   repair_output_truncated: '修复模型输出达到上限，自动恢复次数已用完。请降低思考强度或更换模型后再试。',
   repair_model_timeout: '修复模型响应超时，自动重试已用完。',
