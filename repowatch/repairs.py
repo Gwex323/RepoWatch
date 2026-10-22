@@ -23,6 +23,7 @@ from .repair_model import (
     repair_failure_details,
     verification_feedback,
 )
+from .repair_origin import analysis_origin, repair_origin
 from .repair_workspace import SOURCE_READ_POLICY, Patch, RepairWorkspace, source_tree
 from .store import Conflict, Missing, uid
 
@@ -126,6 +127,11 @@ class Repairs(EnvironmentRecovery):
             )}
             for key in ("context", "patch", "verification", "review", "remote"):
                 result[key] = self._json(row, key)
+            try:
+                result.update(repair_origin(db, row))
+                result["source_error"] = None
+            except Conflict as exc:
+                result.update(source_kind=None, source_issue=None, source_error=str(exc))
             result["verification_rounds"] = (
                 result["verification"].pop("_rounds", []) if result["verification"] else []
             )
@@ -170,6 +176,8 @@ class Repairs(EnvironmentRecovery):
                      or result["review_evidence_recovery_available"])
                 and self.current(db, row)
             )
+            if result["source_error"] or row["error"] == "repair_issue_publication_conflict":
+                result["can_retry"] = False
             return redact_values(result)
 
     @classmethod
@@ -436,6 +444,7 @@ class Repairs(EnvironmentRecovery):
             "revision": analysis["revision"], "repo_id": analysis["repo_id"],
             "env_id": analysis["env_id"], "config": json.loads(env["config"] or "{}"),
             "memories": json.loads(analysis["context"] or "{}").get("memories", []),
+            **analysis_origin(db, analysis),
         }
         task_id, now = uid("repair"), time.time()
         db.execute(
@@ -518,6 +527,9 @@ class Repairs(EnvironmentRecovery):
             row = db.execute("SELECT * FROM repair_tasks WHERE id=?", (repair_id,)).fetchone()
             if not row:
                 raise Missing("Repair task not found.")
+            repair_origin(db, row)
+            if row["error"] == "repair_issue_publication_conflict":
+                raise Conflict("repair_issue_publication_conflict")
             output_recovery = self._output_recovery(db, row)
             protocol_recovery = self._protocol_recovery(db, row)
             workspace_recovery = self._workspace_recovery(db, row)
@@ -725,6 +737,8 @@ class Repairs(EnvironmentRecovery):
         try:
             check()
             context = json.loads(row["context"])
+            with self.store.connection() as db:
+                context.update(repair_origin(db, row))
             def event(kind, value=""):
                 self.event(row["id"], kind, value)
                 if kind == "verification_round" and workspace:

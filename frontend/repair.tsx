@@ -19,6 +19,9 @@ type Repair = {
   verification_resume_available?: boolean;
   publication_retry_available?: boolean;
   docker_recovery_available?: boolean;
+  source_kind?: 'discovered' | 'existing_issue' | null;
+  source_issue?: { number: number; url: string } | null;
+  source_error?: string | null;
   context: { finding: { title: string } };
   patch: { summary: string; edits: { path: string }[] } | null;
   diff: string; verification: Verification | null;
@@ -34,7 +37,7 @@ const labels: Record<string, string> = {
   failed: '修复未完成', interrupted: '修复已中断',
   pr_created: 'PR 已创建', repair_agent: '修改代码', independent_reviewer: '独立审查',
   original_suite: '原版本测试', baseline: '原版本回归验证', candidate: '修复后测试',
-  publishing: '提交 Issue 与 PR',
+  publishing: '发布修复结果',
   original_suite_setup: '原版本测试安装', baseline_setup: '回归验证安装',
   candidate_setup: '修复版本安装', regression_before: '修复前回归测试',
   regression_after: '修复后回归测试', full_suite_after: '修复后完整测试',
@@ -106,6 +109,8 @@ const errors: Record<string, string> = {
   repair_fork_pending: 'GitHub fork 尚未准备好，请稍后重试。',
   repair_fork_conflict: '账号下已有同名但来源不同的仓库，未覆盖。',
   repair_remote_conflict: '远程分支或发布记录不匹配，已停止，未覆盖已有内容。',
+  repair_issue_reference_invalid: '原 Issue 与仓库或分析记录不匹配，已停止；请重新同步 Issue 并分析。',
+  repair_issue_publication_conflict: '旧任务已有不同的 Issue / PR 发布记录，请先人工核对远程结果；系统不会再次创建或覆盖。',
   repair_remote_scan_limit: '远程记录超过核对范围，未重复发布。',
   repair_publication_uncertain: '上次发布结果尚不能确认，未重复提交；稍后重试将再次核对。',
   github_active_account_required: '请先连接并选择可用的 GitHub 账号。',
@@ -275,6 +280,7 @@ export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?:
           onChange={e => setSettings({ ...settings, enabled: e.target.checked })} />自动修复并提交 Issue / PR</label>
         <button className="button secondary" disabled={busy}><Save size={15} />保存修复配置</button>
       </div>
+      <p className="diagnosis-meta">已有 Issue 只提交关联原编号的修复 PR；系统新发现的问题会创建 Issue 和 PR。</p>
       <dl className="repair-facts">
         <div><dt>模型</dt><dd>{(modelEnabled ?? settings.model_enabled) ? '代码修复与独立审查模型已就绪' : '等待修复角色模型配置或启用'}</dd></div>
         <div><dt>每个问题</dt><dd>最多 {settings.max_attempts} 次尝试</dd></div>
@@ -310,6 +316,10 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
           ? '等待启用自动修复' : labels[task.status] ?? task.status}</span></div>
       <p className="diagnosis-meta">版本 {task.revision.slice(0, 12)} · 已尝试 {task.attempt} 次
         {task.stage && ` · ${labels[task.stage] ?? task.stage}`}</p>
+      {task.source_kind === 'existing_issue' && task.source_issue && <p className="diagnosis-meta">
+        来源：<a href={task.source_issue.url} target="_blank" rel="noopener noreferrer">
+          原 Issue #{task.source_issue.number}</a> · 修复 PR 将关联原编号</p>}
+      {task.source_error && task.source_error !== task.error && <p role="alert">{message(task.source_error)}</p>}
       {task.status === 'running' && <p><Loader2 size={14} className="spin" />正在处理修复任务</p>}
       {task.error && task.status !== 'waiting_environment' && <p role="alert">
         {task.error === 'docker_unavailable' && '上次失败：'}{message(task.output_recovery_available
@@ -367,7 +377,9 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
       {task.remote && <div className="execution-actions"><code>{task.remote.branch}</code>
         <a className="button secondary" href={task.remote.pr.url} target="_blank" rel="noopener noreferrer">
           <GitPullRequest size={15} />PR #{task.remote.pr.number}<ExternalLink size={13} /></a>
-        <a href={task.remote.issue.url} target="_blank" rel="noopener noreferrer">Issue #{task.remote.issue.number}</a></div>}
+        <a href={task.remote.issue.url} target="_blank" rel="noopener noreferrer">
+          {task.source_kind === 'existing_issue' && task.source_issue?.number === task.remote.issue.number
+            ? '原 Issue' : 'Issue'} #{task.remote.issue.number}</a></div>}
       {task.can_retry && <button className="button secondary" disabled={!!busy || !task.enabled}
         onClick={() => {
           setBusy(task.id); setError('');

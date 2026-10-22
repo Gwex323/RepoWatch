@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote, urlencode
 
 from .github_accounts import GitHubError
+from .repair_origin import repair_origin
 from .store import Conflict, Missing
 
 
@@ -74,9 +75,32 @@ class GitHubPublisher:
     def publish(self, task, patch, body, *, check):
         account_id, account_version = task["account_id"], task["account_version"]
         with self.store.connection() as db:
+            stored = db.execute(
+                "SELECT * FROM repair_tasks WHERE id=?", (task["id"],),
+            ).fetchone()
+            if not stored or any(stored[key] != task[key] for key in (
+                "analysis_id", "repo_id", "env_id", "revision",
+            )):
+                raise Conflict("repair_issue_reference_invalid")
+            origin = repair_origin(db, stored)
+            operations = {row["operation"]: row for row in db.execute(
+                "SELECT * FROM repair_remote_operations WHERE repair_id=?", (task["id"],),
+            )}
             repo = db.execute(
                 "SELECT * FROM repositories WHERE id=?", (task["repo_id"],)
             ).fetchone()
+        source = origin["source_issue"]
+        binding = operations.get("source_issue")
+        binding_hash = hashlib.sha256(json.dumps(origin, sort_keys=True).encode()).hexdigest()
+        if source:
+            # Old Issue/PR intents may already have created a duplicate. Never repurpose them.
+            if "issue" in operations or ("pr" in operations and binding is None):
+                raise Conflict("repair_issue_publication_conflict")
+            if binding and (binding["payload_hash"] != binding_hash
+                            or binding["state"] != "complete"):
+                raise Conflict("repair_issue_publication_conflict")
+        elif binding:
+            raise Conflict("repair_issue_publication_conflict")
         if not repo or repo["kind"] != "github" or not re.fullmatch(
             r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}", repo["name"],
         ) or repo["url"] != "https://github.com/" + repo["name"]:
@@ -116,6 +140,22 @@ class GitHubPublisher:
         base = metadata.get("default_branch")
         if not isinstance(base, str) or not re.fullmatch(r"[A-Za-z0-9_./-]{1,120}", base):
             raise GitHubError("github_invalid_response", 502)
+
+        def source_issue():
+            item = request("GET", f"/repos/{name}/issues/{source['number']}")
+            if (not isinstance(item, dict) or "pull_request" in item
+                    or item.get("state") not in ("open", "closed")):
+                raise Conflict("repair_issue_reference_invalid")
+            link = remote_link(item, name, "issues")
+            if (link["number"] != source["number"]
+                    or link["url"].casefold() != source["url"].casefold()):
+                raise Conflict("repair_issue_reference_invalid")
+            return link
+
+        if source:
+            # Validate before the first remote write and persist a read-only source binding.
+            source_issue()
+            self._save_operation(task["id"], "source_issue", binding_hash, "complete", source)
 
         def current_upstream():
             ref = request("GET", f"/repos/{name}/git/ref/heads/{quote(base, safe='/')}")
@@ -254,14 +294,22 @@ class GitHubPublisher:
                 or found[0].get("base", {}).get("ref") != base
             ):
                 raise Conflict("repair_remote_conflict")
+            if kind == "pulls" and source and (
+                f"\n\nCloses #{source['number']}\n\n" + marker
+                not in str(found[0].get("body") or "")
+            ):
+                raise Conflict("repair_issue_publication_conflict")
             return remote_link(found[0], name, "issues" if kind == "issues" else "pull")
 
-        issue_payload = {"title": "[RepoWatch] " + title[5:], "body": body + "\n\n" + marker}
-        issue = self._mutation(
-            task["id"], "issue", issue_payload, lambda: find_marked("issues"),
-            lambda: remote_link(request("POST", f"/repos/{name}/issues", issue_payload),
-                                name, "issues"),
-        )
+        if source:
+            issue = source_issue()
+        else:
+            issue_payload = {"title": "[RepoWatch] " + title[5:], "body": body + "\n\n" + marker}
+            issue = self._mutation(
+                task["id"], "issue", issue_payload, lambda: find_marked("issues"),
+                lambda: remote_link(request("POST", f"/repos/{name}/issues", issue_payload),
+                                    name, "issues"),
+            )
         current_upstream()
         head = target.split("/")[0] + ":" + branch
         pr_payload = {"title": title, "head": head, "base": base,
