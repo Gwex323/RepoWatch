@@ -90,6 +90,14 @@ evidence or owner confirmation.
 
 ## Provider Configuration
 
+Issues #47 and #55 add a saved provider catalog and five shared agent-role selections.
+See [供应商与智能体模型](../model-providers.md) for the import format and routing contract.
+Each role can retain its independent configuration or select a saved provider.
+The original single-model API updates all five roles for compatibility. Each run
+resolves and freezes its role models, keys and reasoning settings before opening
+clients; subsequent configuration edits cannot redirect an in-flight role.
+Memory evaluations compare configuration revisions and all role-model identities.
+
 The owner configures endpoint, API mode, model and a dedicated API key in
 the WebUI. Both Responses and Chat Completions adapters are available. The
 provider must support tools and structured output; saving settings is not a
@@ -390,3 +398,35 @@ Official contracts:
 https://api-docs.deepseek.com/zh-cn/api/create-chat-completion/
 https://api-docs.deepseek.com/zh-cn/guides/thinking_mode/
 https://api-docs.deepseek.com/zh-cn/guides/tool_calls/
+
+### Ark Coding GLM-5.3 Report Compatibility (2026-10-21, Issue #38)
+
+The owner-triggered GLM-5.3 attempt completed all three native handoffs, then
+failed on final-report correction. The initial text was invalid JSON; after
+tools were removed, the adapter restored JSON Schema response_format and the
+Coding Plan endpoint rejected that field with HTTP 400. Tool/schema separation
+alone therefore did not cover report closure or correction.
+
+Two synthetic live probes using the configured GLM-5.3 endpoint and high effort
+confirmed that json_schema was rejected at response_format.type while json_object
+returned valid JSON. This is evidence for that configured endpoint, not a claim
+about every GLM service or the general Ark API.
+
+For HTTPS ark.cn-beijing.volces.com at the default port, exact /api/coding/v3
+base path (optional trailing slash), Chat Completions and glm-5.3/glm-5.3-flash,
+reports now use the existing JSON Object adapter. Exploration keeps tools and
+output-format constraints separate; report closure and correction both use
+json_object. Saved/effective reasoning is preserved, including explicit high;
+the GLM-4.7 fast-finalization policy must not disable thinking for these models.
+
+Whenever the JSON Object adapter removes a wire schema, it also supplies that
+schema in system instructions. Shared diagnosis and repair callers therefore
+retain the model-visible report contract as well as strict local output_type
+validation. Source quotes, report structure, genuine SDK handoffs, retry limits
+and failure behavior remain enforced locally. No credentials/configuration
+migration, automatic task retry or automatic PR merge is performed.
+
+Request-body regressions cover targeted URL/model/API matching, exploration,
+native handoffs, report closure, successful correction and persistent invalid
+syntax/structure. Synthetic probes do not satisfy full repository-analysis
+acceptance, and GLM success cannot close DeepSeek tracking Issue #33.

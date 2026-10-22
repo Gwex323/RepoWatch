@@ -15,6 +15,7 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
     output_recovery_available: false,
     protocol_recovery_available: false,
     workspace_recovery_available: false,
+    review_evidence_recovery_available: false,
     verification_resume_available: false,
     publication_retry_available: false,
     docker_recovery_available: false,
@@ -66,6 +67,7 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
     task.output_recovery_available = false;
     task.protocol_recovery_available = false;
     task.workspace_recovery_available = false;
+    task.review_evidence_recovery_available = false;
     task.verification_resume_available = false;
     task.publication_retry_available = false;
     task.docker_recovery_available = false;
@@ -160,6 +162,10 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
   }), created: 6 });
   await expect(panel.getByText('本次失败源于输出被截断。输出策略已更新，此任务可额外重试一次。', { exact: true })).toBeVisible();
   await expect(panel.getByRole('alert')).toContainText('输出达到上限');
+  task.events.push({ kind: 'output_reasoning_reduced', value: JSON.stringify({
+    role: 'repair_agent', from: 'high', to: 'low',
+  }), created: 6 });
+  await expect(panel.getByText('输出超限，已临时降低思考强度', { exact: false })).toBeVisible();
   await expect(panel.getByText(/输出已截断 · 输出 16000 token · 其中推理 15922 token/)).toBeVisible();
   await page.screenshot({ path: 'test-results/repair-output-recovery-mobile.png', fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -181,6 +187,14 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
   await panel.getByRole('button', { name: '使用新策略重试' }).click();
   await expect(panel.getByText('等待修复', { exact: true })).toBeVisible();
   await expect(panel.getByRole('button', { name: '使用新策略重试' })).toHaveCount(0);
+  task.status = 'failed'; task.error = 'repair_handoff_incomplete'; task.can_retry = true;
+  task.review_evidence_recovery_available = true;
+  task.events.push({ kind: 'review_evidence_retry', value: 'independent_reviewer', created: 8 });
+  await expect(panel.getByRole('alert')).toContainText('独立审查未读取验证证据');
+  await expect(panel.getByText('补丁已通过测试，但旧版审查遗漏证据读取。可额外恢复一次：重新验证已保存补丁后继续独立审查。', { exact: true })).toBeVisible();
+  await expect(panel.getByText(/审查提前返回结论，已要求先读取验证证据/)).toBeVisible();
+  await panel.getByRole('button', { name: '使用新策略重试' }).click();
+  await expect(panel.getByText('等待修复', { exact: true })).toBeVisible();
   task.status = 'failed'; task.error = 'docker_unavailable'; task.can_retry = true;
   task.attempt = 8; task.workspace_recovery_available = true;
   task.verification_resume_available = true;
@@ -193,8 +207,14 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
   task.events.push({ kind: 'path_rejected', value: JSON.stringify({
     reason: 'sensitive_name', edit_index: 1,
   }), created: 8 });
-  await expect(panel.getByRole('alert')).toContainText('补丁包含不允许修改的路径');
+  await expect(panel.getByRole('alert')).toContainText('文件路径未通过保护检查');
   await expect(panel.getByText('第 2 个修改 · 文件名包含受保护的敏感词', { exact: true })).toBeVisible();
+  task.error = 'repair_source_path_rejected';
+  task.events.push({ kind: 'source_path_rejected', value: JSON.stringify({
+    reason: 'unsupported_file_type', recoverable: false, corrections_remaining: 0,
+  }), created: 9 });
+  await expect(panel.getByRole('alert')).toContainText('读取的文件类型不在允许的源码范围内');
+  await expect(panel.getByText('源码读取 · 文件类型不在允许读取的源码范围内', { exact: true }).first()).toBeVisible();
   await expect(panel.getByText('运行环境与路径处理已更新，此任务可额外重试一次。', { exact: true })).toBeVisible();
   await page.screenshot({ path: 'test-results/repair-workspace-recovery-mobile.png', fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
