@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -165,7 +166,7 @@ class StageModel(Model):
 
     def __init__(self, delegate, role, budget, event, retries=None, deadline=None,
                  final_input=None, review_evidence=None, required_read=None,
-                 separate_schema_from_tools=False):
+                 separate_schema_from_tools=False, retry_handoff_mismatch=False):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
@@ -173,7 +174,24 @@ class StageModel(Model):
         self.review_evidence = review_evidence
         self.required_read = required_read
         self.separate_schema_from_tools = separate_schema_from_tools
+        self.retry_handoff_mismatch = retry_handoff_mismatch
         self.force_closing = False
+
+    def handoff_validation(self, response, expected):
+        calls = [item for item in response.output if item.type == "function_call"]
+        names = [
+            item.name if isinstance(item.name, str)
+            and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item.name) else "<invalid>"
+            for item in calls
+        ]
+        matching = sum(item.name == expected for item in calls)
+        detail = {
+            "expected": expected, "calls": len(calls), "matching": matching,
+            "names": names, "messages": sum(item.type == "message" for item in response.output),
+            "accepted": len(calls) == 1 and matching == 1,
+        }
+        self.event("handoff_validation", json.dumps(detail))
+        return calls, detail["accepted"]
 
     async def get_response(self, system_instructions, input, **kwargs):
         turns, reads, chars = STAGE_LIMITS[self.role]
@@ -394,11 +412,30 @@ class StageModel(Model):
             if not calls or len(calls) > limit or matching != len(calls):
                 raise AnalysisFailure(f"analysis_{read_kind}_read_not_followed")
         if closing:
-            calls = [item for item in response.output if item.type == "function_call"]
-            if handoff_name and (len(calls) != 1 or calls[0].name != handoff_name):
-                raise AnalysisFailure("analysis_handoff_not_followed")
-            if not handoff_name and calls:
-                raise AnalysisFailure("analysis_finalization_not_followed")
+            if handoff_name:
+                calls, accepted = self.handoff_validation(response, handoff_name)
+                if not accepted and self.retry_handoff_mismatch:
+                    self.event("handoff_retry", self.role)
+                    reminder = (
+                        "The previous response did not contain exactly one valid call to "
+                        f"{handoff_name}. Exploration is closed. Call only {handoff_name} now; "
+                        "do not return prose or another tool call."
+                    )
+                    retry_instructions = (
+                        f"{system_instructions}\n\n{reminder}"
+                        if isinstance(system_instructions, str)
+                        else [*system_instructions, reminder]
+                    )
+                    response = await self.delegate.get_response(
+                        retry_instructions, call_input, **kwargs,
+                    )
+                    calls, accepted = self.handoff_validation(response, handoff_name)
+                if not accepted:
+                    raise AnalysisFailure("analysis_handoff_not_followed")
+            else:
+                calls = [item for item in response.output if item.type == "function_call"]
+                if calls:
+                    raise AnalysisFailure("analysis_finalization_not_followed")
         return response
 
     async def stream_response(self, *args, **kwargs):
@@ -778,6 +815,7 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             review_evidence=review_evidence if role == ROLES[-1] else None,
             required_read=required_read if role == ROLES[0] else None,
             separate_schema_from_tools=getattr(model, "separate_schema_from_tools", False),
+            retry_handoff_mismatch=getattr(model, "retry_handoff_mismatch", False),
         )
         for role in ROLES
     }
