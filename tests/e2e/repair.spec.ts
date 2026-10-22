@@ -160,6 +160,10 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
   }), created: 6 });
   await expect(panel.getByText('本次失败源于输出被截断。输出策略已更新，此任务可额外重试一次。', { exact: true })).toBeVisible();
   await expect(panel.getByRole('alert')).toContainText('输出达到上限');
+  task.events.push({ kind: 'output_reasoning_reduced', value: JSON.stringify({
+    role: 'repair_agent', from: 'high', to: 'low',
+  }), created: 6 });
+  await expect(panel.getByText('输出超限，已临时降低思考强度', { exact: false })).toBeVisible();
   await expect(panel.getByText(/输出已截断 · 输出 16000 token · 其中推理 15922 token/)).toBeVisible();
   await page.screenshot({ path: 'test-results/repair-output-recovery-mobile.png', fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

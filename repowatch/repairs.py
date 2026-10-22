@@ -219,15 +219,17 @@ class Repairs(EnvironmentRecovery):
     def _output_recovery(cls, db, row):
         context = json.loads(row["context"])
         if not (
-            row["status"] == "failed" and row["error"] == "repair_output_invalid"
+            row["status"] == "failed"
+            and row["error"] in {"repair_output_invalid", "repair_output_truncated"}
             and row["attempt"] == cls._attempt_limit(row)
             and context.get("output_policy") != OUTPUT_POLICY
             and not context.get("output_recovery_used")
-            and not row["patch"] and not row["verification"] and not row["remote"]
+            and not row["patch"] and not row["verification"]
+            and not row["review"] and not row["remote"]
         ):
             return False
         # Only the latest attempt's trusted provider metadata qualifies an old
-        # generic format failure; malformed JSON alone must not gain an attempt.
+        # format/truncation failure; malformed JSON alone must not gain an attempt.
         truncated = 0
         for event in db.execute(
             "SELECT kind,value FROM repair_events WHERE repair_id=? "

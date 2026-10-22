@@ -318,3 +318,32 @@ extends model-repair budgets or clears patch/test/review artifacts. Existing
 confirmation, evidence freshness, same-identity credential refresh, source
 fingerprint, remote revision and publication reconciliation gates remain.
 Neither deployment nor inspection requeues or publishes production tasks.
+
+
+## Adaptive Output Recovery (2026-10-22, Issue #51)
+
+A retained repair attempt exhausted 12,000 output tokens (7,073 reasoning),
+then 16,000 (15,992 reasoning). Increasing the output cap alone left almost
+no budget for the actual tool arguments. Truncated responses remain discarded
+before tool execution.
+
+After an explicit truncation, the existing bounded retry temporarily reduces
+medium/high/xhigh reasoning to low and keeps that reduction for subsequent
+calls by that same repair/review agent. It copies request settings without
+changing persisted owner configuration, provider, key, model, other reasoning
+options or tool/handoff settings. Default reasoning is left unspecified to
+avoid adding unsupported provider parameters; low/minimal/none are preserved.
+The output cap remains 16,000, with one output retry per logical call and two
+shared across the run; request and overall deadlines remain unchanged.
+A fixed-field event records the temporary reduction for the workbench.
+
+The adaptive policy also permits one explicit recovery for an exhausted
+old-policy repair_output_invalid or repair_output_truncated task only when
+its latest two provider records in the current attempt confirm truncation,
+no patch, verification, review or remote artifact exists, and the existing
+output recovery allowance is unused. Current-policy tasks, stale evidence,
+older-attempt records and used allowances do not qualify. Retry still requires
+current source/confirmation evidence and matching task version, archives the
+failed attempt, and never resets attempt numbers. Deployment alone does not
+queue repairs, call providers or publish contributions. This is bounded
+recovery, not a guarantee that every provider will complete a repair.

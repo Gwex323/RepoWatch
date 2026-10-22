@@ -30,7 +30,7 @@ from .store import Conflict
 
 RETRY_DELAY_SECONDS = 2
 FAILURE_POLICY = "classified_tool_failures_v1"
-OUTPUT_POLICY = "bounded_reasoning_output_v1"
+OUTPUT_POLICY = "adaptive_reasoning_output_v2"
 PROTOCOL_POLICY = "validated_patch_handoff_v1"
 
 
@@ -131,9 +131,22 @@ class RepairStageModel(Model):
         self.delegate, self.role, self.workspace = delegate, role, workspace
         self.event, self.packet, self.budget = event, packet, budget
         self.turns = 0
+        self.output_recovery = False
+
+    @staticmethod
+    def _reduced_reasoning(settings):
+        # Do not introduce an unsupported parameter for provider defaults, or
+        # increase an already low/disabled effort. Never mutate saved settings.
+        if settings.reasoning and settings.reasoning.effort in {"medium", "high", "xhigh"}:
+            return replace(
+                settings, reasoning=settings.reasoning.model_copy(update={"effort": "low"}),
+            )
+        return settings
 
     async def get_response(self, system_instructions, input, **kwargs):
         self.workspace.check()
+        if self.output_recovery:
+            kwargs["model_settings"] = self._reduced_reasoning(kwargs["model_settings"])
         final = self.role == "independent_reviewer"
         limit = 3 if final else 6
         if self.turns > limit:
@@ -194,7 +207,14 @@ class RepairStageModel(Model):
                     raise Conflict("repair_output_truncated") from None
                 output_retried = True
                 self.budget["outputs"] = self.budget.get("outputs", 0) + 1
-                kwargs["model_settings"] = replace(kwargs["model_settings"], max_tokens=16000)
+                settings = kwargs["model_settings"]
+                recovered = self._reduced_reasoning(settings)
+                self.output_recovery = True
+                if recovered is not settings:
+                    self.event("output_reasoning_reduced", json.dumps({
+                        "role": self.role, "from": settings.reasoning.effort, "to": "low",
+                    }))
+                kwargs["model_settings"] = replace(recovered, max_tokens=16000)
                 instruction += (
                     " Your previous response exhausted its output budget and was discarded. "
                     "Keep reasoning brief and act on the existing evidence. Produce the next "
