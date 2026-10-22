@@ -282,6 +282,53 @@ def test_evaluation_rejects_different_role_models_even_when_default_matches():
     assert not _model_consistent(first, second)
 
 
+def test_selected_deepseek_role_keeps_its_own_handoff_policy(catalog):
+    providers, engine = catalog
+    saved = create(providers)
+    saved = create(providers, name="DeepSeek", base_url="https://api.deepseek.com/v1")
+    configure(providers, {"default": choice(saved),
+                          "analysis.problem_investigator": choice(saved, index=1)})
+
+    async def runner(model, *args, **kwargs):
+        assert not model.retry_handoff_mismatch
+        chosen = model_for_role(model, "problem_investigator")
+        assert chosen.retry_handoff_mismatch and chosen.reasoning_effort is None
+        assert not model_for_role(model, "independent_reviewer").retry_handoff_mismatch
+        return {}
+
+    asyncio.run(engine._run(runner, {}, lambda *_: None))
+
+
+def test_handoff_retry_is_selected_per_role_in_the_native_graph(monkeypatch):
+    from repowatch.repository_analysis import STAGE_LIMITS
+
+    for role, turns in zip(("repository_analyst", "problem_investigator",
+                            "reproduction_assistant", "independent_reviewer"), (2, 0, 0, 0)):
+        monkeypatch.setitem(STAGE_LIMITS, role, (turns, 10, 25000))
+    shared, events = ReviewModel(), []
+
+    class HandoffProbe(RoleProbe):
+        retry_handoff_mismatch = True
+        rejected = False
+
+        async def get_response(self, *args, **kwargs):
+            response = await super().get_response(*args, **kwargs)
+            if not self.rejected:
+                self.rejected = True
+                response.output[0] = response.output[0].model_copy(
+                    update={"name": "unexpected_handoff"},
+                )
+            return response
+
+    shared.role_models = {"problem_investigator": HandoffProbe(
+        shared, "problem_investigator", [], None,
+    )}
+    report = asyncio.run(run_analysis(shared, {"files": {"app.py": "print('ok')"},
+        "config": {}, "jobs": [], "test_result": None}, lambda *e: events.append(e)))
+    assert len(report["handoffs"]) == 3
+    assert events.count(("handoff_retry", "problem_investigator")) == 1
+
+
 def test_stale_legacy_editor_cannot_overwrite_a_new_default_selection(catalog):
     providers, engine = catalog
     legacy = engine.legacy_status()
