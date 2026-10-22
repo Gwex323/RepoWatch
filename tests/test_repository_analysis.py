@@ -1358,7 +1358,7 @@ def test_automatic_queue_waits_for_model_then_resumes_once(service):  # noqa: F8
     assert len([e for e in result["events"] if e["kind"] == "handoff"]) == 3
     assert asyncio.run(analyses.tick()) is False
     assert len(analyses.list(env["id"])) == 1
-    assert execution.store.dashboard()["runs"] == []
+    assert execution.store.dashboard()["findings"][0]["id"] == result["findings"][0]["id"]
 
 
 def test_real_feedback_requires_personal_confirmation_and_never_repairs(service):  # noqa: F811
@@ -1544,10 +1544,21 @@ def test_provider_key_encryption_validation_and_rotation(service):  # noqa: F811
         settings.save(**{**args, "version": 1, "base_url": "https://other.example", "api_key": ""})
     saved = settings.save(**{**args, "version": 1, "api_key": "", "enabled": False})
     assert saved["version"] == 2 and not saved["enabled"]
-    for url in ("http://external.example", "https://user:pass@example.com",
+    for url in ("http://external.example", "http://8.8.8.8/v1",
+                "https://user:pass@example.com",
                 "https://example.com?secret=1", "http://[", "https://example.com:bad"):
         with pytest.raises(Conflict, match="analysis_model_invalid"):
             settings.save(**{**args, "version": 2, "base_url": url})
+
+
+def test_provider_settings_accept_rfc1918_http_base_url(service):  # noqa: F811
+    execution, _, _ = service
+    settings = AnalysisModel(execution.store, execution.github)
+    saved = settings.save(
+        version=0, enabled=False, model="local-model", api="chat_completions",
+        base_url="http://172.16.116.14:3000/v1", api_key="synthetic-local-key",
+    )
+    assert saved["base_url"] == "http://172.16.116.14:3000/v1"
 
 
 def test_reasoning_setting_is_saved_without_changing_keys_and_rejects_invalid_values(

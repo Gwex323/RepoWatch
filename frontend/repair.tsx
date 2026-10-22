@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, GitPullRequest, Loader2, RefreshCw, Save, Wrench } from 'lucide-react';
+import { agentModelEvent } from './agent-models';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Settings = { enabled: boolean; model_enabled: boolean; version: number; max_attempts: number };
@@ -14,6 +15,7 @@ type Repair = {
   protocol_recovery_available?: boolean;
   workspace_recovery_available?: boolean;
   verification_recovery_available?: boolean;
+  review_evidence_recovery_available?: boolean;
   verification_resume_available?: boolean;
   publication_retry_available?: boolean;
   docker_recovery_available?: boolean;
@@ -39,6 +41,7 @@ const labels: Record<string, string> = {
   queued_event: '进入修复队列', retry: '重新排队', model_call: '调用模型',
   patch: '补丁已生成', review_approved: '独立审查通过', failure: '本轮未完成',
   cleanup_failed: '验证资源清理未完成', timeout_retry: '模型超时重试',
+  output_reasoning_reduced: '输出超限，已临时降低思考强度',
   output_retry: '重新生成完整输出', format_retry: '纠正审查格式',
   output_truncated: '模型输出达到上限，已丢弃未完成内容',
   output_recovery: '已使用新版输出策略恢复机会',
@@ -50,10 +53,12 @@ const labels: Record<string, string> = {
   timeout_recovery: '已使用新版超时策略恢复机会',
   source_read_recovery: '已使用新版文件读取策略恢复机会',
   failure_recovery: '已使用新版错误处理恢复机会',
+  review_evidence_retry: '审查提前返回结论，已要求先读取验证证据',
+  review_evidence_recovery: '使用已保存补丁重新验证并恢复独立审查',
 };
 const errors: Record<string, string> = {
   repair_paused: '自动修复已暂停。请在运行配置中启用后重试。',
-  repair_model_required: '请先启用仓库分析模型。',
+  repair_model_required: '请先配置代码修复与独立审查模型，并启用模型工作流。',
   repair_settings_changed: '修复配置已变化，请刷新后重试。',
   repair_stale: '源码、配置或执行证据已变化，需重新分析并复现。',
   repair_source_changed: '本地源码与修复依据不一致，需重新分析。',
@@ -64,7 +69,8 @@ const errors: Record<string, string> = {
   repair_review_rejected: '独立审查未批准补丁，请查看审查结论。',
   repair_review_required: '缺少通过的测试或独立审查，未提交 PR。',
   repair_patch_unchanged: '补丁未发生实质变化，需要先分析失败原因再修改。',
-  repair_unsafe_path: '补丁包含不允许修改的路径。',
+  repair_unsafe_path: '文件路径未通过保护检查。',
+  repair_source_path_rejected: '读取的文件类型不在允许的源码范围内，请从可读源码列表选择文件。',
   repair_existing_tests_protected: '补丁尝试修改既有测试，本轮已停止。',
   repair_sensitive_content: '文件包含疑似敏感内容，未继续处理。',
   repair_regression_required: '缺少有效的新增回归测试或源码修改。',
@@ -75,8 +81,9 @@ const errors: Record<string, string> = {
   repair_patch_limit: '补丁超过大小限制。',
   repair_source_limit: '源码超过下载范围限制，请重新下载并分析。',
   repair_handoff_incomplete: '修复与独立审查未完成规定交接。',
+  repair_review_evidence_required: '独立审查未读取验证证据，已阻止发布。',
   repair_output_invalid: '修复模型返回格式无效。',
-  repair_output_truncated: '修复模型输出达到上限，自动恢复次数已用完。请降低思考强度或更换模型后再试。',
+  repair_output_truncated: '修复模型输出达到上限，本轮自动恢复已结束。请检查模型思考强度或调整修复范围后重试。',
   repair_model_timeout: '修复模型响应超时，自动重试已用完。',
   repair_tool_arguments_invalid: '模型工具参数不符合要求，自动纠正次数已用完。',
   repair_authentication_failed: '模型服务认证失败，请检查 API 密钥。',
@@ -228,12 +235,13 @@ const unavailableSource = (value: string) => {
     return `${item.path} · ${item.candidate ? '修复版本' : '原版本'} · ${reasons[item.reason] ?? '无法读取'}`;
   } catch { return '源码暂时无法读取'; }
 };
-const rejectedPath = (value: string) => {
+const rejectedPath = (value: string, reading = false) => {
   try {
     const item = JSON.parse(value);
     const reasons: Record<string, string> = {
       invalid_path: '路径格式无效，需使用仓库内相对路径和正斜杠',
-      protected_directory: '路径位于受保护目录', unsupported_file_type: '文件类型不允许修改',
+      protected_directory: '路径位于受保护目录',
+      unsupported_file_type: reading ? '文件类型不在允许读取的源码范围内' : '文件类型不允许修改',
       protected_file: '文件受保护', sensitive_name: '文件名包含受保护的敏感词',
       symlink: '路径包含符号链接', outside_root: '路径超出仓库范围',
       duplicate_path: '补丁包含重复路径', case_alias: '路径大小写与既有文件冲突',
@@ -243,7 +251,7 @@ const rejectedPath = (value: string) => {
   } catch { return '路径未通过保护检查'; }
 };
 
-export function RepairSettings({ api }: { api: Api }) {
+export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?: boolean }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -268,7 +276,7 @@ export function RepairSettings({ api }: { api: Api }) {
         <button className="button secondary" disabled={busy}><Save size={15} />保存修复配置</button>
       </div>
       <dl className="repair-facts">
-        <div><dt>模型</dt><dd>{settings.model_enabled ? '使用仓库分析模型' : '等待仓库分析模型启用'}</dd></div>
+        <div><dt>模型</dt><dd>{(modelEnabled ?? settings.model_enabled) ? '代码修复与独立审查模型已就绪' : '等待修复角色模型配置或启用'}</dd></div>
         <div><dt>每个问题</dt><dd>最多 {settings.max_attempts} 次尝试</dd></div>
         <div><dt>最终合并</dt><dd>仓库拥有者审核并操作</dd></div>
       </dl>
@@ -306,7 +314,10 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
       {task.error && task.status !== 'waiting_environment' && <p role="alert">
         {task.error === 'docker_unavailable' && '上次失败：'}{message(task.output_recovery_available
         ? 'repair_output_truncated' : task.protocol_recovery_available
-          ? 'repair_verification_required' : task.error)}</p>}
+          ? 'repair_verification_required' : task.review_evidence_recovery_available
+            ? 'repair_review_evidence_required' : task.error)}</p>}
+      {task.review_evidence_recovery_available && task.can_retry &&
+        <p>补丁已通过测试，但旧版审查遗漏证据读取。可额外恢复一次：重新验证已保存补丁后继续独立审查。</p>}
       {task.timeout_recovery_available && task.can_retry &&
         <p>超时策略已更新，此任务可额外重试一次。</p>}
       {task.source_read_recovery_available && task.can_retry &&
@@ -344,6 +355,8 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
           {verificationEvent(event.kind, event.value)}</p>)}
       {task.events.filter(event => event.kind === 'repair_unresolved').slice(-1).map((event, i) =>
         <p key={`unresolved-${i}`}>未解决说明（模型判断，验证未通过）：{event.value}</p>)}
+      {task.events.filter(event => event.kind === 'source_path_rejected').slice(-2).map((event, i) =>
+        <p className="diagnosis-meta" key={`source-path-${i}`}>源码读取 · {rejectedPath(event.value, true)}</p>)}
       {task.events.filter(event => event.kind === 'tool_arguments_invalid' || event.kind === 'tool_failure')
         .slice(-2).map((event, i) => <p className="diagnosis-meta" key={`tool-error-${i}`}>
           {toolEvent(event.kind, event.value)}</p>)}
@@ -361,7 +374,7 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
           void api(`/repairs/${task.id}/retry`, { version: task.version })
             .then(() => api<Repair[]>(`/environments/${envId}/repairs`)).then(setTasks)
             .catch(e => setError(message(e.message))).finally(() => setBusy(''));
-        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available
+        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available || task.review_evidence_recovery_available
           ? '使用新策略重试' : task.publication_retry_available ? '仅重试发布' : task.docker_recovery_available ? '继续修复' : task.status === 'waiting_environment' ? '检查并继续' : '重试修复'}</button>}
       {task.diff && <details><summary>代码差异</summary><pre>{task.diff}</pre></details>}
       {task.verification && <details><summary>修复验证记录</summary>
@@ -385,9 +398,11 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
             event.kind === 'verification_round' || event.kind === 'verification_feedback' ? verificationEvent(event.kind, event.value) :
             event.kind === 'repair_unresolved' ? `未解决说明（模型判断）：${event.value}` :
             event.kind === 'provider_response' ? providerEvent(event.value) :
+            event.kind === 'model_configuration' ? agentModelEvent(event.value) :
             event.kind === 'source_blocked' ? sourceBlock(event.value) :
             event.kind === 'source_unavailable' ? unavailableSource(event.value) :
             event.kind === 'path_rejected' ? rejectedPath(event.value) :
+            event.kind === 'source_path_rejected' ? `源码读取 · ${rejectedPath(event.value, true)}` :
             event.kind.startsWith('tool_') ? toolEvent(event.kind, event.value) :
             event.kind.startsWith('request_') ? requestEvent(event.kind, event.value) :
             event.kind === 'environment_wait' ? '等待 Docker 恢复，本次不占用修复次数' :
@@ -395,6 +410,8 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
             event.kind === 'environment_recovery' ? 'Docker 已就绪，继续修复任务' :
             event.kind === 'publication_retry' ? '仅重试已验证补丁的发布，不重新调用模型' :
             event.kind === 'handoff' ? '代码修复 → 独立审查' :
+            event.kind === 'review_evidence_retry' || event.kind === 'review_evidence_recovery'
+              ? labels[event.kind] :
             labels[event.value] ?? labels[event.kind === 'queued' ? 'queued_event' : event.kind] ?? event.kind}</li>)}
       </ol></details>}
       {!!task.attempts?.length && <details><summary>历史尝试</summary>

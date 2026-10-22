@@ -246,7 +246,7 @@ def test_durable_lifecycle_and_origin_gates_remain_independent(service):
     execution.tick()
     env = execution.get(env["id"])
     assert env["test_result"]["revision"] == SHA and env["test_result"]["exit_code"] == 0
-    assert execution.store.dashboard()["runs"] == []
+    assert execution.store.dashboard()["findings"] == []
     execution.action(env["id"], env["version"], "start")
     with patch("repowatch.execution.socket.create_connection"):
         execution.tick()

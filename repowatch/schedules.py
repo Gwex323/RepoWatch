@@ -27,6 +27,18 @@ def initialize(db):
             created REAL NOT NULL,
             updated REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS repository_schedule_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            repo_id TEXT NOT NULL REFERENCES repositories(id),
+            run_date TEXT NOT NULL,
+            status TEXT NOT NULL
+                CHECK(status IN ('scheduled','skipped_active','failed')),
+            detail TEXT NOT NULL,
+            environment_id TEXT NOT NULL DEFAULT '',
+            pipeline_id TEXT NOT NULL DEFAULT '',
+            created REAL NOT NULL,
+            UNIQUE(repo_id, run_date)
+        );
     """)
 
 
@@ -87,7 +99,7 @@ class RepositorySchedules:
                 "COALESCE(s.last_detail,'') AS last_detail "
                 "FROM repositories r "
                 "LEFT JOIN repository_schedules s ON s.repo_id=r.id "
-                "ORDER BY r.created"
+                "WHERE r.kind='github' ORDER BY r.created"
             ).fetchall()
         result = []
         for row in rows:
@@ -103,7 +115,8 @@ class RepositorySchedules:
         with self.store.connection() as db:
             row = db.execute(
                 "SELECT COUNT(*) AS total,SUM(enabled) AS enabled_count "
-                "FROM repository_schedules"
+                "FROM repository_schedules s JOIN repositories r ON r.id=s.repo_id "
+                "WHERE r.kind='github'"
             ).fetchone()
         enabled_count = row["enabled_count"] or 0
         return {
@@ -130,13 +143,57 @@ class RepositorySchedules:
             row = self._ensure(db, repo_id)
         return self._row(row)
 
-    def _record(self, repo_id, status, detail):
+    def _record(self, repo_id, status, detail, *, environment_id="", pipeline_id=""):
         with self.store.connection() as db:
+            schedule = db.execute(
+                "SELECT last_run_date FROM repository_schedules WHERE repo_id=?",
+                (repo_id,),
+            ).fetchone()
             db.execute(
                 "UPDATE repository_schedules SET last_status=?,last_detail=?,"
                 "version=version+1,updated=? WHERE repo_id=?",
                 (status, str(detail)[:200], time.time(), repo_id),
             )
+            if schedule and schedule["last_run_date"]:
+                now = time.time()
+                history_detail = (
+                    "" if status in ("scheduled", "skipped_active") else str(detail)[:200]
+                )
+                db.execute(
+                    "INSERT INTO repository_schedule_history"
+                    "(repo_id,run_date,status,detail,environment_id,pipeline_id,created) "
+                    "VALUES(?,?,?,?,?,?,?) "
+                    "ON CONFLICT(repo_id,run_date) DO UPDATE SET "
+                    "status=excluded.status,detail=excluded.detail,"
+                    "environment_id=excluded.environment_id,"
+                    "pipeline_id=excluded.pipeline_id,"
+                    "created=repository_schedule_history.created",
+                    (
+                        repo_id, schedule["last_run_date"], status, history_detail,
+                        environment_id, pipeline_id, now,
+                    ),
+                )
+
+    def history(self, repo_id, *, limit=10):
+        with self.store.connection() as db:
+            self._repository(db, repo_id)
+            rows = db.execute(
+                "SELECT run_date,status,detail,environment_id,pipeline_id,created "
+                "FROM repository_schedule_history WHERE repo_id=? "
+                "ORDER BY created DESC,id DESC LIMIT ?",
+                (repo_id, limit),
+            ).fetchall()
+        return [
+            {
+                "run_date": row["run_date"],
+                "status": row["status"],
+                "detail": row["detail"],
+                "environment_id": row["environment_id"] or None,
+                "pipeline_id": row["pipeline_id"] or None,
+                "created": row["created"],
+            }
+            for row in rows
+        ]
 
     def due(self, repo_id):
         schedule = self.get(repo_id)
@@ -165,9 +222,15 @@ class RepositorySchedules:
             ).rowcount
             if not changed:
                 return None
+            db.execute(
+                "INSERT OR IGNORE INTO repository_schedule_history"
+                "(repo_id,run_date,status,detail,environment_id,pipeline_id,created) "
+                "VALUES(?,?,'scheduled','','','',?)",
+                (repo_id, today, time.time()),
+            )
         pipeline = self.execution.active_pipeline(repo_id)
         if pipeline:
-            self._record(repo_id, "skipped_active", pipeline["id"])
+            self._record(repo_id, "skipped_active", pipeline["id"], pipeline_id=pipeline["id"])
             return {"status": "skipped_active", "pipeline_id": pipeline["id"]}
         try:
             environment = self.execution.create(repo_id, auto_run=True)
@@ -176,7 +239,9 @@ class RepositorySchedules:
             self._record(repo_id, "failed", detail)
             LOG.warning("Daily check for %s failed: %s", repo_id, detail)
             return {"status": "failed", "detail": detail}
-        self._record(repo_id, "scheduled", environment["id"])
+        self._record(
+            repo_id, "scheduled", environment["id"], environment_id=environment["id"]
+        )
         return {"status": "scheduled", "environment_id": environment["id"]}
 
     def tick(self):
@@ -185,7 +250,7 @@ class RepositorySchedules:
                 row["repo_id"] for row in db.execute(
                     "SELECT s.repo_id FROM repository_schedules s "
                     "JOIN repositories r ON r.id=s.repo_id "
-                    "WHERE s.enabled=1 ORDER BY r.created"
+                    "WHERE s.enabled=1 AND r.kind='github' ORDER BY r.created"
                 )
             ]
         return [result for repo_id in repo_ids if (result := self.trigger(repo_id))]

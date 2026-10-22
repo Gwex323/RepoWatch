@@ -226,6 +226,24 @@ allowance. Used flags, current-policy failures, stale evidence and artifacts
 outside this narrow resume contract cannot qualify. Attempt numbers/history
 remain monotonic; deployment does not requeue production tasks or publish.
 
+### Rejected Source File Types (2026-10-21, Issue #40)
+
+The second live repair attempt failed inside read_repair_source before any patch
+submission. Application frames identify safe_path's unsupported-file-type guard;
+the actual requested path was not retained. The shared repair_unsafe_path UI text
+incorrectly described a patch failure. This is distinct from the earlier attempt's
+failed regression tests and the resolved GLM report-format incompatibility.
+
+An unsupported source-read type now returns a bounded correction result with
+actual eligible source paths. At most two such corrections are allowed per run;
+the third rejection terminates with repair_source_path_rejected. Rejected reads
+still consume the existing read and stage budgets. No rejected file is read,
+hashed or counted as evidence, and patch file types are unchanged. Every other
+path rejection remains fatal. Events retain only the fixed reason, correction
+count and recoverability, never the raw rejected path or file contents. The UI
+distinguishes read-path events from patch-path events, and the generic path error
+no longer claims a patch was submitted. Deployment does not retry failed tasks.
+
 ## Execution And Review
 
 Use the existing configured model through its existing SDK/provider adapter.
@@ -334,3 +352,40 @@ Current-policy/used/partial/verified/stale tasks cannot gain this allowance. The
 previous attempt snapshot and bounded failure evidence are preserved for the next
 repair model. Deployment never queues that retry. The UI displays each candidate,
 feedback progress and the opt-in upgrade action without exposing raw reasoning.
+
+### Integration With Current Repair Policies (2026-10-22)
+
+Verification correction and reviewer evidence recovery retain separate policy
+markers and one-time allowances. A failed candidate cannot authorize handoff;
+after a passed candidate, the reviewer must actually read trusted verification
+before its final schema is enabled. Missing evidence keeps the specific
+`repair_review_evidence_required` error. Candidate corrections share the existing
+output/timeout budgets and preserve per-role model and reasoning selections.
+
+## Adaptive Output Recovery (2026-10-22, Issue #51)
+
+A retained repair attempt exhausted 12,000 output tokens (7,073 reasoning),
+then 16,000 (15,992 reasoning). Increasing the output cap alone left almost
+no budget for the actual tool arguments. Truncated responses remain discarded
+before tool execution.
+
+After an explicit truncation, the existing bounded retry temporarily reduces
+medium/high/xhigh reasoning to low and keeps that reduction for subsequent
+calls by that same repair/review agent. It copies request settings without
+changing persisted owner configuration, provider, key, model, other reasoning
+options or tool/handoff settings. Default reasoning is left unspecified to
+avoid adding unsupported provider parameters; low/minimal/none are preserved.
+The output cap remains 16,000, with one output retry per logical call and two
+shared across the run; request and overall deadlines remain unchanged.
+A fixed-field event records the temporary reduction for the workbench.
+
+The adaptive policy also permits one explicit recovery for an exhausted
+old-policy repair_output_invalid or repair_output_truncated task only when
+its latest two provider records in the current attempt confirm truncation,
+no patch, verification, review or remote artifact exists, and the existing
+output recovery allowance is unused. Current-policy tasks, stale evidence,
+older-attempt records and used allowances do not qualify. Retry still requires
+current source/confirmation evidence and matching task version, archives the
+failed attempt, and never resets attempt numbers. Deployment alone does not
+queue repairs, call providers or publish contributions. This is bounded
+recovery, not a guarantee that every provider will complete a repair.

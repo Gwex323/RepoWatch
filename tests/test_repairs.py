@@ -16,6 +16,7 @@ from openai.types.responses import (
     ResponseOutputMessage,
     ResponseOutputText,
 )
+from openai.types.shared import Reasoning
 from test_execution import Runtime, Source, service  # noqa: F401
 from test_github_accounts import TOKEN_A, MemoryVault, Remote
 from test_repository_analysis import Engine, prepare_tested
@@ -545,7 +546,8 @@ def test_truncated_repair_never_executes_partial_tools_and_preserves_handoff(pen
     delegate = model.get_response
 
     async def truncated(system_instructions, input, **kwargs):
-        requests.append((system_instructions, kwargs["model_settings"].max_tokens))
+        requests.append((system_instructions, kwargs["model_settings"].max_tokens,
+                         kwargs["model_settings"].reasoning.effort))
         if len(requests) == 2 or persistent and len(requests) == 3:
             raise OutputTruncated("private-partial-provider-output")
         return await delegate(system_instructions, input, **kwargs)
@@ -553,7 +555,7 @@ def test_truncated_repair_never_executes_partial_tools_and_preserves_handoff(pen
     model.get_response = truncated
 
     async def repair(context, event, *, workspace):
-        return await run_repair(model, context, event, workspace=workspace)
+        return await run_repair(model, context, event, workspace=workspace, reasoning_effort="high")
 
     repairs.engine.repair = repair
     asyncio.run(repairs.tick())
@@ -561,12 +563,14 @@ def test_truncated_repair_never_executes_partial_tools_and_preserves_handoff(pen
     assert sum(e["kind"] == "output_retry" for e in result["events"]) == 1
     assert requests[1][1] == 12000 and requests[2][1] == 16000
     assert "previous response exhausted its output budget" in requests[2][0]
+    assert requests[1][2] == "high" and requests[2][2] == "low"
     assert "private-partial-provider-output" not in json.dumps(result)
     if persistent:
         assert len(requests) == 3 and result["error"] == "repair_output_truncated"
         assert not result["patch"] and not runtime.test_calls and not publisher.calls
     else:
         assert result["status"] == "pr_created" and len(publisher.calls) == 1
+        assert requests[3][2] == "low" and requests[-1][2] == "high"
         assert [e["value"] for e in result["events"] if e["kind"] == "handoff"] == [
             "repair_agent -> independent_reviewer",
         ]
@@ -1363,14 +1367,18 @@ def test_legacy_generic_failure_recovery_is_explicit_and_cannot_replay_artifacts
     "eligible", "new_policy", "used", "patch", "verification", "remote", "stale",
     "invalid_json", "old_attempt", "only_one", "latest_complete", "invalid_metadata",
 ])
-def test_legacy_truncation_recovery_requires_latest_evidence_and_is_bounded(pending, case):
+@pytest.mark.parametrize("failure_code", ["repair_output_invalid", "repair_output_truncated"])
+def test_legacy_truncation_recovery_requires_latest_evidence_and_is_bounded(
+    pending, case, failure_code,
+):
     from repowatch.repair_model import OUTPUT_POLICY
 
     repairs, _, _, _, publisher = pending
     task = confirm(pending)
     enable(repairs)
     context = {**task["context"], "timeout_recovery_used": True,
-               "source_read_recovery_used": True, "failure_recovery_used": True}
+               "source_read_recovery_used": True, "failure_recovery_used": True,
+               "output_policy": "bounded_reasoning_output_v1"}
     if case == "new_policy":
         context["output_policy"] = OUTPUT_POLICY
     if case == "used":
@@ -1379,7 +1387,7 @@ def test_legacy_truncation_recovery_requires_latest_evidence_and_is_bounded(pend
         db.execute("UPDATE repair_tasks SET status='failed',attempt=?,error=?,context=?,"
                    "patch=?,verification=?,remote=? WHERE id=?",
                    (7 if case == "used" else 6,
-                    "repair_failed" if case == "invalid_json" else "repair_output_invalid",
+                    "repair_failed" if case == "invalid_json" else failure_code,
                     json.dumps(context), "{}" if case == "patch" else None,
                     "{}" if case == "verification" else None,
                     "{}" if case == "remote" else None, task["id"]))
@@ -1407,7 +1415,7 @@ def test_legacy_truncation_recovery_requires_latest_evidence_and_is_bounded(pend
         repairs.retry(task["id"], failed["version"] - 1)
     queued = repairs.retry(task["id"], failed["version"])
     assert queued["attempt"] == 6 and queued["context"]["output_recovery_used"] is True
-    assert queued["attempts"][0]["error"] == "repair_output_invalid"
+    assert queued["attempts"][0]["error"] == failure_code
     assert any(e["kind"] == "output_recovery" for e in queued["events"])
 
     async def truncated(*args, **kwargs):
@@ -1799,3 +1807,55 @@ def test_api_requires_owner_csrf_and_explicit_feedback_before_queueing(tmp_path)
         assert notice["repair_published"] == 1 and notice["repair_queued"] == 0
         assert client.post("/api/repairs/" + tasks[0]["id"] + "/merge", headers=headers,
                            json={}).status_code in (404, 405)
+
+
+@pytest.mark.parametrize("role", ["repair_agent", "independent_reviewer"])
+@pytest.mark.parametrize("effort", ["medium", "high", "xhigh"])
+def test_output_recovery_reduces_reasoning_and_keeps_it_for_later_calls(role, effort):
+    settings = ModelSettings(max_tokens=12000, reasoning=Reasoning(effort=effort, summary="auto"),
+                             parallel_tool_calls=False, extra_body={"owner_option": True})
+    requests, events = [], []
+
+    async def provider(**kwargs):
+        current = kwargs["model_settings"]
+        requests.append(current)
+        # Merely increasing the token limit still exhausts reasoning, as in the live failure.
+        if current.reasoning.effort != "low":
+            raise OutputTruncated("private-unfinished-tool-arguments")
+        return SimpleNamespace(output=[])
+
+    workspace = SimpleNamespace(check=lambda: None, verification=None)
+    model = RepairStageModel(SimpleNamespace(get_response=provider), role, workspace,
+                             lambda *args: events.append(args), dict, {"timeouts": 0})
+    for _ in range(2):
+        asyncio.run(model.get_response("trusted instructions", [], handoffs=[], tools=[],
+                                      model_settings=settings))
+    assert [s.reasoning.effort for s in requests] == [effort, "low", "low"]
+    assert [s.max_tokens for s in requests] == [12000, 16000, 12000]
+    assert all(s.reasoning.summary == "auto" and s.extra_body == {"owner_option": True}
+               and s.parallel_tool_calls is False for s in requests)
+    assert settings.reasoning.effort == effort and settings.max_tokens == 12000
+    reduced = [json.loads(value) for kind, value in events if kind == "output_reasoning_reduced"]
+    assert reduced == [{"role": role, "from": effort, "to": "low"}]
+    assert "private-unfinished-tool-arguments" not in json.dumps(events)
+
+
+@pytest.mark.parametrize("effort", [None, "low", "minimal", "none"])
+def test_output_recovery_preserves_default_and_already_low_reasoning(effort):
+    settings = ModelSettings(max_tokens=12000,
+                             reasoning=Reasoning(effort=effort) if effort else None)
+    requests, events = [], []
+
+    async def provider(**kwargs):
+        requests.append(kwargs["model_settings"])
+        if len(requests) == 1:
+            raise OutputTruncated("private-provider-body")
+        return SimpleNamespace(output=[])
+
+    model = RepairStageModel(SimpleNamespace(get_response=provider), "repair_agent",
+                             SimpleNamespace(check=lambda: None, verification=None),
+                             lambda *args: events.append(args), dict, {"timeouts": 0})
+    asyncio.run(model.get_response("", [], handoffs=[], tools=[], model_settings=settings))
+    assert [s.max_tokens for s in requests] == [12000, 16000]
+    assert all(s.reasoning == settings.reasoning for s in requests)
+    assert not any(kind == "output_reasoning_reduced" for kind, _ in events)
