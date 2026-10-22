@@ -1,8 +1,8 @@
 """Saved provider catalog and owner-selected models; no network requests here."""
 
 import json
-from urllib.parse import urlsplit
 
+from .model_urls import valid_model_base_url
 from .store import Conflict, Missing, uid
 
 REASONING_EFFORTS = {"auto", "default", "low", "medium", "high", "max"}
@@ -29,17 +29,7 @@ def reasoning_for_role(model, role, default=None):
 
 def validate_model_config(model, base_url, api, reasoning_effort="auto"):
     model, base_url = model.strip(), base_url.strip().rstrip("/")
-    try:
-        url = urlsplit(base_url)
-        valid = (
-            bool(url.hostname) and not url.username and not url.password
-            and not url.query and not url.fragment
-            and (url.port is None or 1 <= url.port <= 65535)
-            and (url.scheme == "https" or url.scheme == "http"
-                 and url.hostname in ("localhost", "127.0.0.1", "::1"))
-        )
-    except ValueError:
-        valid = False
+    valid = valid_model_base_url(base_url)
     if (not valid or not model or len(model) > 200 or len(base_url) > 500
             or api not in ("responses", "chat_completions")
             or reasoning_effort not in REASONING_EFFORTS

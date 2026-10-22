@@ -109,6 +109,12 @@ def test_import_is_atomic_and_optimistic_versions_prevent_overwrite(catalog):
     assert providers.state() == saved
 
 
+def test_private_http_provider_url_can_be_saved(catalog):
+    providers, _ = catalog
+    saved = create(providers, base_url="http://172.16.116.14:3000/v1")
+    assert saved["providers"][0]["base_url"] == "http://172.16.116.14:3000/v1"
+
+
 def test_key_rotation_endpoint_changes_and_referenced_models_are_protected(catalog):
     providers, _ = catalog
     saved = create(providers)
