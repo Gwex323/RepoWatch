@@ -11,6 +11,7 @@ from agents.exceptions import ModelBehaviorError
 from cryptography.fernet import InvalidToken
 from openai import AsyncOpenAI
 
+from .model_providers import ModelProviders, validate_model_config
 from .roles import FLOW_ROLES, ROLE_DETAILS, ROLES
 from .store import Conflict
 
@@ -251,24 +252,7 @@ def default_config():
 
 
 def validate_config(model, base_url, api, reasoning_effort):
-    model, base_url = model.strip(), base_url.strip().rstrip("/")
-    try:
-        url = urlsplit(base_url)
-        valid = (
-            bool(url.hostname) and not url.username and not url.password
-            and not url.query and not url.fragment
-            and (url.port is None or 1 <= url.port <= 65535)
-            and (url.scheme == "https" or url.scheme == "http"
-                 and url.hostname in ("localhost", "127.0.0.1", "::1"))
-        )
-    except ValueError:
-        valid = False
-    if (not valid or not model or api not in ("responses", "chat_completions")
-            or reasoning_effort not in REASONING_EFFORTS
-            or model.lower() == "glm-5.3" and reasoning_effort == "medium"):
-        raise Conflict("analysis_model_invalid")
-    return {"model": model, "base_url": base_url, "api": api,
-            "reasoning_effort": reasoning_effort}
+    return validate_model_config(model, base_url, api, reasoning_effort)
 
 
 def public_model(role, row):
@@ -280,6 +264,9 @@ def public_model(role, row):
             "finalization_mode": finalization_mode(config),
             "has_key": bool(row and row["encrypted_key"]),
             "configured": bool(config["model"] and row and row["encrypted_key"]),
+            **{key: row[key] for key in ("provider_id", "provider_name", "provider_version",
+                                         "selection_choice", "routing_version", "selection_error")
+               if row and key in row},
             "version": row["version"] if row else 0}
 
 
@@ -304,12 +291,14 @@ class AnalysisModel:
         with self.store.connection() as db:
             db.execute("BEGIN")
             row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
-            roles = {item["role"]: dict(item) for item in db.execute("SELECT * FROM agent_models")}
-        return dict(row) if row else None, roles
+            roles = ModelProviders.role_rows(db)
+            direct = {item["role"]: dict(item) for item in db.execute("SELECT * FROM agent_models")}
+        return dict(row) if row else None, roles, direct
 
     def configuration(self):
-        row, rows = self._snapshot()
-        roles = {role: public_model(role, rows.get(role)) for role in ROLES}
+        row, rows, direct = self._snapshot()
+        roles = {role: {**public_model(role, rows.get(role)),
+                        "direct_config": public_model(role, direct.get(role))} for role in ROLES}
         enabled = bool(row and json.loads(row["config"]).get("enabled"))
         return {"enabled": enabled, "version": row["version"] if row else 0,
                 "roles": list(roles.values()),
@@ -332,7 +321,8 @@ class AnalysisModel:
                 "missing_roles": config["flows"][flow]["missing_roles"],
                 "role_models": {
                     role["role"]: {key: role[key] for key in
-                                   ("model", "base_url", "api", "version", "reasoning_effort")}
+                                   ("model", "base_url", "api", "version", "reasoning_effort",
+                                    "provider_id", "provider_name", "provider_version")}
                     for role in selected
                 }}
 
@@ -367,6 +357,8 @@ class AnalysisModel:
             if version != (row["version"] if row else 0):
                 raise Conflict("analysis_model_changed")
             self._bump_version(db, row, enabled=enabled)
+            db.execute("UPDATE agent_model_settings SET enabled=?,version=version+1 WHERE id=1",
+                       (int(enabled),))
         return self.configuration()
 
     def save_role(self, role, *, version, model, base_url, api, api_key, reasoning_effort="auto"):
@@ -389,6 +381,7 @@ class AnalysisModel:
             )
             global_row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
             self._bump_version(db, global_row)
+            ModelProviders.direct_changed(db, role)
         return self.configuration()
 
     def save(self, *, version, enabled, model, base_url, api, api_key, reasoning_effort="auto"):
@@ -419,6 +412,7 @@ class AnalysisModel:
                     "version=agent_models.version+1",
                     (role, json.dumps(role_config), encrypted),
                 )
+            ModelProviders.legacy_changed(db, enabled)
         return self.status()
 
     async def analyze(self, context, event):
@@ -448,7 +442,7 @@ class AnalysisModel:
         with self.store.connection() as db:
             db.execute("BEGIN")
             row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
-            rows = {item["role"]: dict(item) for item in db.execute("SELECT * FROM agent_models")}
+            rows = ModelProviders.role_rows(db)
             if (not row or not json.loads(row["config"]).get("enabled")
                     or any(role not in rows or not public_model(role, rows[role])["configured"]
                            for role in required)):
@@ -479,6 +473,9 @@ class AnalysisModel:
                 event("model_configuration", json.dumps({
                     "role": role, "name": ROLE_DETAILS[role]["name"],
                     "model": config["model"], "output_protocol": protocol,
+                    "provider_id": rows[role]["provider_id"],
+                    "provider_name": rows[role]["provider_name"],
+                    "provider_version": rows[role]["provider_version"],
                     "reasoning_effort": efforts[role],
                     "finalization_mode": finalization_mode(config),
                 }))
@@ -534,7 +531,10 @@ class AnalysisModel:
                                       if len(set(efforts.values())) == 1 else "per_role")
         result["role_models"] = {
             role: {"model": configs[role]["model"], "model_version": rows[role]["version"],
-                   "reasoning_effort": efforts[role]}
+                   "reasoning_effort": efforts[role],
+                   "provider_id": rows[role]["provider_id"],
+                   "provider_name": rows[role]["provider_name"],
+                   "provider_version": rows[role]["provider_version"]}
             for role in required
         }
         return result

@@ -66,6 +66,9 @@ class Store:
 
             initialize_analysis(db)
             initialize_model(db)
+            from .model_providers import initialize as initialize_providers
+
+            initialize_providers(db)
             from .memory_evaluation import initialize as initialize_memory_evaluation
 
             initialize_memory_evaluation(db)

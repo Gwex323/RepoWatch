@@ -26,6 +26,8 @@ from .github_accounts import GitHubAccounts, GitHubError
 from .github_issues import GitHubIssues
 from .memory import Memory
 from .memory_evaluation import MemoryEvaluations
+from .model_providers import ModelProviders
+from .provider_probe import ProviderProbe
 from .repairs import REPAIR_MAX_ATTEMPTS, Repairs
 from .repository_analysis import MAX_TURNS, Analyses
 from .repository_source import ExecutionError
@@ -121,6 +123,62 @@ class ModelEnabledBody(StrictBody):
     enabled: bool = Field(strict=True)
 
 
+class ProviderModelBody(StrictBody):
+    model: str = Field(min_length=1, max_length=200)
+    reasoning_effort: Literal["auto", "default", "low", "medium", "high", "max"] = "auto"
+
+
+class ProviderBody(StrictBody):
+    name: str = Field(min_length=1, max_length=80)
+    base_url: str = Field(min_length=1, max_length=500)
+    api: Literal["responses", "chat_completions"] = "chat_completions"
+    api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+    models: list[ProviderModelBody] = Field(min_length=1, max_length=40)
+
+
+class ProviderSaveBody(ProviderBody):
+    version: int = Field(ge=0, strict=True)
+
+
+class ProviderImportBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+    providers: list[ProviderBody] = Field(min_length=1, max_length=25)
+
+
+class ProviderVersionBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+
+
+class ProviderProbeBody(ProviderVersionBody):
+    provider_id: str | None = Field(default=None, min_length=1, max_length=100)
+    base_url: str = Field(min_length=1, max_length=500)
+    api: Literal["responses", "chat_completions"] = "chat_completions"
+    api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+    model: str = Field(default="", max_length=200)
+
+
+class ProviderModelChoice(StrictBody):
+    provider_id: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+
+
+class DirectModelChoice(StrictBody):
+    direct: Literal[True]
+
+
+class RoleSelectionBody(ProviderVersionBody):
+    choice: ProviderModelChoice | DirectModelChoice | None
+
+
+class DefaultSelectionBody(ProviderVersionBody):
+    choice: ProviderModelChoice | None
+
+
+class AgentSelectionsBody(ProviderVersionBody):
+    enabled: bool = Field(strict=True)
+    routes: dict[str, ProviderModelChoice | DirectModelChoice | None] = Field(max_length=6)
+
+
 class FindingFeedbackBody(StrictBody):
     version: int = Field(ge=1, strict=True)
     decision: Literal["confirmed", "not_reproduced"]
@@ -148,7 +206,7 @@ class ScheduleBody(StrictBody):
 def create_app(
     db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
     execution_runtime=None, repository_source=None, execution_diagnoser=None, analysis_engine=None,
-    repair_engine=None, repair_publisher=None,
+    repair_engine=None, repair_publisher=None, provider_probe_transport=None,
 ) -> FastAPI:
     # Windows registry MIME mappings may label .js as text/plain.
     mimetypes.add_type("text/javascript", ".js")
@@ -158,6 +216,8 @@ def create_app(
     github = GitHubAccounts(store, client=github_client, vault=credential_vault)
     issues = GitHubIssues(store, github)
     analysis_model = AnalysisModel(store, github)
+    model_providers = ModelProviders(store, github)
+    provider_probe = ProviderProbe(model_providers, transport=provider_probe_transport)
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
                           diagnoser=execution_diagnoser or AnalysisModelDiagnoser(analysis_model))
     repairs = Repairs(
@@ -212,6 +272,7 @@ def create_app(
     app.state.execution = execution
     app.state.analyses = analyses
     app.state.analysis_model = analysis_model
+    app.state.model_providers = model_providers
     app.state.memory_evaluations = memory_evaluations
     app.state.repairs = repairs
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
@@ -266,7 +327,8 @@ def create_app(
         # Pydantic's default error payload can echo rejected secret input.
         if request.url.path.startswith("/api/github/"):
             return JSONResponse({"detail": "github_invalid_input"}, 422)
-        if request.url.path.startswith("/api/analysis-model"):
+        if request.url.path.startswith(("/api/analysis-model", "/api/agent-models",
+                                        "/api/model-providers")):
             return JSONResponse({"detail": "model_invalid_input"}, 422)
         return await request_validation_exception_handler(request, exc)
 
@@ -367,6 +429,10 @@ def create_app(
     def agent_models():
         return analysis_model.configuration()
 
+    @app.post("/api/agent-models")
+    def configure_agent_selections(body: AgentSelectionsBody):
+        return model_providers.configure(**body.model_dump())
+
     @app.post("/api/agent-models/settings")
     def enable_agent_models(body: ModelEnabledBody):
         return analysis_model.enable(**body.model_dump())
@@ -375,6 +441,55 @@ def create_app(
     def configure_agent_model(role: str, body: AgentModelBody):
         values = body.model_dump(exclude={"api_key"})
         return analysis_model.save_role(role, **values, api_key=body.api_key.get_secret_value())
+
+    @app.post("/api/agent-models/{role}/selection")
+    def select_agent_model(role: str, body: RoleSelectionBody):
+        if role == "default":
+            raise Conflict("model_agent_invalid")
+        return model_providers.select(role=role, **body.model_dump())
+
+    @app.get("/api/model-providers")
+    def provider_catalog():
+        return model_providers.state()
+
+    def provider_values(body):
+        return {**body.model_dump(exclude={"api_key", "version"}),
+                "api_key": body.api_key.get_secret_value()}
+
+    @app.post("/api/model-providers")
+    def create_provider(body: ProviderSaveBody):
+        return model_providers.save(version=body.version, **provider_values(body))
+
+    @app.post("/api/model-providers/import")
+    def import_providers(body: ProviderImportBody):
+        return model_providers.import_providers(
+            version=body.version, providers=[provider_values(p) for p in body.providers],
+        )
+
+    @app.post("/api/model-providers/default")
+    def select_default_model(body: DefaultSelectionBody):
+        return model_providers.select(role="default", **body.model_dump())
+
+    def probe_values(body):
+        return {**body.model_dump(exclude={"api_key"}),
+                "api_key": body.api_key.get_secret_value()}
+
+    @app.post("/api/model-providers/discover")
+    async def discover_provider_models(body: ProviderProbeBody):
+        return await provider_probe.discover(**probe_values(body))
+
+    @app.post("/api/model-providers/test-connection")
+    async def test_provider_connection(body: ProviderProbeBody):
+        return await provider_probe.test_connection(**probe_values(body))
+
+    @app.post("/api/model-providers/{provider_id}/delete")
+    def delete_provider(provider_id: str, body: ProviderVersionBody):
+        return model_providers.delete(provider_id, body.version)
+
+    @app.post("/api/model-providers/{provider_id}")
+    def update_provider(provider_id: str, body: ProviderSaveBody):
+        return model_providers.save(version=body.version, provider_id=provider_id,
+                                    **provider_values(body))
 
     @app.get("/api/repair-settings")
     def repair_settings():
