@@ -23,8 +23,10 @@ from .repair_model import (
     repair_failure_details,
     verification_feedback,
 )
+from .repair_origin import analysis_origin, repair_origin
 from .repair_workspace import SOURCE_READ_POLICY, Patch, RepairWorkspace, source_tree
 from .store import Conflict, Missing, uid
+from .task_scopes import TaskScopes, digest, scope_packet, scope_snapshot
 
 REPAIR_TIMEOUT_SECONDS = 1800
 REPAIR_MAX_ATTEMPTS = 3
@@ -85,6 +87,7 @@ class Repairs(EnvironmentRecovery):
         self.publisher = publisher or GitHubPublisher(github or execution.github)
         self.analyses = analyses or Analyses(execution, engine)
         self.owner, self.closing = uid("repair_worker"), threading.Event()
+        self.scopes = TaskScopes(self.store)
 
     def settings(self):
         with self.store.connection() as db:
@@ -126,6 +129,13 @@ class Repairs(EnvironmentRecovery):
             )}
             for key in ("context", "patch", "verification", "review", "remote"):
                 result[key] = self._json(row, key)
+            result["patch_digest"] = digest(result["patch"]) if result["patch"] else None
+            result["task_scope"] = scope_snapshot(db, row["analysis_id"])
+            try:
+                result.update(repair_origin(db, row))
+                result["source_error"] = None
+            except Conflict as exc:
+                result.update(source_kind=None, source_issue=None, source_error=str(exc))
             result["verification_rounds"] = (
                 result["verification"].pop("_rounds", []) if result["verification"] else []
             )
@@ -170,6 +180,11 @@ class Repairs(EnvironmentRecovery):
                      or result["review_evidence_recovery_available"])
                 and self.current(db, row)
             )
+            if result["source_error"] or row["error"] in (
+                "repair_issue_publication_conflict", "repair_scope_changed",
+                "repair_scope_evidence_invalid",
+            ):
+                result["can_retry"] = False
             return redact_values(result)
 
     @classmethod
@@ -436,6 +451,8 @@ class Repairs(EnvironmentRecovery):
             "revision": analysis["revision"], "repo_id": analysis["repo_id"],
             "env_id": analysis["env_id"], "config": json.loads(env["config"] or "{}"),
             "memories": json.loads(analysis["context"] or "{}").get("memories", []),
+            **analysis_origin(db, analysis),
+            "task_scope": scope_packet(db, analysis_id),
         }
         task_id, now = uid("repair"), time.time()
         db.execute(
@@ -518,6 +535,10 @@ class Repairs(EnvironmentRecovery):
             row = db.execute("SELECT * FROM repair_tasks WHERE id=?", (repair_id,)).fetchone()
             if not row:
                 raise Missing("Repair task not found.")
+            repair_origin(db, row)
+            if row["error"] in ("repair_issue_publication_conflict", "repair_scope_changed",
+                                "repair_scope_evidence_invalid"):
+                raise Conflict(row["error"])
             output_recovery = self._output_recovery(db, row)
             protocol_recovery = self._protocol_recovery(db, row)
             workspace_recovery = self._workspace_recovery(db, row)
@@ -685,6 +706,8 @@ class Repairs(EnvironmentRecovery):
             context["workspace_policy"] = WORKSPACE_POLICY
             context["verification_policy"] = VERIFICATION_POLICY
             context["review_evidence_policy"] = REVIEW_EVIDENCE_POLICY
+            if not self._verified(row):
+                context["task_scope"] = scope_packet(db, row["analysis_id"])
             encoded_context = json.dumps(context, ensure_ascii=False)
             db.execute(
                 "UPDATE repair_tasks SET status='running',stage=?,attempt=attempt+1,"
@@ -725,6 +748,8 @@ class Repairs(EnvironmentRecovery):
         try:
             check()
             context = json.loads(row["context"])
+            with self.store.connection() as db:
+                context.update(repair_origin(db, row))
             def event(kind, value=""):
                 self.event(row["id"], kind, value)
                 if kind == "verification_round" and workspace:
@@ -822,7 +847,7 @@ class Repairs(EnvironmentRecovery):
                 if raw_review.get("handoffs") != ["repair_agent -> independent_reviewer"]:
                     raise Conflict("repair_handoff_incomplete")
                 review = RepairReview.model_validate({
-                    key: raw_review[key] for key in ("approved", "summary", "risks")
+                    key: raw_review[key] for key in RepairReview.model_fields if key in raw_review
                 }).model_dump()
             finally:
                 if not call.done():
@@ -926,6 +951,8 @@ class Repairs(EnvironmentRecovery):
         context = json.loads(row["context"])
         task = {**dict(row), "account_id": context["account_id"],
                 "account_version": context["account_version"]}
+        with self.store.connection() as db:
+            self.scopes.record_repair(db, row)
         results = "\n".join(
             f"- {key}: exit {value['exit_code']}"
             for key, value in verification.items()

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Check, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { RepairPanel } from './repair';
 import { agentModelEvent } from './agent-models';
+import { TaskScopePanel, type TaskScope } from './task-scope';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Finding = {
@@ -29,6 +30,7 @@ type Analysis = {
   id: string; status: string; error: string | null; version: number; revision: string;
   current: boolean; created: number; findings: Finding[];
   historical_review?: HistoricalReview | null;
+  task_scope?: TaskScope;
   report: { summary: string; limitations: string[]; files_read: string[]; model?: string;
     execution_scope?: { kind: string; executed: number | null; skipped: number;
       uncovered: string[]; complete: boolean } } | null;
@@ -47,6 +49,9 @@ const statuses: Record<string, string> = {
 };
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
+  scope_review_incomplete: '范围审查遗漏验收项或版本不一致；原范围已保留，请继续分析与范围审查。',
+  scope_mapping_invalid: '问题与验收项的关联不完整，请继续范围审查。',
+  scope_changed: '任务范围已变化，请刷新后重新审查。',
   analysis_model_changed: '模型配置已变化，请刷新后重试。',
   analysis_model_key_required: '请填写分析模型的 API Key。',
   analysis_model_new_key_required: '更换服务地址时，请重新填写对应的 API Key。',
@@ -327,6 +332,9 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
     {analysis && ['failed', 'interrupted'].includes(analysis.status) &&
       <button className="button secondary" disabled={busy || !analysis.current}
         onClick={() => perform(`/analyses/${analysis.id}/retry`, { version: analysis.version })}><RefreshCw size={15} />重试分析</button>}
+    {analysis?.task_scope && <TaskScopePanel key={analysis.id} scope={analysis.task_scope} analysisId={analysis.id}
+      analysisVersion={analysis.version} analysisStatus={analysis.status} current={analysis.current}
+      envId={envId} api={api} refresh={refresh} />}
     {analysis?.report && <>
       <p>{analysis.report.summary}</p>
       {analysis.report.execution_scope?.kind === 'desktop_offline' &&
