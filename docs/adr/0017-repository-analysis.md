@@ -90,6 +90,14 @@ evidence or owner confirmation.
 
 ## Provider Configuration
 
+Issues #47 and #55 add a saved provider catalog and five shared agent-role selections.
+See [供应商与智能体模型](../model-providers.md) for the import format and routing contract.
+Each role can retain its independent configuration or select a saved provider.
+The original single-model API updates all five roles for compatibility. Each run
+resolves and freezes its role models, keys and reasoning settings before opening
+clients; subsequent configuration edits cannot redirect an in-flight role.
+Memory evaluations compare configuration revisions and all role-model identities.
+
 The owner configures endpoint, API mode, model and a dedicated API key in
 the WebUI. Both Responses and Chat Completions adapters are available. The
 provider must support tools and structured output; saving settings is not a
