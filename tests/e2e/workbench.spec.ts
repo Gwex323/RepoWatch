@@ -33,9 +33,9 @@ test('workspace supports real repositories, memory and registered roles', async 
   await page.getByRole('button', { name: '保存知识', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Real repository test command', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '运行配置', exact: true }).click();
-  await expect(page.locator('.roles-list > div')).toHaveCount(5);
-  await expect(page.locator('.roles-list')).not.toContainText('pr_author');
-  await expect(page.locator('.roles-list')).not.toContainText('样例');
+  await expect(page.locator('.agent-model-card')).toHaveCount(5);
+  await expect(page.locator('.agent-model-grid')).not.toContainText('pr_author');
+  await expect(page.locator('.agent-model-grid')).not.toContainText('样例');
   expect(errors).toEqual([]);
 });
 

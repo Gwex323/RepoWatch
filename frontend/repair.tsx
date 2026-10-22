@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, GitPullRequest, Loader2, RefreshCw, Save, Wrench } from 'lucide-react';
+import { agentModelEvent } from './agent-models';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Settings = { enabled: boolean; model_enabled: boolean; version: number; max_attempts: number };
@@ -51,7 +52,7 @@ const labels: Record<string, string> = {
 };
 const errors: Record<string, string> = {
   repair_paused: '自动修复已暂停。请在运行配置中启用后重试。',
-  repair_model_required: '请先启用仓库分析模型。',
+  repair_model_required: '请先配置代码修复与独立审查模型，并启用模型工作流。',
   repair_settings_changed: '修复配置已变化，请刷新后重试。',
   repair_stale: '源码、配置或执行证据已变化，需重新分析并复现。',
   repair_source_changed: '本地源码与修复依据不一致，需重新分析。',
@@ -235,7 +236,7 @@ const rejectedPath = (value: string, reading = false) => {
   } catch { return '路径未通过保护检查'; }
 };
 
-export function RepairSettings({ api }: { api: Api }) {
+export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?: boolean }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -260,7 +261,7 @@ export function RepairSettings({ api }: { api: Api }) {
         <button className="button secondary" disabled={busy}><Save size={15} />保存修复配置</button>
       </div>
       <dl className="repair-facts">
-        <div><dt>模型</dt><dd>{settings.model_enabled ? '使用仓库分析模型' : '等待仓库分析模型启用'}</dd></div>
+        <div><dt>模型</dt><dd>{(modelEnabled ?? settings.model_enabled) ? '代码修复与独立审查模型已就绪' : '等待修复角色模型配置或启用'}</dd></div>
         <div><dt>每个问题</dt><dd>最多 {settings.max_attempts} 次尝试</dd></div>
         <div><dt>最终合并</dt><dd>仓库拥有者审核并操作</dd></div>
       </dl>
@@ -364,6 +365,7 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
           {' · '}{event.kind === 'failure' ? message(event.value) :
             event.kind === 'failure_details' ? failureDetails(event.value) :
             event.kind === 'provider_response' ? providerEvent(event.value) :
+            event.kind === 'model_configuration' ? agentModelEvent(event.value) :
             event.kind === 'source_blocked' ? sourceBlock(event.value) :
             event.kind === 'source_unavailable' ? unavailableSource(event.value) :
             event.kind === 'path_rejected' ? rejectedPath(event.value) :

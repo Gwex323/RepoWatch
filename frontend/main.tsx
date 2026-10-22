@@ -2,16 +2,17 @@ import { StrictMode, useCallback, useEffect, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import {
   Activity, ArrowRight, Bell, BookOpen, CheckCircle2,
-  ChevronRight, Circle, CircleHelp, Clock3, Code2, ExternalLink, FileCode2,
+  ChevronRight, Circle, CircleHelp, Clock3, ExternalLink, FileCode2,
   FolderGit2, LayoutDashboard, Loader2, LockKeyhole,
   LogOut, Menu, Play, Plus, Search, Settings2, ShieldCheck,
-  Terminal, Workflow, X, XCircle,
+  Workflow, X, XCircle,
 } from 'lucide-react';
 import './styles.css';
 import { MemoryView } from './memory';
 import { GitHubAccounts } from './github';
 import { ExecutionPanel } from './execution';
-import { AnalysisModelSettings } from './analysis';
+import { AgentModelSettings, AgentRoleCards } from './agent-models';
+import type { AgentModels } from './agent-models';
 import { RepairSettings } from './repair';
 
 type View = 'overview' | 'repositories' | 'findings' | 'memory' | 'activity' | 'settings';
@@ -36,24 +37,21 @@ type AnalysisNotice = {
   repair_failed?: number; repair_published?: number;
 };
 type System = {
-  sdk_version: string; platform: string; roles: string[]; max_turns: number; max_attempts: number;
+  sdk_version: string; platform: string; roles: string[]; agent_models?: AgentModels; max_turns: number; max_attempts: number;
   external_model_calls: boolean; execution_diagnosis?: { enabled: boolean; model: string | null };
   repository_analysis?: { enabled: boolean; model: string };
-  automatic_repair?: { enabled: boolean };
+  automatic_repair?: { enabled: boolean; model_enabled?: boolean };
   schedule?: { enabled: boolean; enabled_repositories: number };
 };
 type ScheduleOverview = {
   repo_id: string; repository: string; kind: string; enabled: boolean;
   local_time: string; last_run_date: string; last_status: string; last_detail: string;
 };
-const roles = [
-  ['repository_analyst', '仓库分析', FolderGit2],
-  ['problem_investigator', '问题发现', Search],
-  ['reproduction_assistant', '复现辅助', Terminal],
-  ['repair_agent', '代码修复', Code2],
-  ['independent_reviewer', '独立审查', ShieldCheck],
-] as const;
-const roleName = (name: string) => roles.find(r => r[0] === name)?.[1] ?? (name === 'owner' ? '你' : name);
+const roleNames: Record<string, string> = {
+  repository_analyst: '仓库分析', problem_investigator: '问题调查',
+  reproduction_assistant: '复现辅助', repair_agent: '代码修复', independent_reviewer: '独立审查',
+};
+const roleName = (name: string) => roleNames[name] ?? (name === 'owner' ? '你' : name);
 const labels: Record<string, string> = {
   waiting_reproduction: '待人工复现', confirmed: '已确认复现',
   not_reproduced: '未能复现', resolved: '已解决', queued: '排队中',
@@ -139,16 +137,6 @@ function Login({ session, onLogin }: { session: Session; onLogin: (s: Session) =
       <div className="login-meta"><span className="live-dot" />本地实例<span>阶段 03</span></div>
     </form>
     <div className="login-footer">RepoWatch · Agents SDK workbench</div>
-  </div>;
-}
-
-function AgentRail({ registered }: { registered: string[] }) {
-  return <div className="agent-rail">
-    {roles.filter(([key]) => registered.includes(key)).map(([key, name, Icon]) =>
-      <div key={key} className="agent-step">
-        <div className="agent-circle"><Icon size={17} /></div>
-        <span>{name}</span><small>按任务交接</small>
-      </div>)}
   </div>;
 }
 
@@ -315,8 +303,8 @@ function App() {
             </div>
             <section className="pipeline-section">
               <div className="section-heading"><h2><Workflow size={18} />Agent 角色</h2>
-                <span className="section-meta">{registeredRoles.length} 个角色<span className="divider-dot">·</span>原生 handoff</span></div>
-              <AgentRail registered={registeredRoles} />
+                <span className="section-meta">{registeredRoles.length} 个角色<span className="divider-dot">·</span>按流程复用</span></div>
+              <AgentRoleCards models={system?.agent_models} onConfigure={() => navigate('settings')} />
             </section>
             <div className="overview-columns">
               <div>
@@ -413,8 +401,8 @@ function App() {
             <EventFeed events={data.events.filter(e => !query || `${e.repository} ${e.detail} ${e.task_id}`.includes(query))} onSelect={openRepository} /></section>}
           {view === 'memory' && <MemoryView repositories={data.repositories} api={api} />}
           {view === 'settings' && <section className="settings-page">
-            <AnalysisModelSettings api={api} />
-            <RepairSettings api={api} />
+            <AgentModelSettings api={api} onChange={() => { void refresh().catch(e => setError(e.message)); }} />
+            <RepairSettings api={api} modelEnabled={system?.automatic_repair?.model_enabled} />
             <GitHubAccounts api={api} repositories={data.repositories}
               publicationEnabled={system?.automatic_repair?.enabled} />
             <div className="section-heading"><h2>运行环境</h2><span className="tag neutral">阶段 03 / 04 · 修复与发布</span></div>
@@ -422,8 +410,8 @@ function App() {
               {[['Agent 框架', `OpenAI Agents SDK ${system?.sdk_version}`], ['后端', 'Python · FastAPI'],
                 ['状态存储', 'SQLite'], ['仓库记忆', '共享 · 仓库与版本隔离'],
                 ['GitHub 写入', system?.automatic_repair?.enabled ? '已启用 · 测试与审查通过后提交' : '自动修复开关未启用'],
-                ['仓库分析模型', system?.repository_analysis?.enabled ? system.repository_analysis.model : '等待配置'],
-                ['环境诊断模型', system?.execution_diagnosis?.enabled ? system.execution_diagnosis.model ?? '已启用' : '未配置 · 使用本地规则'],
+                ['仓库分析模型', system?.repository_analysis?.enabled ? '按角色配置 · 已就绪' : '等待角色模型配置或启用'],
+                ['环境诊断模型', system?.execution_diagnosis?.enabled ? '按角色配置 · 已就绪' : '使用本地规则'],
                 ['系统发现问题', '人工复现确认'], ['已有 Issue', '同步与源码分析'],
                 ['真实 Issue 接入', '已接入'],
                 ['外部仓库执行', '本机 Docker · 按需启动'],
@@ -435,10 +423,6 @@ function App() {
               ]
                 .map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
             </dl>
-            <div className="section-heading role-config-heading"><h2>Agent 角色</h2><span className="section-meta">{registeredRoles.length} 个已注册角色</span></div>
-            <div className="roles-list">{roles.filter(([key]) => registeredRoles.includes(key)).map(([key, name, Icon]) => <div key={key}><Icon size={19} /><strong>{name}</strong>
-              <code>{key}</code><span className="tag neutral">{key === 'repair_agent' ? '真实代码修复' :
-                key === 'independent_reviewer' ? '分析、诊断与修复审查' : '真实分析与诊断' }</span></div>)}</div>
           </section>}
         </>}
         <footer className="page-footer"><span><ShieldCheck size={13} />所有合并由项目拥有者执行</span><span>RepoWatch / 0.1.0</span></footer>

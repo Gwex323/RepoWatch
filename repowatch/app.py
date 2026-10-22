@@ -107,6 +107,20 @@ class AnalysisModelBody(StrictBody):
     api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
 
 
+class AgentModelBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+    model: str = Field(min_length=1, max_length=200)
+    base_url: str = Field(min_length=1, max_length=500)
+    api: Literal["responses", "chat_completions"]
+    reasoning_effort: Literal["auto", "default", "low", "medium", "high", "max"] = "auto"
+    api_key: SecretStr = Field(default=SecretStr(""), max_length=1024)
+
+
+class ModelEnabledBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+    enabled: bool = Field(strict=True)
+
+
 class FindingFeedbackBody(StrictBody):
     version: int = Field(ge=1, strict=True)
     decision: Literal["confirmed", "not_reproduced"]
@@ -147,7 +161,8 @@ def create_app(
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
                           diagnoser=execution_diagnoser or AnalysisModelDiagnoser(analysis_model))
     repairs = Repairs(
-        execution, repair_engine or analysis_model, github, publisher=repair_publisher,
+        execution, repair_engine or analysis_model.for_flow("repair"), github,
+        publisher=repair_publisher,
     )
     analyses = Analyses(execution, analysis_engine or analysis_model, repairs)
     memory_evaluations = MemoryEvaluations(analyses, analysis_engine or analysis_model)
@@ -309,9 +324,11 @@ def create_app(
             "phase": 3,
             "sdk_version": SDK_VERSION,
             "roles": ROLES,
+            "agent_models": analysis_model.configuration(),
             "model_mode": "configured_provider",
             "external_model_calls": (execution.diagnoses.engine.status()["enabled"]
-                                     or analyses.engine.status()["enabled"]),
+                                     or analyses.engine.status()["enabled"]
+                                     or repairs.settings()["model_enabled"]),
             "repository_analysis": analyses.engine.status(),
             "execution_diagnosis": execution.diagnoses.engine.status(),
             "github_publication": repairs.settings()["enabled"],
@@ -345,6 +362,19 @@ def create_app(
     def configure_analysis_model(body: AnalysisModelBody):
         values = body.model_dump(exclude={"api_key"})
         return analysis_model.save(**values, api_key=body.api_key.get_secret_value())
+
+    @app.get("/api/agent-models")
+    def agent_models():
+        return analysis_model.configuration()
+
+    @app.post("/api/agent-models/settings")
+    def enable_agent_models(body: ModelEnabledBody):
+        return analysis_model.enable(**body.model_dump())
+
+    @app.post("/api/agent-models/{role}")
+    def configure_agent_model(role: str, body: AgentModelBody):
+        values = body.model_dump(exclude={"api_key"})
+        return analysis_model.save_role(role, **values, api_key=body.api_key.get_secret_value())
 
     @app.get("/api/repair-settings")
     def repair_settings():

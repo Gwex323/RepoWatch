@@ -517,7 +517,7 @@ export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
         {env.config?.project_profile && env.pipeline.state === 'completed' &&
           <p>离线测试与源码分析已完成；Windows 桌面功能仍未验收。</p>}
         {env.pipeline.error && <p>{errorText(env.pipeline.error)}</p>}
-        {env.pipeline.state === 'waiting_model' && <p>请启用仓库分析模型，流水线将自动继续。</p>}
+        {env.pipeline.state === 'waiting_model' && <p>请配置分析所需角色的模型并启用模型工作流，流水线将自动继续。</p>}
         {env.pipeline.state === 'waiting_configuration' &&
           <button className="button secondary" onClick={() => setTab('config')}>补齐运行配置</button>}
       </div>}

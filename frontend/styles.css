@@ -133,12 +133,6 @@ pre { margin: 0; }
 .small-count, .heading-count { font-size: 10px; color: #9e8753; background: #f5efdc; padding: 2px 6px; border-radius: 4px; font-weight: 500; }
 .heading-count { margin-left: 12px; vertical-align: middle; font-size: 12px; }
 .pipeline-section { margin-bottom: 29px; padding-bottom: 23px; border-bottom: 1px solid var(--line); }
-.agent-rail { display: grid; grid-template-columns: repeat(5, 1fr); padding: 8px 0; gap: 6px; }
-.agent-step { position: relative; display: flex; align-items: center; flex-direction: column; min-width: 0; gap: 9px; text-align: center; }
-.agent-step:not(:last-child)::after { content: ''; position: absolute; top: 17px; left: calc(50% + 24px); width: calc(100% - 42px); height: 1px; background: #dfe6e0; }
-.agent-circle { width: 35px; height: 35px; display: grid; place-items: center; border: 1px solid #e0e7e1; border-radius: 50%; background: #f5f8f5; color: #99a89a; }
-.agent-step > span { font-size: 11px; color: #65766a; }
-.agent-step small { font-size: 9px; color: #a2afa4; min-height: 13px; }
 .overview-columns { display: grid; grid-template-columns: minmax(0, 1fr) 285px; gap: 31px; }
 .overview-aside { border-left: 1px solid var(--line); padding-left: 27px; }
 .waiting-list { border-top: 1px solid var(--line); }
@@ -198,12 +192,6 @@ pre { margin: 0; }
 .settings-list > div { display: grid; grid-template-columns: 200px minmax(0, 1fr); border-bottom: 1px solid var(--line); padding: 15px 0; gap: 20px; font-size: 12px; }
 .settings-list dt { color: #95a08b; }
 .settings-list dd { margin: 0; color: #59734e; overflow-wrap: anywhere; }
-.role-config-heading { margin-top: 32px; }
-.roles-list > div { display: flex; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); padding: 15px 0; }
-.roles-list svg { color: #849b73; }
-.roles-list strong { font-size: 12px; font-weight: 500; width: 80px; flex-shrink: 0; }
-.roles-list code { color: #9aaa8c; font-size: 11px; overflow-wrap: anywhere; }
-.roles-list .tag { margin-left: auto; }
 .global-error, .error-banner { display: flex; align-items: center; gap: 9px; color: #aa6e65; background: #fcefe9; padding: 12px 20px; font-size: 11px; line-height: 1.7; }
 .global-error > span, .error-banner > span { flex: 1; overflow-wrap: anywhere; }
 .error-banner { margin-top: 16px; border-radius: 4px; }
@@ -295,16 +283,7 @@ pre { margin: 0; }
   .metric:nth-child(odd) { padding-left: 0 !important; }
   .metric:nth-child(even) { border-right: 0; padding-right: 0 !important; }
   .metric strong { font-size: 31px; }
-  .agent-rail { padding: 10px 0; gap: 3px; }
-  .agent-step > span { font-size: 10px; }
-  .agent-circle { width: 31px; height: 31px; }
-  .agent-step small { font-size: 8px; }
-  .agent-step:not(:last-child)::after { top: 15px; left: calc(50% + 20px); width: calc(100% - 35px); }
   .settings-list > div { grid-template-columns: 145px minmax(0, 1fr); }
-  .roles-list { overflow: hidden; }
-  .roles-list > div { flex-wrap: wrap; gap: 8px; }
-  .roles-list code { font-size: 10px; }
-  .roles-list .tag { display: none; }
 }
 @media (max-width: 440px) {
   .main-content { padding-left: 16px; padding-right: 16px; }
@@ -313,8 +292,6 @@ pre { margin: 0; }
   .page-heading { flex-wrap: wrap; }
   .heading-actions { width: 100%; }
   .heading-actions .button { flex: 1; }
-  .agent-rail { grid-template-columns: repeat(3, 1fr); gap: 18px 5px; }
-  .agent-step:nth-child(3)::after { display: none; }
   .overview-aside { grid-template-columns: 1fr; gap: 25px; }
   .overview-aside .event-row { flex-wrap: nowrap; }
   .overview-aside .event-row > time { margin-left: 0; }
@@ -516,3 +493,36 @@ pre { margin: 0; }
 .desktop-coverage p, .desktop-coverage li, .desktop-coverage summary {
   overflow-wrap: anywhere; line-height: 1.8; }
 .desktop-coverage summary { cursor: pointer; padding: 6px 0; }
+
+.agent-role-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 16px 0 26px; }
+.agent-role-card { display: flex; flex-direction: column; align-items: flex-start; gap: 10px; min-width: 0;
+  padding: 16px; border: 1px solid var(--line); border-radius: 7px; background: #f8faf7; }
+.agent-role-title { display: flex; align-items: center; gap: 9px; min-width: 0; flex-wrap: wrap; color: #526d50; }
+.agent-role-title strong, .agent-role-title h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.agent-role-title .tag { margin-left: auto; }
+.agent-role-card p { margin: 0; font-size: 11px; line-height: 1.8; color: #73816f; }
+.agent-role-card small { font-size: 10px; line-height: 1.7; color: #8b9786; }
+.agent-role-card .agent-role-model { margin-top: auto; text-align: left; max-width: 100%; overflow-wrap: anywhere; }
+.agent-model-switch { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 20px 0 12px; }
+.analysis-model-section .checkbox-label { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.agent-model-switch input { width: 16px; height: 16px; margin: 0; accent-color: var(--green); }
+.agent-model-readiness { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 20px; }
+.agent-model-readiness .tag { white-space: normal; line-height: 1.8; }
+.agent-model-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.agent-model-card { padding: 20px; border: 1px solid var(--line); border-radius: 7px; min-width: 0; }
+.agent-role-id { display: block; margin-top: 10px; font-size: 11px; color: #91a088; overflow-wrap: anywhere; }
+.agent-model-card .diagnosis-meta { line-height: 1.8; }
+.agent-model-flows { margin: 10px 0 16px; color: #7c8b74; font-size: 11px; }
+.agent-model-card summary { cursor: pointer; color: #536b4b; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
+.analysis-model-section > .section-heading { flex-wrap: wrap; gap: 10px; }
+.agent-model-card label { font-size: 12px; color: #65795b; }
+.agent-model-card input { margin-top: 0; }
+.agent-model-card .execution-config-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+@media (max-width: 980px) {
+  .agent-model-grid { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 440px) {
+  .agent-role-grid { grid-template-columns: minmax(0, 1fr); }
+  .agent-model-card { padding: 16px; }
+  .agent-model-card .execution-config-row { grid-template-columns: minmax(0, 1fr); }
+}
