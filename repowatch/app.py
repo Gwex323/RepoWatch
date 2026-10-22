@@ -571,7 +571,7 @@ def create_app(
         if not environment:
             raise Conflict("environment_required")
         context = {key: issue[key] for key in (
-            "id", "number", "title", "body", "state", "author", "url", "updated_at"
+            "id", "repo_id", "number", "title", "body", "state", "author", "url", "updated_at"
         )}
         analysis_id = analyses.enqueue(
             environment["id"], environment["version"], manual=True, issue=context
