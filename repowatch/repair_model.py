@@ -242,6 +242,7 @@ async def run_repair(model, context, event, *, workspace, reasoning_effort=None)
     started = time.monotonic()
     corrections = 0
     path_corrections = 0
+    source_path_corrections = 0
 
     def repair_tool(function):
         schema = function_schema(function)
@@ -307,8 +308,28 @@ async def run_repair(model, context, event, *, workspace, reasoning_effort=None)
     @repair_tool
     async def read_repair_source(path: str, candidate: bool = False) -> dict:
         """Read an exact source_index path. Use candidate=False until a patch is prepared."""
+        nonlocal source_path_corrections
         try:
             return await asyncio.to_thread(workspace.read, path, candidate=candidate)
+        except RepairPathRejected as exc:
+            recoverable = (exc.details["reason"] == "unsupported_file_type"
+                           and source_path_corrections < 2)
+            event("source_path_rejected", json.dumps({
+                **exc.details, "recoverable": recoverable,
+                "corrections_remaining": 2 - source_path_corrections - 1 if recoverable else 0,
+            }))
+            if exc.details["reason"] != "unsupported_file_type":
+                raise
+            if not recoverable:
+                raise Conflict("repair_source_path_rejected") from exc
+            source_path_corrections += 1
+            return {
+                "error": "repair_source_path_rejected", **exc.details,
+                "next": "This file type cannot be read by the repair source tool. "
+                        "Choose an exact available_paths entry. No content or hash was read; "
+                        "do not infer them or bypass path protection.",
+                "available_paths": workspace.index()["files"][:40],
+            }
         except SourceContentBlocked as exc:
             event("source_blocked", json.dumps(exc.details))
             return {"error": "repair_sensitive_content", **exc.details}
@@ -406,6 +427,8 @@ async def run_repair(model, context, event, *, workspace, reasoning_effort=None)
         "repair_file_unavailable with a reason and available_paths. Correct a nonexistent "
         "path or read the original when candidate_not_ready; never invent file contents or "
         "a hash, repeat unavailable reads, or bypass file limits. "
+        "If a read returns repair_source_path_rejected, choose an allowed source path from "
+        "available_paths. At most two file-type corrections are allowed for the whole run. "
         "If a tool returns repair_tool_arguments_invalid, correct only its arguments using "
         "the returned schema and fields. Never treat invalid arguments as an executed action. "
         "Use neutral new regression filenames without secret, credential, token or password. "

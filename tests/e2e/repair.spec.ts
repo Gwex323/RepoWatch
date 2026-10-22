@@ -193,8 +193,14 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
   task.events.push({ kind: 'path_rejected', value: JSON.stringify({
     reason: 'sensitive_name', edit_index: 1,
   }), created: 8 });
-  await expect(panel.getByRole('alert')).toContainText('补丁包含不允许修改的路径');
+  await expect(panel.getByRole('alert')).toContainText('文件路径未通过保护检查');
   await expect(panel.getByText('第 2 个修改 · 文件名包含受保护的敏感词', { exact: true })).toBeVisible();
+  task.error = 'repair_source_path_rejected';
+  task.events.push({ kind: 'source_path_rejected', value: JSON.stringify({
+    reason: 'unsupported_file_type', recoverable: false, corrections_remaining: 0,
+  }), created: 9 });
+  await expect(panel.getByRole('alert')).toContainText('读取的文件类型不在允许的源码范围内');
+  await expect(panel.getByText('源码读取 · 文件类型不在允许读取的源码范围内', { exact: true }).first()).toBeVisible();
   await expect(panel.getByText('运行环境与路径处理已更新，此任务可额外重试一次。', { exact: true })).toBeVisible();
   await page.screenshot({ path: 'test-results/repair-workspace-recovery-mobile.png', fullPage: true });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);

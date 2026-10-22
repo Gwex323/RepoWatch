@@ -58,7 +58,8 @@ const errors: Record<string, string> = {
   repair_setup_failed: '修复验证环境安装失败，请查看测试日志。',
   repair_review_rejected: '独立审查未批准补丁，请查看审查结论。',
   repair_review_required: '缺少通过的测试或独立审查，未提交 PR。',
-  repair_unsafe_path: '补丁包含不允许修改的路径。',
+  repair_unsafe_path: '文件路径未通过保护检查。',
+  repair_source_path_rejected: '读取的文件类型不在允许的源码范围内，请从可读源码列表选择文件。',
   repair_existing_tests_protected: '补丁尝试修改既有测试，本轮已停止。',
   repair_sensitive_content: '文件包含疑似敏感内容，未继续处理。',
   repair_regression_required: '缺少有效的新增回归测试或源码修改。',
@@ -214,12 +215,13 @@ const unavailableSource = (value: string) => {
     return `${item.path} · ${item.candidate ? '修复版本' : '原版本'} · ${reasons[item.reason] ?? '无法读取'}`;
   } catch { return '源码暂时无法读取'; }
 };
-const rejectedPath = (value: string) => {
+const rejectedPath = (value: string, reading = false) => {
   try {
     const item = JSON.parse(value);
     const reasons: Record<string, string> = {
       invalid_path: '路径格式无效，需使用仓库内相对路径和正斜杠',
-      protected_directory: '路径位于受保护目录', unsupported_file_type: '文件类型不允许修改',
+      protected_directory: '路径位于受保护目录',
+      unsupported_file_type: reading ? '文件类型不在允许读取的源码范围内' : '文件类型不允许修改',
       protected_file: '文件受保护', sensitive_name: '文件名包含受保护的敏感词',
       symlink: '路径包含符号链接', outside_root: '路径超出仓库范围',
       duplicate_path: '补丁包含重复路径', case_alias: '路径大小写与既有文件冲突',
@@ -323,6 +325,8 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
         <p className="diagnosis-meta" key={`source-unavailable-${i}`}>{unavailableSource(event.value)}</p>)}
       {task.events.filter(event => event.kind === 'path_rejected').slice(-2).map((event, i) =>
         <p className="diagnosis-meta" key={`path-rejected-${i}`}>{rejectedPath(event.value)}</p>)}
+      {task.events.filter(event => event.kind === 'source_path_rejected').slice(-2).map((event, i) =>
+        <p className="diagnosis-meta" key={`source-path-${i}`}>源码读取 · {rejectedPath(event.value, true)}</p>)}
       {task.events.filter(event => event.kind === 'tool_arguments_invalid' || event.kind === 'tool_failure')
         .slice(-2).map((event, i) => <p className="diagnosis-meta" key={`tool-error-${i}`}>
           {toolEvent(event.kind, event.value)}</p>)}
@@ -356,6 +360,7 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
             event.kind === 'source_blocked' ? sourceBlock(event.value) :
             event.kind === 'source_unavailable' ? unavailableSource(event.value) :
             event.kind === 'path_rejected' ? rejectedPath(event.value) :
+            event.kind === 'source_path_rejected' ? `源码读取 · ${rejectedPath(event.value, true)}` :
             event.kind.startsWith('tool_') ? toolEvent(event.kind, event.value) :
             event.kind.startsWith('request_') ? requestEvent(event.kind, event.value) :
             event.kind === 'environment_wait' ? '等待 Docker 恢复，本次不占用修复次数' :
