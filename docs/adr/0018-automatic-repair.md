@@ -319,6 +319,48 @@ confirmation, evidence freshness, same-identity credential refresh, source
 fingerprint, remote revision and publication reconciliation gates remain.
 Neither deployment nor inspection requeues or publishes production tasks.
 
+## Verification Feedback And Candidate Revisions (2026-10-21, Issue #42)
+
+A live patch made its two new regression cases pass but broke one of the 111
+existing tests. Verification previously raised out of the SDK tool, so the model
+never saw the failed assertion. Single-submission workspaces and treating every
+verification object as a closing signal also prevented same-attempt correction.
+
+Complete failed verification now returns bounded, redacted logs and actual exit
+codes to the repair model. It must diagnose implementation/test/contract conflicts
+before submitting a correction; existing tests and publication gates stay protected.
+The first two failures permit corrections, with at most three candidate revisions.
+An identical implementation/test/command proposal is not executed again even if
+its summary or edit ordering changes. An unresolved final explanation is recorded
+as an unverified model judgment, never a successful repair.
+
+Each revision is validated against the same immutable original hashes and built
+in fresh baseline/candidate directories. Prior candidates remain on disk; complete
+patches, diffs and test evidence are persisted as verification round history before
+the next model request. Current verification and prior rounds are separate API
+fields. Only passed current verification can enable native reviewer handoff.
+
+Each permitted correction adds three bounded model exploration calls. Shared
+timeout/output retries, source-read budgets, pause/cancellation checks and the
+overall thirty-minute deadline are not reset. Infrastructure/setup errors and
+path/content violations do not enter this test-feedback loop. No unchanged patch,
+failed round, model explanation or prior passing candidate authorizes publication.
+
+An exhausted old-policy task with complete failed verification, a retained patch,
+source digest and no review/publication can explicitly consume one upgrade retry.
+Current-policy/used/partial/verified/stale tasks cannot gain this allowance. The
+previous attempt snapshot and bounded failure evidence are preserved for the next
+repair model. Deployment never queues that retry. The UI displays each candidate,
+feedback progress and the opt-in upgrade action without exposing raw reasoning.
+
+### Integration With Current Repair Policies (2026-10-22)
+
+Verification correction and reviewer evidence recovery retain separate policy
+markers and one-time allowances. A failed candidate cannot authorize handoff;
+after a passed candidate, the reviewer must actually read trusted verification
+before its final schema is enabled. Missing evidence keeps the specific
+`repair_review_evidence_required` error. Candidate corrections share the existing
+output/timeout budgets and preserve per-role model and reasoning selections.
 
 ## Adaptive Output Recovery (2026-10-22, Issue #51)
 

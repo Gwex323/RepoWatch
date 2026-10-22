@@ -1,7 +1,9 @@
 """Validated edits and isolated Docker regression evidence; never execute on the host."""
 
+import copy
 import difflib
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -21,6 +23,7 @@ BLOCKED_PARTS = {
 }
 MAX_FILE_BYTES = 32000
 SOURCE_READ_POLICY = "recoverable_source_reads_v1"
+MAX_VERIFICATION_REVISIONS = 3
 
 
 class RepairPathRejected(Conflict):
@@ -154,6 +157,8 @@ class RepairWorkspace:
         self.patch = None
         self.diff = ""
         self.verification = None
+        self.revision = 1
+        self.verification_history = []
         self.candidate = self.root / "candidate"
         self.baseline = self.root / "baseline"
 
@@ -204,10 +209,13 @@ class RepairWorkspace:
             self.reads[name] = digest(raw)
         return {"path": name, "sha256": digest(raw), "text": text}
 
-    def prepare(self, patch):
+    def prepare(self, patch, *, revise=False):
         self.check()
         if self.patch is not None:
-            raise Conflict("repair_patch_already_submitted")
+            if (not revise or not self.verification
+                    or self.verification.get("passed") is not False
+                    or self.revision >= MAX_VERIFICATION_REVISIONS):
+                raise Conflict("repair_patch_already_submitted")
         if len(patch.model_dump_json().encode()) > 160000:
             raise Conflict("repair_patch_limit")
         names = [edit.path for edit in patch.edits]
@@ -252,7 +260,30 @@ class RepairWorkspace:
                 raise RepairPathRejected("case_alias")
         if source_changes == 0 or "\0" in patch.regression_command:
             raise Conflict("repair_regression_required")
+        if self.patch is not None:
+            next_edits = {e.path: (e.original_sha256, e.content) for e in patch.edits}
+            previous_patches = [self.patch.model_dump(),
+                                *(item["patch"] for item in self.verification_history)]
+            for previous in previous_patches:
+                previous_edits = {e["path"]: (e["original_sha256"], e["content"])
+                                  for e in previous["edits"]}
+                if (next_edits == previous_edits
+                        and set(patch.regression_paths) == set(previous["regression_paths"])
+                        and patch.regression_command.strip()
+                        == previous["regression_command"].strip()):
+                    raise Conflict("repair_patch_unchanged")
+            # Keep prior candidates and test evidence intact. Every revision is
+            # built from the same original, never from the failed candidate.
+            next_revision = self.revision + 1
+            revision_root = self.root / f"revision-{next_revision}"
+            revision_root.mkdir(exist_ok=False)
+            self.revision = next_revision
+            self.baseline = revision_root / "baseline"
+            self.candidate = revision_root / "candidate"
+            self.id = self.id.split("-r", 1)[0] + f"-r{self.revision}"
         self.patch = patch
+        self.diff = ""
+        self.verification = None
         shutil.copytree(self.original, self.baseline)
         shutil.copytree(self.original, self.candidate)
         fragments = []
@@ -325,6 +356,13 @@ class RepairWorkspace:
             ) for key in ("regression_before", "regression_after", "full_suite_after"))
         )
         self.verification = results
+        self.verification_history.append({
+            "revision": self.revision, "patch": self.patch.model_dump(),
+            "diff": self.diff, "verification": copy.deepcopy(results),
+        })
+        event("verification_round", json.dumps({
+            "revision": self.revision, "passed": results["passed"],
+        }))
         if not results["passed"]:
             raise Conflict("repair_tests_failed")
         return results

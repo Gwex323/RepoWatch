@@ -4,6 +4,7 @@ import { agentModelEvent } from './agent-models';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Settings = { enabled: boolean; model_enabled: boolean; version: number; max_attempts: number };
+type Verification = Record<string, { command?: string; exit_code: number; log: string } | boolean>;
 type Repair = {
   id: string; finding_id: string; version: number; status: string; stage: string | null;
   attempt: number; error: string | null; enabled: boolean; can_retry: boolean; revision: string;
@@ -13,13 +14,15 @@ type Repair = {
   output_recovery_available?: boolean;
   protocol_recovery_available?: boolean;
   workspace_recovery_available?: boolean;
+  verification_recovery_available?: boolean;
   review_evidence_recovery_available?: boolean;
   verification_resume_available?: boolean;
   publication_retry_available?: boolean;
   docker_recovery_available?: boolean;
   context: { finding: { title: string } };
   patch: { summary: string; edits: { path: string }[] } | null;
-  diff: string; verification: Record<string, { command?: string; exit_code: number; log: string } | boolean> | null;
+  diff: string; verification: Verification | null;
+  verification_rounds?: { revision: number; diff: string; verification: Verification }[];
   review: { approved: boolean; summary: string; risks: string[] } | null;
   remote: { branch: string; pr: { number: number; url: string }; issue: { number: number; url: string } } | null;
   events: { kind: string; value: string; created: number }[];
@@ -43,6 +46,8 @@ const labels: Record<string, string> = {
   output_truncated: '模型输出达到上限，已丢弃未完成内容',
   output_recovery: '已使用新版输出策略恢复机会',
   protocol_recovery: '已使用新版补丁参数与交接策略恢复机会',
+  verification_recovery: '已使用新版失败反馈与纠正策略恢复机会',
+  patch_unchanged: '补丁未发生实质变化，未重复运行测试',
   workspace_recovery: '已使用新版运行环境与路径策略恢复机会',
   verification_resume: '使用已保存补丁继续真实测试',
   timeout_recovery: '已使用新版超时策略恢复机会',
@@ -63,6 +68,7 @@ const errors: Record<string, string> = {
   repair_setup_failed: '修复验证环境安装失败，请查看测试日志。',
   repair_review_rejected: '独立审查未批准补丁，请查看审查结论。',
   repair_review_required: '缺少通过的测试或独立审查，未提交 PR。',
+  repair_patch_unchanged: '补丁未发生实质变化，需要先分析失败原因再修改。',
   repair_unsafe_path: '文件路径未通过保护检查。',
   repair_source_path_rejected: '读取的文件类型不在允许的源码范围内，请从可读源码列表选择文件。',
   repair_existing_tests_protected: '补丁尝试修改既有测试，本轮已停止。',
@@ -187,6 +193,14 @@ const requestEvent = (kind: string, value: string) => {
     if (!Number.isFinite(item.elapsed_seconds)) return '模型请求';
     return `${role} · ${kind === 'request_timeout' ? '请求超时' : '响应完成'} · 耗时 ${item.elapsed_seconds} 秒`;
   } catch { return '模型请求'; }
+};
+const verificationEvent = (kind: string, value: string) => {
+  try {
+    const item = JSON.parse(value);
+    if (!Number.isInteger(item.revision)) return '修复验证记录';
+    if (kind === 'verification_round') return `第 ${item.revision} 版验证${item.passed === true ? '通过' : '未通过'}`;
+    return `根据第 ${item.revision} 版失败日志分析并纠正 · 还可生成 ${item.corrections_remaining} 版补丁`;
+  } catch { return '修复验证记录'; }
 };
 const providerEvent = (value: string) => {
   try {
@@ -316,6 +330,8 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
         <p>补丁参数未通过校验，尚未执行回归测试。参数兼容与交接策略已更新，可额外重试一次。</p>}
       {task.workspace_recovery_available && task.can_retry &&
         <p>运行环境与路径处理已更新，此任务可额外重试一次。</p>}
+      {task.verification_recovery_available && task.can_retry &&
+        <p>失败反馈与自主纠正已更新，可额外重试一次，并保留之前的失败证据。</p>}
       {task.status === 'waiting_environment' &&
         <p role="status">{task.enabled
           ? '等待 Docker 恢复，系统会自动检查；本次等待不占用修复次数。'
@@ -334,6 +350,11 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
         <p className="diagnosis-meta" key={`source-unavailable-${i}`}>{unavailableSource(event.value)}</p>)}
       {task.events.filter(event => event.kind === 'path_rejected').slice(-2).map((event, i) =>
         <p className="diagnosis-meta" key={`path-rejected-${i}`}>{rejectedPath(event.value)}</p>)}
+      {task.events.filter(event => event.kind === 'verification_round' || event.kind === 'verification_feedback')
+        .slice(-3).map((event, i) => <p className="diagnosis-meta" key={`verify-${i}`}>
+          {verificationEvent(event.kind, event.value)}</p>)}
+      {task.events.filter(event => event.kind === 'repair_unresolved').slice(-1).map((event, i) =>
+        <p key={`unresolved-${i}`}>未解决说明（模型判断，验证未通过）：{event.value}</p>)}
       {task.events.filter(event => event.kind === 'source_path_rejected').slice(-2).map((event, i) =>
         <p className="diagnosis-meta" key={`source-path-${i}`}>源码读取 · {rejectedPath(event.value, true)}</p>)}
       {task.events.filter(event => event.kind === 'tool_arguments_invalid' || event.kind === 'tool_failure')
@@ -353,7 +374,7 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
           void api(`/repairs/${task.id}/retry`, { version: task.version })
             .then(() => api<Repair[]>(`/environments/${envId}/repairs`)).then(setTasks)
             .catch(e => setError(message(e.message))).finally(() => setBusy(''));
-        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.review_evidence_recovery_available
+        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available || task.review_evidence_recovery_available
           ? '使用新策略重试' : task.publication_retry_available ? '仅重试发布' : task.docker_recovery_available ? '继续修复' : task.status === 'waiting_environment' ? '检查并继续' : '重试修复'}</button>}
       {task.diff && <details><summary>代码差异</summary><pre>{task.diff}</pre></details>}
       {task.verification && <details><summary>修复验证记录</summary>
@@ -361,10 +382,21 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
             <div key={key}><strong>{labels[key] ?? key} · exit {value.exit_code}</strong>
             {value.command && <code>{value.command}</code>}<pre>{value.log}</pre></div>)}
       </details>}
+      {!!task.verification_rounds?.length && <details><summary>本次候选版本</summary>
+        {task.verification_rounds.map(round => <details key={round.revision}>
+          <summary>第 {round.revision} 版 · {round.verification.passed ? '验证通过' : '验证未通过'}</summary>
+          <pre>{round.diff}</pre>
+          {Object.entries(round.verification).map(([key, value]) => typeof value === 'object' &&
+            <div key={key}><strong>{labels[key] ?? key} · exit {value.exit_code}</strong>
+              {value.command && <code>{value.command}</code>}<pre>{value.log}</pre></div>)}
+        </details>)}
+      </details>}
       {task.events.length > 0 && <details><summary>修复执行记录</summary><ol>
         {task.events.map((event, i) => <li key={i}>{new Date(event.created * 1000).toLocaleTimeString('zh-CN')}
           {' · '}{event.kind === 'failure' ? message(event.value) :
             event.kind === 'failure_details' ? failureDetails(event.value) :
+            event.kind === 'verification_round' || event.kind === 'verification_feedback' ? verificationEvent(event.kind, event.value) :
+            event.kind === 'repair_unresolved' ? `未解决说明（模型判断）：${event.value}` :
             event.kind === 'provider_response' ? providerEvent(event.value) :
             event.kind === 'model_configuration' ? agentModelEvent(event.value) :
             event.kind === 'source_blocked' ? sourceBlock(event.value) :

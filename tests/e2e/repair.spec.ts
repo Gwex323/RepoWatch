@@ -15,6 +15,7 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
     output_recovery_available: false,
     protocol_recovery_available: false,
     workspace_recovery_available: false,
+    verification_recovery_available: false,
     review_evidence_recovery_available: false,
     verification_resume_available: false,
     publication_retry_available: false,
@@ -33,6 +34,8 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
     remote: null as null | { branch: string; pr: { number: number; url: string }; issue: { number: number; url: string } },
     events: [{ kind: 'handoff', value: 'repair_agent -> independent_reviewer', created: 1 }],
     attempts: [] as { attempt: number; error: string; diff: string; review: null }[],
+    verification_rounds: [] as { revision: number; diff: string;
+      verification: Record<string, { exit_code: number; log: string } | boolean> }[],
   };
   const env = { id: 'env_repair', version: 1, revision: task.revision, state: 'ready',
     installed: true, busy: false, created: 1, url: null, error: null, expires: null, jobs: [],
@@ -67,6 +70,8 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
     task.output_recovery_available = false;
     task.protocol_recovery_available = false;
     task.workspace_recovery_available = false;
+    task.verification_recovery_available = false;
+    task.verification_rounds = [];
     task.review_evidence_recovery_available = false;
     task.verification_resume_available = false;
     task.publication_retry_available = false;
@@ -124,6 +129,26 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
   await panel.getByRole('button', { name: '使用新策略重试' }).click();
   await expect(panel.getByText('等待修复', { exact: true })).toBeVisible();
   await expect(panel.getByRole('button', { name: '使用新策略重试' })).toHaveCount(0);
+  task.status = 'failed'; task.error = 'repair_tests_failed'; task.can_retry = true;
+  task.verification_recovery_available = true;
+  task.verification_rounds = [{ revision: 1, diff: task.diff, verification: {
+    passed: false, full_suite_after: { exit_code: 1, log: 'Existing contract assertion failed' },
+  } }];
+  task.events.push({ kind: 'verification_round', value: JSON.stringify({
+    revision: 1, passed: false,
+  }), created: 3 });
+  task.events.push({ kind: 'verification_feedback', value: JSON.stringify({
+    revision: 1, corrections_remaining: 2,
+  }), created: 4 });
+  await expect(panel.getByText('失败反馈与自主纠正已更新，可额外重试一次，并保留之前的失败证据。', { exact: true })).toBeVisible();
+  await expect(panel.getByText('根据第 1 版失败日志分析并纠正 · 还可生成 2 版补丁', { exact: true }).first()).toBeVisible();
+  await panel.getByText('本次候选版本', { exact: true }).click();
+  await panel.getByText('第 1 版 · 验证未通过', { exact: true }).click();
+  await expect(panel.getByText('Existing contract assertion failed', { exact: true })).toBeVisible();
+  await page.screenshot({ path: 'test-results/repair-feedback-recovery-mobile.png', fullPage: true });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await panel.getByRole('button', { name: '使用新策略重试' }).click();
+  await expect(panel.getByText('等待修复', { exact: true })).toBeVisible();
   task.status = 'failed'; task.error = 'repair_file_unavailable'; task.can_retry = true;
   task.attempt = 4; task.source_read_recovery_available = true;
   task.events.push({ kind: 'source_unavailable', value: JSON.stringify({
