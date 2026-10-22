@@ -262,7 +262,7 @@ def test_evidence_gate_discards_entire_parallel_tool_batch(pending):
 def test_review_evidence_gate_does_not_extend_exploration_budget():
     delegate = RepairModel()
     model = RepairStageModel(
-        delegate, "independent_reviewer", SimpleNamespace(check=lambda: None),
+        delegate, "independent_reviewer", SimpleNamespace(check=lambda: None, verification=None),
         lambda *_: None, lambda: {"verification_read": False}, {"timeouts": 0},
     )
     model.turns = 3
