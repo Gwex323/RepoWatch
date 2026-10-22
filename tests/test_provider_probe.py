@@ -44,6 +44,18 @@ def test_discovery_before_any_model_is_entered_is_sorted_bounded_and_read_only(c
     assert providers.state() == before and len(requests) == 1
 
 
+def test_discovery_reads_models_from_private_http_gateway(catalog):  # noqa: F811
+    providers, _ = catalog
+
+    def handler(request):
+        assert str(request.url) == "http://172.16.116.14:3000/v1/models"
+        assert request.method == "GET"
+        return httpx.Response(200, json={"data": [{"id": "local-model"}]})
+
+    result = run(providers, handler, base_url="http://172.16.116.14:3000/v1", model=" ")
+    assert result == {"models": ["local-model"], "truncated": False}
+
+
 def test_existing_provider_uses_saved_key_without_writing_or_revealing_it(catalog):  # noqa: F811
     providers, _ = catalog
     saved = create(providers)
@@ -107,6 +119,7 @@ def test_provider_errors_are_redacted_and_never_retried(catalog, status, expecte
 
 @pytest.mark.parametrize("api,base_url,operation,token_field", [
     ("chat_completions", "https://first.example/v1", "chat/completions", "max_tokens"),
+    ("chat_completions", "http://172.16.116.14:3000/v1", "chat/completions", "max_tokens"),
     ("chat_completions", "https://api.openai.com/v1", "chat/completions", "max_completion_tokens"),
     ("responses", "https://first.example/v1", "responses", "max_output_tokens"),
 ])
