@@ -591,6 +591,10 @@ def create_app(
     def repository_schedule(repo_id: str):
         return schedules.get(repo_id)
 
+    @app.get("/api/repositories/{repo_id}/schedule/history")
+    def repository_schedule_history(repo_id: str, limit: int = Query(10, ge=1, le=50)):
+        return schedules.history(repo_id, limit=limit)
+
     @app.post("/api/repositories/{repo_id}/schedule")
     def configure_repository_schedule(repo_id: str, body: ScheduleBody):
         return schedules.configure(
