@@ -16,6 +16,7 @@ from .repair_model import (
     FAILURE_POLICY,
     OUTPUT_POLICY,
     PROTOCOL_POLICY,
+    REVIEW_EVIDENCE_POLICY,
     RepairReview,
     repair_failure_code,
     repair_failure_details,
@@ -141,7 +142,10 @@ class Repairs(EnvironmentRecovery):
             result["output_recovery_available"] = self._output_recovery(db, row)
             result["protocol_recovery_available"] = self._protocol_recovery(db, row)
             result["workspace_recovery_available"] = self._workspace_recovery(db, row)
-            result["verification_resume_available"] = self._can_resume_verification(row)
+            result["review_evidence_recovery_available"] = self._review_evidence_recovery(db, row)
+            result["verification_resume_available"] = (
+                self._can_resume_verification(row) or result["review_evidence_recovery_available"]
+            )
             result["docker_recovery_available"] = self._docker_recovery(db, row)
             publication_failure = self._publication_failure(row)
             result["publication_retry_available"] = (
@@ -155,7 +159,8 @@ class Repairs(EnvironmentRecovery):
                      or self._source_read_recovery(row) or self._failure_recovery(row)
                      or result["output_recovery_available"]
                      or result["protocol_recovery_available"]
-                     or result["workspace_recovery_available"])
+                     or result["workspace_recovery_available"]
+                     or result["review_evidence_recovery_available"])
                 and self.current(db, row)
             )
             return redact_values(result)
@@ -182,7 +187,39 @@ class Repairs(EnvironmentRecovery):
                 + int(context.get("output_recovery_used") is True)
                 + int(context.get("protocol_recovery_used") is True)
                 + int(context.get("workspace_recovery_used") is True)
+                + int(context.get("review_evidence_recovery_used") is True)
                 + int(context.get("environment_recovery_used") is True))
+
+    @classmethod
+    def _review_evidence_recovery(cls, db, row):
+        context = json.loads(row["context"])
+        verification = cls._json(row, "verification")
+        if not (
+            row["status"] == "failed" and row["error"] == "repair_handoff_incomplete"
+            and row["stage"] == "independent_reviewer"
+            and row["attempt"] == cls._attempt_limit(row)
+            and context.get("review_evidence_policy") != REVIEW_EVIDENCE_POLICY
+            and not context.get("review_evidence_recovery_used")
+            and row["patch"] and row["diff"] and row["source_digest"]
+            and isinstance(verification, dict) and verification.get("passed") is True
+            and not row["review"] and not row["remote"]
+        ):
+            return False
+        handed_off = boundary = False
+        for event in db.execute(
+            "SELECT kind,value FROM repair_events WHERE repair_id=? ORDER BY id DESC",
+            (row["id"],),
+        ):
+            if event["kind"] in ("retry", "queued"):
+                boundary = event["kind"] == "retry" and event["value"] == str(row["attempt"])
+                break
+            if event["kind"] == "tool_call" and event["value"] == "read_repair_verification":
+                return False
+            if event["kind"] == "handoff":
+                if event["value"] != "repair_agent -> independent_reviewer" or handed_off:
+                    return False
+                handed_off = True
+        return handed_off and boundary
 
     @staticmethod
     def _timeout_recovery(row):
@@ -461,6 +498,7 @@ class Repairs(EnvironmentRecovery):
             output_recovery = self._output_recovery(db, row)
             protocol_recovery = self._protocol_recovery(db, row)
             workspace_recovery = self._workspace_recovery(db, row)
+            review_evidence_recovery = self._review_evidence_recovery(db, row)
             publication_retry = self._publication_retry_available(row)
             docker_recovery = self._docker_recovery(db, row)
             if (self._publication_failure(row) and not publication_retry):
@@ -473,7 +511,7 @@ class Repairs(EnvironmentRecovery):
                         and not self._failure_recovery(row)
                         and not output_recovery and not protocol_recovery
                         and not workspace_recovery and not publication_retry
-                        and not docker_recovery)):
+                        and not docker_recovery and not review_evidence_recovery)):
                 raise Conflict("repair_changed")
             if not self.current(db, row):
                 raise Conflict("repair_stale")
@@ -500,7 +538,10 @@ class Repairs(EnvironmentRecovery):
                 context.update(protocol_recovery_used=True, protocol_policy=PROTOCOL_POLICY)
             if workspace_recovery:
                 context.update(workspace_recovery_used=True, workspace_policy=WORKSPACE_POLICY)
-            resume_verification = self._can_resume_verification(row)
+            if review_evidence_recovery:
+                context.update(review_evidence_recovery_used=True,
+                               review_evidence_policy=REVIEW_EVIDENCE_POLICY)
+            resume_verification = self._can_resume_verification(row) or review_evidence_recovery
             context["resume_verification"] = resume_verification
             if self._verified(row) or resume_verification:
                 account = db.execute(
@@ -530,6 +571,8 @@ class Repairs(EnvironmentRecovery):
                 (json.dumps(context, ensure_ascii=False), time.time(), repair_id),
             )
         self.event(repair_id, "retry", str(row["attempt"] + 1))
+        if review_evidence_recovery:
+            self.event(repair_id, "review_evidence_recovery", REVIEW_EVIDENCE_POLICY)
         if docker_recovery:
             self.event(repair_id, "environment_recovery", "docker_ready")
         if publication_retry:
@@ -603,6 +646,7 @@ class Repairs(EnvironmentRecovery):
             context["output_policy"] = OUTPUT_POLICY
             context["protocol_policy"] = PROTOCOL_POLICY
             context["workspace_policy"] = WORKSPACE_POLICY
+            context["review_evidence_policy"] = REVIEW_EVIDENCE_POLICY
             encoded_context = json.dumps(context, ensure_ascii=False)
             db.execute(
                 "UPDATE repair_tasks SET status='running',stage=?,attempt=attempt+1,"

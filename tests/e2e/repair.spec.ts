@@ -15,6 +15,7 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
     output_recovery_available: false,
     protocol_recovery_available: false,
     workspace_recovery_available: false,
+    review_evidence_recovery_available: false,
     verification_resume_available: false,
     publication_retry_available: false,
     docker_recovery_available: false,
@@ -66,6 +67,7 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
     task.output_recovery_available = false;
     task.protocol_recovery_available = false;
     task.workspace_recovery_available = false;
+    task.review_evidence_recovery_available = false;
     task.verification_resume_available = false;
     task.publication_retry_available = false;
     task.docker_recovery_available = false;
@@ -181,6 +183,14 @@ test('automatic repair: opt in, paused queue, progress, retry, evidence and owne
   await panel.getByRole('button', { name: '使用新策略重试' }).click();
   await expect(panel.getByText('等待修复', { exact: true })).toBeVisible();
   await expect(panel.getByRole('button', { name: '使用新策略重试' })).toHaveCount(0);
+  task.status = 'failed'; task.error = 'repair_handoff_incomplete'; task.can_retry = true;
+  task.review_evidence_recovery_available = true;
+  task.events.push({ kind: 'review_evidence_retry', value: 'independent_reviewer', created: 8 });
+  await expect(panel.getByRole('alert')).toContainText('独立审查未读取验证证据');
+  await expect(panel.getByText('补丁已通过测试，但旧版审查遗漏证据读取。可额外恢复一次：重新验证已保存补丁后继续独立审查。', { exact: true })).toBeVisible();
+  await expect(panel.getByText(/审查提前返回结论，已要求先读取验证证据/)).toBeVisible();
+  await panel.getByRole('button', { name: '使用新策略重试' }).click();
+  await expect(panel.getByText('等待修复', { exact: true })).toBeVisible();
   task.status = 'failed'; task.error = 'docker_unavailable'; task.can_retry = true;
   task.attempt = 8; task.workspace_recovery_available = true;
   task.verification_resume_available = true;
