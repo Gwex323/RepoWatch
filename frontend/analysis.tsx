@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { Check, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
-import { RepairPanel } from './repair';
 import { agentModelEvent } from './agent-models';
 import { TaskScopePanel, type TaskScope } from './task-scope';
 
@@ -280,8 +279,8 @@ function HistoricalItem({ item, api, refresh }: {
   </article>;
 }
 
-export function AnalysisPanel({ envId, version, api, pipelineActive = false, focusAnalysisId }: {
-  envId: string; version: number; api: Api; pipelineActive?: boolean; focusAnalysisId?: string;
+export function AnalysisPanel({ envId, version, api, pipelineActive = false, focusAnalysisId, view = 'analysis', onNavigate }: {
+  envId: string; version: number; api: Api; pipelineActive?: boolean; focusAnalysisId?: string; view?: 'analysis' | 'reproduction'; onNavigate?: (view: string) => void;
 }) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
   const [selected, setSelected] = useState('');
@@ -307,16 +306,18 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
   const active = analyses.some(item => ['queued', 'running', 'waiting_model'].includes(item.status));
   const stage = analysis?.progress?.stage ??
     analysis?.events.filter(event => event.kind === 'agent').at(-1)?.agent;
-  return <section id="repository-analysis" className="repository-analysis" aria-label="仓库自动分析">
-    <div className="section-heading"><h3><FileSearch size={18} />仓库自动分析</h3>
+  return <section id="repository-analysis" className="repository-analysis" aria-label={view === 'analysis' ? '仓库自动分析' : '复现结果'}>
+    <div className="section-heading"><h3><FileSearch size={18} />{view === 'analysis' ? '项目分析' : '复现结果'}</h3>
       <span className="tag neutral">{analysis ? statuses[analysis.status] : '等待执行结果'}</span>
-      <button className="button secondary" disabled={busy || active || pipelineActive}
-        onClick={() => perform(`/environments/${envId}/analyses`, { version })}><RefreshCw size={15} />分析当前版本</button>
+      {view === 'analysis' && <button className="button secondary" disabled={busy || active || pipelineActive}
+        onClick={() => perform(`/environments/${envId}/analyses`, { version })}><RefreshCw size={15} />分析当前版本</button>}
     </div>
     {analyses.length > 1 && <label>分析记录<select value={analysis?.id} onChange={e => setSelected(e.target.value)}>
       {analyses.map(item => <option key={item.id} value={item.id}>{new Date(item.created * 1000).toLocaleString('zh-CN')} · {statuses[item.status]}</option>)}
     </select></label>}
     {error && <p role="alert">{error}</p>}
+    <div hidden={view !== 'analysis'}>
+    {!analysis && <p className="action-hint">尚无分析记录，可分析当前版本或从 Issue 页选择问题。</p>}
     {analysis?.status === 'waiting_model' && <p className="error-inline">请在“设置 → 模型与供应商 → 分配模型”配置分析所需的四个角色，并启用模型工作流，任务将自动继续。</p>}
     {analysis?.status === 'running' && <p><Loader2 size={14} className="spin" /> {names[stage ?? ''] ?? '正在准备源码与执行证据'}</p>}
     {analysis?.status === 'running' &&
@@ -360,7 +361,18 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       <ul>{analysis.report.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>
       {analysis.coverage && <p className="diagnosis-meta">源码快照：{analysis.coverage.captured} / {analysis.coverage.eligible} 个可分析文件
         {!analysis.coverage.complete && ' · 存在截断或未采集文件'}</p>}
-      {analysis.historical_review && <section className="historical-review" aria-label="旧问题逐条复核">
+      {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
+      {!!analysis.findings.length && <p>{analysis.findings.length} 个疑似问题等待核验。<button className="text-link" onClick={() => onNavigate?.('reproduction')}>前往复现结果</button></p>}
+    </>}
+    {analysis && analysis.events.length > 0 && <details><summary>Agent 分析记录（{analysis.events.length}）</summary>
+      <ol className="analysis-events">{analysis.events.map((item, index) => <li key={index}>
+        {new Date(item.created * 1000).toLocaleTimeString('zh-CN')} · {eventLabel(item)}
+      </li>)}</ol></details>}
+    </div>
+    <div hidden={view !== 'reproduction'}>
+      {!analysis?.report ? <p className="action-hint">尚无可复现的分析报告，请先完成项目分析。</p> : <>
+      {analysis.findings.length === 0 && <p>本轮没有待反馈的新问题。</p>}
+      <div className="content-card-grid">{analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}</div>      {analysis.historical_review && <section className="historical-review" aria-label="旧问题逐条复核">
         <h4>旧问题逐条复核</h4>
         <p className="diagnosis-meta">同仓库待复核 {analysis.historical_review.total} 项 · 本轮带入 {analysis.historical_review.included} 项。
           这些是模型复核意见，不会自动更改人工确认，也不会自动修复或发布；你可以在条目下方标记处置结论。</p>
@@ -371,13 +383,9 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
         {analysis.historical_review.items.map(item =>
           <HistoricalItem key={item.finding_id} item={item} api={api} refresh={refresh} />)}
       </section>}
-      {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
-      <div className="content-card-grid">{analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}</div>
-    </>}
-    {analysis && analysis.events.length > 0 && <details><summary>Agent 分析记录（{analysis.events.length}）</summary>
-      <ol className="analysis-events">{analysis.events.map((item, index) => <li key={index}>
-        {new Date(item.created * 1000).toLocaleTimeString('zh-CN')} · {eventLabel(item)}
-      </li>)}</ol></details>}
-    <RepairPanel envId={envId} api={api} />
+
+      <button className="button secondary" onClick={() => onNavigate?.('repair')}>查看修复进度 →</button>
+      </>}
+    </div>
   </section>;
 }
