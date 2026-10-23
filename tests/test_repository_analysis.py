@@ -225,7 +225,7 @@ def test_chat_adapter_truncation_recovers_before_executing_tools_and_keeps_hando
                     packet = json.loads(payload["messages"][1]["content"])
                     assert packet["execution_was_read"] is True
                     assert packet["source_evidence"][0]["source_blocks"] == [
-                        {"line": 1, "text": "print('ok')"},
+                        {"start_line": 1, "end_line": 1, "text": "print('ok')"},
                     ]
                     assert TEXTUAL_TOOL_CALL not in payload["messages"][1]["content"]
                     assert (payload.get("thinking") == {"type": "disabled"}) is fast
@@ -789,8 +789,8 @@ def test_final_report_format_correction_preserves_evidence_and_handoffs(invalid)
     assert isinstance(corrected_input, str)
     packet = json.loads(corrected_input)
     assert packet["source_evidence"] == [{
-        "path": "app.py", "ranges": [[1, 1]],
-        "source_blocks": [{"line": 1, "text": "print('ok')"}],
+        "path": "app.py",
+        "source_blocks": [{"start_line": 1, "end_line": 1, "text": "print('ok')"}],
     }]
     assert packet["execution_was_read"] is True
     assert packet["handoffs"] == report["handoffs"]
@@ -826,9 +826,9 @@ def test_budget_closing_report_uses_only_actually_read_source_without_tool_histo
     report = asyncio.run(run_analysis(model, context))
     assert len(packets) == 1 and len(report["handoffs"]) == 3
     assert packets[0]["source_evidence"] == [{
-        "path": "app.py", "ranges": [[1, 3]],
-        "source_blocks": [{"line": 1, "text": "print('ok')"}, {"line": 2, "text": "# second"},
-                          {"line": 3, "text": "# third"}],
+        "path": "app.py",
+        "source_blocks": [{"start_line": 1, "end_line": 3,
+                           "text": "print('ok')\n# second\n# third"}],
     }]
     assert "UNREAD_SOURCE_SENTINEL" not in json.dumps(packets)
     assert packets[0]["prior_observations"] == ["Prior suspected behavior, not proof."]
