@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-for (const width of [1440, 390]) test(`task navigation and retained forms at ${width}px`, async ({ page }) => {
+for (const width of [1920, 1440, 390]) test(`task navigation and retained forms at ${width}px`, async ({ page }) => {
   await page.setViewportSize({ width, height: 1000 });
   const errors: string[] = [];
   page.on('pageerror', e => errors.push(e.message));
@@ -54,6 +54,13 @@ for (const width of [1440, 390]) test(`task navigation and retained forms at ${w
   await page.getByRole('button', { name: '2. 分配模型' }).click();
   await expect(page.getByLabel('启用模型工作流')).toBeVisible();
   await expect(page.locator('.agent-model-card')).toHaveCount(5);
+  if (width >= 1440) {
+    const bounds = await page.locator('.settings-page').boundingBox();
+    expect(bounds!.x + bounds!.width).toBeGreaterThan(width - 50);
+    const columns = await page.locator('.agent-model-grid').evaluate(el => Array.from(el.children).filter(child => (child as HTMLElement).offsetTop === (el.firstElementChild as HTMLElement).offsetTop).length);
+    expect(columns).toBe(width === 1920 ? 3 : 2);
+    expect((await page.locator('.agent-model-card').first().boundingBox())!.width).toBeGreaterThan(400);
+  }
   await fits();
   await page.screenshot({ path: `test-results/settings-${width}.png`, fullPage: true });
   await nav('仓库');

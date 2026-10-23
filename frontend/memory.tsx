@@ -164,7 +164,7 @@ function RepositoryMemory({ repoId, revision, api }: {
     </form>}
     {loading ? <div className="loading">正在载入记忆</div> : !items.length ?
       <div className="empty"><BookOpen size={28} /><p>暂无匹配的记忆</p></div> :
-      items.map(item => <article className="memory-entry" key={item.id}>
+      <div className="content-card-grid">{items.map(item => <article className="memory-entry" key={item.id}>
         <div className="memory-entry-heading">
           <div><div className="memory-meta"><span className="tag neutral">{categories[item.category]}</span>
             <span>{sourceName(item)}</span><span>v{item.version}</span></div><h3>{item.title}</h3></div>
@@ -201,7 +201,7 @@ function RepositoryMemory({ repoId, revision, api }: {
           }</strong><span>{entry.record.title}</span><p>{entry.record.content}</p>
             <code>{entry.record.revision}</code></div>)}
         </div>}
-      </article>)}
+      </article>)}</div>}
     <div className="memory-pagination"><span>{total} 条记忆</span>
       <button className="icon-button" title="上一页记忆" disabled={loading || offset === 0}
         onClick={() => setOffset(Math.max(0, offset - 20))}><ArrowLeft size={16} /></button>

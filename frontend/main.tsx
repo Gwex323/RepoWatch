@@ -389,7 +389,7 @@ function App() {
           </>}
           {view === 'repositories' && <section className="repo-page">
             {executionRepo && <button className="button secondary back-link" onClick={() => { setExecutionRepo(null); setExecutionEnv(''); }}>← 返回仓库列表</button>}
-            <div hidden={!!executionRepo}>
+            <div className="repository-catalog" hidden={!!executionRepo}>
             <details className="schedule-overview disclosure"><summary>每日巡检与历史记录</summary>
               <div className="section-heading">
                 <h2><Clock3 size={18} />每日巡检</h2>

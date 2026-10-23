@@ -372,7 +372,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
           <HistoricalItem key={item.finding_id} item={item} api={api} refresh={refresh} />)}
       </section>}
       {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
-      {analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}
+      <div className="content-card-grid">{analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}</div>
     </>}
     {analysis && analysis.events.length > 0 && <details><summary>Agent 分析记录（{analysis.events.length}）</summary>
       <ol className="analysis-events">{analysis.events.map((item, index) => <li key={index}>

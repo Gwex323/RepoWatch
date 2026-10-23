@@ -185,11 +185,11 @@ pre { margin: 0; }
 .segmented span { font-size: 10px; margin-left: 6px; color: #b2975c; }
 .checkbox-label { display: flex; align-items: center; gap: 8px; color: #778969; font-size: 11px; line-height: 1.8; }
 .checkbox-label input { width: 14px; height: 14px; padding: 0; accent-color: var(--green); flex-shrink: 0; margin: 0; }
-.activity-page { max-width: 950px; }
+.activity-page { max-width: none; }
 .activity-page .event-row { padding: 17px 0; }
 .activity-page .event-copy strong { font-size: 12px; }
 .activity-page .event-row > time { font-size: 11px; }
-.settings-page { max-width: 900px; }
+.settings-page { max-width: none; }
 .settings-list { margin: 0; border-top: 1px solid var(--line); }
 .settings-list > div { display: grid; grid-template-columns: 200px minmax(0, 1fr); border-bottom: 1px solid var(--line); padding: 15px 0; gap: 20px; font-size: 12px; }
 .settings-list dt { color: #95a08b; }
@@ -309,7 +309,7 @@ pre { margin: 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
-.memory-page { max-width: 1040px; }
+.memory-page { max-width: none; }
 .github-settings { margin-bottom: 34px; padding-bottom: 24px; border-bottom: 1px solid var(--line); }
 .github-settings .section-heading { gap: 12px; flex-wrap: wrap; }
 .github-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
@@ -593,7 +593,7 @@ body { font-size: 14px; line-height: 1.65; }
 h1 { font-size: 28px; letter-spacing: -.5px; }
 h2, .section-heading h2 { font-size: 16px; }
 h3, .section-heading h3 { font-size: 14px; }
-.main-content { max-width: 1320px; padding: 32px 40px; }
+.main-content { width: 100%; max-width: none; padding: 28px 32px; }
 .page-heading { align-items: flex-start; }
 .page-description { color: var(--muted); margin-top: 7px; max-width: 650px; font-size: 14px; }
 .heading-actions .mode-label { display: none; }
@@ -670,3 +670,41 @@ select { font: inherit; max-width: 100%; }
 .execution-panel .tabs { display: flex; gap: 8px; border-bottom: 1px solid var(--line); margin: 20px 0; padding-bottom: 8px; }
 .execution-panel .tabs button { border: 0; border-radius: 6px; padding: 10px 16px; color: #53665a; background: transparent; }
 .execution-panel .tabs button.active { background: #eaf3ee; color: #205b41; }
+
+/* Use available workspace width; each card keeps a readable minimum width. */
+.settings-page, .activity-page, .memory-page, .execution-panel { width: 100%; min-width: 0; }
+.agent-model-grid, .provider-list, .content-card-grid, .repository-catalog {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 400px), 1fr));
+  align-items: start; gap: 20px;
+}
+.repository-catalog > :not(.repository-row) { grid-column: 1 / -1; }
+.repository-catalog .repository-row.large { margin: 0; padding: 20px; }
+.repository-catalog .repository-row > .tag { display: none; }
+.content-card-grid > * { min-width: 0; margin: 0; border: 1px solid var(--line); border-radius: 8px; padding: 20px; }
+.content-card-grid { margin: 20px 0; }
+.content-card-grid p, .content-card-grid code { overflow-wrap: anywhere; }
+.agent-model-card { padding: 18px; }
+.agent-role-id { margin-top: 5px; }
+.agent-model-flows { margin: 4px 0 10px; }
+.agent-model-selection { padding: 12px 0; margin-bottom: 6px; gap: 10px; }
+.agent-model-selection > .button { justify-self: start; }
+.default-model-form { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.default-model-form > p { grid-column: 1 / -1; }
+.provider-list > .diagnosis-meta { grid-column: 1 / -1; }
+.provider-card .execution-actions { margin-bottom: 0; }
+.settings-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 0 32px; }
+@media (min-width: 1200px) {
+  .overview-columns { grid-template-columns: minmax(0, 1.6fr) minmax(340px, 1fr); }
+  .execution-config[aria-label="项目运行配置"] { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  .execution-config[aria-label="项目运行配置"] > :not(label) { grid-column: 1 / -1; }
+  .execution-config[aria-label="项目运行配置"] > .execution-config-row { grid-column: auto; }
+}
+@media (max-width: 700px) {
+  .agent-model-grid, .provider-list, .content-card-grid, .repository-catalog { grid-template-columns: minmax(0, 1fr); }
+  .default-model-form { grid-template-columns: minmax(0, 1fr); }
+  .content-card-grid > * { padding: 16px; }
+}
+
+.agent-model-grid { display: flex; flex-wrap: wrap; align-items: flex-start; }
+.agent-model-grid > .agent-model-card { flex: 1 1 400px; min-width: 0; }
+@media (max-width: 700px) { .agent-model-grid > .agent-model-card { flex-basis: 100%; } }
