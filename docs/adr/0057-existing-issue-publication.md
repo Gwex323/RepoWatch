@@ -23,7 +23,8 @@ GitHub Issue 同步后的分析记录已有 `context.issue`，但创建修复任
 
 - 已有 Issue：先 GET 原 Issue，核对仓库、编号、URL 和真实 Issue 类型，
   保存 `source_issue` 本地操作记录，然后沿用分支与 PR 发布流程。
-  创建 PR 前再次核对原 Issue，正文使用 `Closes #原编号`。
+  创建 PR 前再次核对原 Issue；引用模式由 ADR 0059 的范围验收决定：
+  部分修复为 `Refs #原编号`，当前补丁通过全部已登记必需项验收后才为 `Closes`。
   原 Issue 可以是 open 或 closed；系统不会重开、编辑或评论原 Issue。
   此路径不执行创建 Issue 的 POST 请求。
 - 系统新发现：仍使用原有 Issue 创建与 PR 创建流程，保留原请求内容和幂等键。

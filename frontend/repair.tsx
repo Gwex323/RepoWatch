@@ -22,6 +22,7 @@ type Repair = {
   source_kind?: 'discovered' | 'existing_issue' | null;
   source_issue?: { number: number; url: string } | null;
   source_error?: string | null;
+  task_scope?: { total: number; done: number; complete: boolean; reviewed: boolean; combination_pending: boolean };
   context: { finding: { title: string } };
   patch: { summary: string; edits: { path: string }[] } | null;
   diff: string; verification: Verification | null;
@@ -110,6 +111,8 @@ const errors: Record<string, string> = {
   repair_fork_conflict: '账号下已有同名但来源不同的仓库，未覆盖。',
   repair_remote_conflict: '远程分支或发布记录不匹配，已停止，未覆盖已有内容。',
   repair_issue_reference_invalid: '原 Issue 与仓库或分析记录不匹配，已停止；请重新同步 Issue 并分析。',
+  repair_scope_changed: '范围、原问题或补丁证据已变化，原发布意图已停止；请先核对已有远程记录。',
+  repair_scope_evidence_invalid: '补丁审查的逐项覆盖未通过后端校验，未判定整体完成。',
   repair_issue_publication_conflict: '旧任务已有不同的 Issue / PR 发布记录，请先人工核对远程结果；系统不会再次创建或覆盖。',
   repair_remote_scan_limit: '远程记录超过核对范围，未重复发布。',
   repair_publication_uncertain: '上次发布结果尚不能确认，未重复提交；稍后重试将再次核对。',
@@ -320,6 +323,9 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
         来源：<a href={task.source_issue.url} target="_blank" rel="noopener noreferrer">
           原 Issue #{task.source_issue.number}</a> · 修复 PR 将关联原编号</p>}
       {task.source_error && task.source_error !== task.error && <p role="alert">{message(task.source_error)}</p>}
+      {task.task_scope && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
+        {' · '}{task.task_scope.complete ? '当前范围已核验' : task.task_scope.reviewed
+          ? '整体尚未完成，部分修复不关闭原 Issue' : '完整性未核验，不自动关闭原 Issue'}</p>}
       {task.status === 'running' && <p><Loader2 size={14} className="spin" />正在处理修复任务</p>}
       {task.error && task.status !== 'waiting_environment' && <p role="alert">
         {task.error === 'docker_unavailable' && '上次失败：'}{message(task.output_recovery_available

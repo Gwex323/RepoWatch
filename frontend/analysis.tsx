@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { Check, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
 import { RepairPanel } from './repair';
 import { agentModelEvent } from './agent-models';
+import { TaskScopePanel, type TaskScope } from './task-scope';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Finding = {
@@ -29,6 +30,8 @@ type Analysis = {
   id: string; status: string; error: string | null; version: number; revision: string;
   current: boolean; created: number; findings: Finding[];
   historical_review?: HistoricalReview | null;
+  task_scope?: TaskScope;
+  report_recovery?: { available: boolean };
   report: { summary: string; limitations: string[]; files_read: string[]; model?: string;
     execution_scope?: { kind: string; executed: number | null; skipped: number;
       uncovered: string[]; complete: boolean } } | null;
@@ -47,7 +50,10 @@ const statuses: Record<string, string> = {
 };
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
-  analysis_model_changed: '模型配置已变化，请刷新后重试。',
+  scope_review_incomplete: '范围审查遗漏验收项或版本不一致；原范围已保留，请继续分析与范围审查。',
+  scope_mapping_invalid: '问题与验收项的关联不完整，请继续范围审查。',
+  scope_changed: '任务范围已变化，请刷新后重新审查。',
+  analysis_model_changed: '模型配置已变化，请刷新后重试；分析将使用当前配置重新执行。',
   analysis_model_key_required: '请填写分析模型的 API Key。',
   analysis_model_new_key_required: '更换服务地址时，请重新填写对应的 API Key。',
   analysis_model_key_unavailable: '无法读取模型密钥，请在运行配置中重新保存。',
@@ -107,6 +113,15 @@ function eventLabel(item: Analysis['events'][number]) {
   const name = names[item.agent] ?? item.agent;
   if (item.kind === 'model_configuration') return agentModelEvent(item.agent);
   if (item.kind === 'attempt') return '开始新一次分析';
+  if (item.kind === 'report_checkpoint_saved') return '已保存最终审查输入及真实读取、交接记录';
+  if (item.kind === 'report_checkpoint_invalidated') return '已保存的审查依据发生变化，重新执行完整分析';
+  if (item.kind === 'report_resumed') return '从已保存证据恢复最终报告，仅调用独立审查员';
+  if (item.kind === 'report_budget') {
+    try {
+      const budget = JSON.parse(item.agent) as { max_tokens: number; reserve_seconds: number; review_items: number };
+      return `报告预算：${budget.review_items} 项复核 · 输出上限 ${budget.max_tokens} tokens · 预留 ${budget.reserve_seconds} 秒`;
+    } catch { return '已分配最终报告预算'; }
+  }
   if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
   if (item.kind === 'handoff_retry') return `${name} · 指定交接未通过，使用同一轮证据重试一次`;
   if (item.kind === 'handoff_validation') {
@@ -326,7 +341,14 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
     </p>}
     {analysis && ['failed', 'interrupted'].includes(analysis.status) &&
       <button className="button secondary" disabled={busy || !analysis.current}
-        onClick={() => perform(`/analyses/${analysis.id}/retry`, { version: analysis.version })}><RefreshCw size={15} />重试分析</button>}
+        onClick={() => perform(`/analyses/${analysis.id}/retry`, { version: analysis.version })}><RefreshCw size={15} />
+        {analysis.report_recovery?.available ? '从已保存证据恢复报告' : '重试分析'}</button>}
+    {analysis?.report_recovery?.available && <p className="diagnosis-meta">
+      已保存审查输入。恢复时会再次检查源码、执行记录、需求和模型配置；依据变化后将重新分析。
+    </p>}
+    {analysis?.task_scope && <TaskScopePanel key={analysis.id} scope={analysis.task_scope} analysisId={analysis.id}
+      analysisVersion={analysis.version} analysisStatus={analysis.status} current={analysis.current}
+      envId={envId} api={api} refresh={refresh} />}
     {analysis?.report && <>
       <p>{analysis.report.summary}</p>
       {analysis.report.execution_scope?.kind === 'desktop_offline' &&
