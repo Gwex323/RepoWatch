@@ -33,6 +33,7 @@ export function MemoryView({ repositories, api }: {
 }) {
   const [selected, setSelected] = useState(repositories[0]?.id ?? '');
   return <section className="memory-page">
+    {!repositories.length && <div className="empty"><BookOpen size={28} /><p>添加仓库后，即可保存项目知识。</p></div>}
     <div className="memory-scope">
       <label>所属仓库<select aria-label="所属仓库" value={selected} onChange={e => setSelected(e.target.value)}>
         {repositories.map(repo => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
@@ -120,6 +121,7 @@ function RepositoryMemory({ repoId, revision, api }: {
       <label>筛选代码版本<input value={revisionFilter} maxLength={128}
         onChange={e => { setRevisionFilter(e.target.value); setOffset(0); }} /></label>
     </div>
+    <details className="disclosure"><summary>知识使用情况与维护建议</summary>
     {metrics && <div className="memory-metrics" aria-label="记忆效果指标">
       <span>有记忆分析 {metrics.with_memory.analyses}</span>
       <span>无记忆分析 {metrics.without_memory.analyses}</span>
@@ -133,6 +135,7 @@ function RepositoryMemory({ repoId, revision, api }: {
         <span>{item.days_since_last_read === null ? '从未引用' : `${item.days_since_last_read} 天未引用`}</span>
       </div>)}
     </div>}
+    </details>
     {error && <div className="error-inline" role="alert">{error}</div>}
     {draft && <form className="memory-editor" onSubmit={e => {
       e.preventDefault();
