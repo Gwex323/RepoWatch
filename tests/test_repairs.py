@@ -1825,8 +1825,10 @@ def test_output_recovery_reduces_reasoning_and_keeps_it_for_later_calls(role, ef
         return SimpleNamespace(output=[])
 
     workspace = SimpleNamespace(check=lambda: None, verification=None)
+    # Exercise output budgets after the review's mandatory evidence prerequisite.
     model = RepairStageModel(SimpleNamespace(get_response=provider), role, workspace,
-                             lambda *args: events.append(args), dict, {"timeouts": 0})
+                             lambda *args: events.append(args),
+                             lambda: {"verification_read": True}, {"timeouts": 0})
     for _ in range(2):
         asyncio.run(model.get_response("trusted instructions", [], handoffs=[], tools=[],
                                       model_settings=settings))

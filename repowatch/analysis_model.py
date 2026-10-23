@@ -12,6 +12,7 @@ from cryptography.fernet import InvalidToken
 from openai import AsyncOpenAI
 
 from .model_providers import ModelProviders, validate_model_config
+from .report_recovery import digest
 from .roles import FLOW_ROLES, ROLE_DETAILS, ROLES
 from .store import Conflict
 
@@ -295,6 +296,18 @@ class AnalysisModel:
             direct = {item["role"]: dict(item) for item in db.execute("SELECT * FROM agent_models")}
         return dict(row) if row else None, roles, direct
 
+    @staticmethod
+    def _identity(row, rows):
+        # Hash encrypted credentials as well: even a key-only replacement must
+        # invalidate recovery. Neither keys nor encrypted values leave this hash.
+        return digest({"settings": dict(row) if row else None,
+                       "roles": {role: dict(rows[role]) if role in rows else None
+                                 for role in FLOW_ROLES["analysis"]}})
+
+    def recovery_identity(self):
+        row, rows, _ = self._snapshot()
+        return self._identity(row, rows)
+
     def configuration(self):
         row, rows, direct = self._snapshot()
         roles = {role: {**public_model(role, rows.get(role)),
@@ -456,6 +469,18 @@ class AnalysisModel:
             except (InvalidToken, UnicodeError):
                 raise Conflict("analysis_model_key_unavailable") from None
         configs = {role: json.loads(rows[role]["config"]) for role in required}
+        if (flow == "analysis" and context.get("_review_model_identity") is not None
+                and context["_review_model_identity"] != self._identity(row, rows)):
+            raise Conflict("analysis_model_changed")
+        original_event = event
+
+        def event(kind, value):
+            if kind == "review_checkpoint":
+                for secret in sorted(set(secrets.values()), key=len, reverse=True):
+                    value = value.replace(json.dumps(secret, ensure_ascii=False)[1:-1],
+                                          "[REDACTED]")
+            return original_event(kind, value)
+
         models, efforts = {}, {}
         first = required[0]
         uniform = all(configs[role] == configs[first] and secrets[role] == secrets[first]

@@ -825,3 +825,31 @@ The workbench was restored at port 8765, all 27 protected table projections matc
 integrity/FK checks passed, and QA port 8797 was closed. No formal desktop pipeline,
 model call, source modification, repair, or GitHub write was triggered. See ADR 0022
 for precise scope, API constraints, limits and the backup path.
+
+## 2026-10-23：最终审查预算与检查点恢复（Issue #61）
+
+从主干 `51be49f` 实现 ADR 0061。26 项新增离线恢复测试覆盖六项需求预算、上限与预留时间、
+真实工具读取后的范围合并、完整需求及限制保留、观察裁剪标记、重启后只调用审查员、
+模型/密钥/Issue/范围版本/协议/源码/执行变化失效、取消竞争、引用造假拒绝、审查读取刷新
+检查点与旧任务无检查点的完整重试。恢复报告必须经过原有 schema 和精确源码校验。
+
+验证记录（均为隔离测试，未调用真实供应商）：
+
+- 首次完整后端回归：892 通过、29 失败、12 个可选 Docker 测试跳过，735.39 秒。
+  其中 24 项是 GLM 用例对旧逐行证据结构的断言；已改为合并文本块，未删减引用校验。
+  另 4 项修复预算单测在未修改的主干 `51be49f` 上复现同样的
+  `repair_review_evidence_required`，补齐“已读取审查依据”的测试前置条件后通过。
+  余下 1 项是临时 JSON 文件替换的 Windows 权限错误，重新运行后通过。
+- 修正后重跑检查点、完整 GLM 兼容和记忆验证三个模块：77 通过，46.59 秒。
+  重跑相关修复预算用例：8 通过，3.23 秒。最终 pytest 失败缓存为空；没有把首次全量
+  回归表述为一次全绿。随后新增的两个损坏类型用例已包含在上述 77 项复测中。
+- 三项分析页面浏览器回归全部通过，34.5 秒：普通重试、检查点恢复、历史问题人工处置。
+  修正已有浏览器用例对下拉框、独立配置折叠区和异步开关的定位与等待方式。
+  桌面/移动端截图已检查，页面无横向溢出，恢复按钮与事件提示按状态更新。
+- Ruff、Python 编译、TypeScript/Vite 构建及 `git diff --check` 通过。
+
+临时浏览器服务使用分支目录下的新库 `data/report-recovery-browser-qa.db` 和端口 8780，
+验证后按 PID/命令行核对并关闭。生产 8765 服务及其个人数据库未修改。
+未重跑 `gateway-model-assistant` Issue #2，未在目标仓库创建 Issue/PR。
+旧失败记录在更新前没有检查点，更新后的首次重试仍需完整分析；不得用旧报告补造检查点。
+PR #60 的范围模块仍待独立合并，后续集成须保留范围 schema、工具及最终验收门禁。
