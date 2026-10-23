@@ -56,7 +56,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_model_changed: '模型配置已变化，请刷新后重试；分析将使用当前配置重新执行。',
   analysis_model_key_required: '请填写分析模型的 API Key。',
   analysis_model_new_key_required: '更换服务地址时，请重新填写对应的 API Key。',
-  analysis_model_key_unavailable: '无法读取模型密钥，请在运行配置中重新保存。',
+  analysis_model_key_unavailable: '无法读取模型密钥，请在「设置 → 模型与供应商」中重新保存。',
   secure_storage_unavailable: '本机系统凭据库不可用，密钥尚未保存。',
   analysis_execution_required: '先完成一次测试或启动，系统会自动安排分析。',
   environment_busy: '环境正在执行任务，完成后将自动安排分析。',
@@ -68,7 +68,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_failed: '分析遇到未分类错误。请查看失败阶段和服务日志；旧记录可能没有详细原因。',
   analysis_timeout_or_stopped: '分析已超时或停止，可以重新尝试。',
   analysis_interrupted: '上次分析因服务中断而停止，可以重新尝试。',
-  analysis_authentication_failed: '模型服务拒绝了密钥，请在运行配置中更新。',
+  analysis_authentication_failed: '模型服务拒绝了密钥，请在「设置 → 模型与供应商」中更新。',
   analysis_rate_limited: '模型服务限流或额度不足，请检查账户后重试。',
   analysis_provider_timeout: '模型服务响应超时。请检查模型服务负载或网络；旧失败记录不会因配置更新而自动消失。',
   analysis_provider_timeout_exhausted: '模型请求超过等待时限，且本次允许的自动重试已用完。请检查模型服务负载或网络后再重试。',
@@ -317,7 +317,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       {analyses.map(item => <option key={item.id} value={item.id}>{new Date(item.created * 1000).toLocaleString('zh-CN')} · {statuses[item.status]}</option>)}
     </select></label>}
     {error && <p role="alert">{error}</p>}
-    {analysis?.status === 'waiting_model' && <p className="error-inline">请在“运行配置 → 智能体模型配置”配置分析所需的四个角色，并启用模型工作流，任务将自动继续。</p>}
+    {analysis?.status === 'waiting_model' && <p className="error-inline">请在“设置 → 模型与供应商 → 分配模型”配置分析所需的四个角色，并启用模型工作流，任务将自动继续。</p>}
     {analysis?.status === 'running' && <p><Loader2 size={14} className="spin" /> {names[stage ?? ''] ?? '正在准备源码与执行证据'}</p>}
     {analysis?.status === 'running' &&
       ['timeout_retry', 'retry_call', 'output_retry', 'format_retry', 'evidence_retry'].includes(analysis.events.at(-1)?.kind ?? '') &&
@@ -346,9 +346,9 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
     {analysis?.report_recovery?.available && <p className="diagnosis-meta">
       已保存审查输入。恢复时会再次检查源码、执行记录、需求和模型配置；依据变化后将重新分析。
     </p>}
-    {analysis?.task_scope && <TaskScopePanel key={analysis.id} scope={analysis.task_scope} analysisId={analysis.id}
+    {analysis?.task_scope && <details className="disclosure"><summary>任务验收范围 · {analysis.task_scope.done} / {analysis.task_scope.total} 项已完成</summary><TaskScopePanel key={analysis.id} scope={analysis.task_scope} analysisId={analysis.id}
       analysisVersion={analysis.version} analysisStatus={analysis.status} current={analysis.current}
-      envId={envId} api={api} refresh={refresh} />}
+      envId={envId} api={api} refresh={refresh} /></details>}
     {analysis?.report && <>
       <p>{analysis.report.summary}</p>
       {analysis.report.execution_scope?.kind === 'desktop_offline' &&
@@ -372,7 +372,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
           <HistoricalItem key={item.finding_id} item={item} api={api} refresh={refresh} />)}
       </section>}
       {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
-      {analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}
+      <div className="content-card-grid">{analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}</div>
     </>}
     {analysis && analysis.events.length > 0 && <details><summary>Agent 分析记录（{analysis.events.length}）</summary>
       <ol className="analysis-events">{analysis.events.map((item, index) => <li key={index}>

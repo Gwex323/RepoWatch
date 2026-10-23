@@ -160,7 +160,7 @@ export function TaskScopePanel({ scope, analysisId, analysisVersion, analysisSta
       <p>{scope.review?.rationale ?? '尚无独立范围审查记录。'}</p>
     </details>
     {scope.total === 0 && <p>尚未拆解验收项；未登记不代表没有待办。</p>}
-    {scope.items.map(item => <article className="analysis-finding" key={`${scope.version}-${item.key}`}>
+    <div className="content-card-grid">{scope.items.map(item => <article className="analysis-finding" key={`${scope.version}-${item.key}`}>
       <div className="section-heading"><h4>{item.title}</h4>
         <span className="tag neutral">{states[item.status] ?? '待调查'}</span></div>
       <p>{item.expected}</p>
@@ -179,7 +179,7 @@ export function TaskScopePanel({ scope, analysisId, analysisVersion, analysisSta
       </details>}
       {scope.reviewed && current && !scope.stale && <ObservationForm item={item} scope={scope}
         repairs={repairs} api={api} refresh={refresh} />}
-    </article>)}
+    </article>)}</div>
     {canReview && <>
       <button className="button secondary" disabled={busy} onClick={() => {
         setBusy(true); setNotice('');

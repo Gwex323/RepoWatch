@@ -76,7 +76,7 @@ const actions: Record<string, string> = {
   access: '检查访问地址', download: '下载源码', setup: '安装环境', test: '执行测试', start: '启动项目', stop: '停止项目', delete: '清理环境',
 };
 const errors: Record<string, string> = {
-  github_active_account_required: '请先在运行配置中连接并选择 GitHub 账号。',
+  github_active_account_required: '请先在「设置 → GitHub 账号」中连接并选择账号。',
   github_invalid_token: 'GitHub 令牌已失效，请重新连接账号。',
   github_credential_missing: '无法读取账号凭据，请重新连接账号。',
   github_repository_unavailable: '仓库不存在，或所选账号没有读取权限。',
@@ -329,7 +329,7 @@ function IssuesPanel({ repo, api, environment, onAnalysisSubmitted }: {
           <span className="issue-number">#{issue.number}</span>
           <div className="issue-copy">
             <strong>{issue.title}</strong>
-            <span>{issue.state}</span>
+            <span>{issue.state === 'open' ? '待解决' : '已关闭'}</span>
           </div>
           <div className="issue-actions">
             {issue.url && <a className="icon-button" title="打开 Issue" href={issue.url}
@@ -346,7 +346,7 @@ function IssuesPanel({ repo, api, environment, onAnalysisSubmitted }: {
               superseded: '已被新分析替代' } as Record<string, string>)[submitted[issue.id].status]
               ?? '分析请求已提交'}。
             <button className="text-link" onClick={() => {
-              document.getElementById('repository-analysis')?.scrollIntoView({ behavior: 'smooth' });
+              onAnalysisSubmitted(submitted[issue.id].id);
             }}>查看分析进度与结果</button>
           </p>}
         </div>)}</div>}
@@ -412,6 +412,7 @@ export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
   const [error, setError] = useState('');
   const [autoRun, setAutoRun] = useState(true);
   const [tab, setTab] = useState('logs');
+  const [section, setSection] = useState(initialEnvId ? 'analysis' : 'issues');
   const refresh = useCallback(async () => {
     const data = await api<Environment[]>(`/repositories/${repo.id}/environments`);
     const id = data.some(env => env.id === selectedRef.current || env.reused_environment_id === selectedRef.current)
@@ -467,7 +468,7 @@ export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
           selectedRef.current = created.id; setSelected(created.id); setTab('logs');
         })}><Download size={15} />下载最新版本</button>
     </div>
-    <label className="checkbox-label"><input type="checkbox" checked={autoRun} disabled={busy || chainActive}
+    <details className="disclosure"><summary>下载后的执行选项</summary><label className="checkbox-label"><input type="checkbox" checked={autoRun} disabled={busy || chainActive}
       onChange={e => setAutoRun(e.target.checked)} />下载后自动准备环境、测试、启动并分析</label>
     <p className="diagnosis-meta">自动流程沿用本仓库已保存的安装联网选项；缺命令或执行失败会暂停，不会跳过测试。</p>
     <div className="execution-engine">
@@ -479,9 +480,13 @@ export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
       {readiness && !readiness.ready && <span>{errorText(readiness.reason)}</span>}
       <span>模型诊断：{readiness?.diagnosis_model?.enabled ? readiness.diagnosis_model.model : '未配置'}</span>
     </div>
+    </details>
+    <nav className="section-nav" aria-label="仓库任务分区">{[['issues', '已有 Issue'], ['analysis', '分析与修复'], ['environment', '运行环境'], ['schedule', '定时巡检']].map(([key, label]) => <button key={key} aria-current={section === key ? 'page' : undefined} className={section === key ? 'active' : ''} onClick={() => setSection(key)}>{label}</button>)}</nav>
+    <div hidden={section !== 'issues'}><p className="section-intro">同步仓库中的问题，选择一个 Issue 进行分析。分析完成后，在「分析与修复」中查看结果并确认复现。</p>
+    {!env?.revision && <p className="action-hint">请先点击「下载最新版本」准备源码，再分析 Issue。</p>}
     <IssuesPanel repo={repo} api={api} environment={env ?? null}
-      onAnalysisSubmitted={setIssueAnalysisId} />
-    <SchedulePanel repo={repo} api={api} />
+      onAnalysisSubmitted={id => { setIssueAnalysisId(id); setSection('analysis'); }} /></div>
+    <div hidden={section !== 'schedule'}><p className="section-intro">设置每天自动检查的时间。工作台运行时才会执行巡检。</p><SchedulePanel repo={repo} api={api} /></div>
     {error && <div className="error-inline" role="alert">{error}</div>}
     {!env ? <div className="empty"><Download size={28} /><p>尚未下载项目源码</p></div> : <>
       <label className="execution-version">环境版本<select value={selected} onChange={e => {
@@ -519,15 +524,17 @@ export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
         {env.pipeline.error && <p>{errorText(env.pipeline.error)}</p>}
         {env.pipeline.state === 'waiting_model' && <p>请配置分析所需角色的模型并启用模型工作流，流水线将自动继续。</p>}
         {env.pipeline.state === 'waiting_configuration' &&
-          <button className="button secondary" onClick={() => setTab('config')}>补齐运行配置</button>}
+          <button className="button secondary" onClick={() => { setTab('config'); setSection('environment'); }}>补齐运行配置</button>}
       </div>}
       {env.access_result && <p role="status">访问地址已检查：HTTP {env.access_result.status_code}
         {env.access_result.authentication_required ? '（项目需要登录）' : ''}</p>}
       {env.config?.project_profile && <DesktopCoverage profile={env.config.project_profile}
         scope={env.test_result?.desktop_scope} />}
+      <div hidden={section !== 'analysis'}><p className="section-intro">查看分析结论与验收范围，按步骤复现并反馈结果；修复进度和 PR 会显示在下方。</p>
       <AnalysisPanel key={env.id} envId={env.id} version={env.version} api={api}
         focusAnalysisId={issueAnalysisId}
         pipelineActive={chainActive && env.pipeline?.stage !== 'analysis'} />
+      </div><div hidden={section !== 'environment'}><p className="section-intro">查看环境状态，补齐运行配置，或从上次结果继续执行。遇到故障时再展开日志。</p>
       <FailureDiagnosis key={`${env.id}:${env.diagnosis?.job_id}:${env.diagnosis?.current}`}
         env={env} locked={!!locked} onApply={() => void perform(() => api(
           `/environments/${env.id}/diagnoses/${env.diagnosis!.job_id}/apply`, { version: env.version },
@@ -559,11 +566,12 @@ export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
           onClick={() => setTab('config')}>运行配置</button>
       </div>
       {tab === 'config' && env.config ? <Configuration key={env.id + JSON.stringify(env.config)} env={env} api={api} onSaved={refresh} /> :
-        <div className="execution-jobs">{env.jobs.map(job => <details key={job.id} open={job.id === env.jobs[0]?.id}>
+        <div className="execution-jobs">{env.jobs.map(job => <details key={job.id}>
           <summary>{actions[job.action]} · {{ queued: '排队中', running: '执行中', completed: '已完成', failed: '未完成' }[job.state]}</summary>
           {job.error && <p className="error-inline">{errorText(job.error)}</p>}
           <pre>{job.log || (job.state === 'running' ? '正在执行，完成后更新日志。' : '暂无命令输出')}</pre>
         </details>)}</div>}
+      </div>
     </>}
   </section>;
 }
