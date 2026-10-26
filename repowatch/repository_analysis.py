@@ -54,10 +54,12 @@ from .report_recovery import (
     source_evidence,
     valid_checkpoint,
 )
+from .report_scope_correction import MAPPING_CORRECTION_ERRORS, ReportScopeCorrection
 from .roles import FLOW_ROLES, model_for_role, reasoning_for_role
-from .scope_models import ScopeRequirement, ScopeReview
+from .scope_models import ScopeRequirement, ScopeReview, scope_mapping_issues
 from .store import Conflict, Missing, uid
 from .task_scopes import (
+    current_scope_findings,
     ensure_scope,
     register_scope,
     request_scope_review,
@@ -206,7 +208,8 @@ class StageModel(Model):
                  final_input=None, review_evidence=None, required_read=None,
                  separate_schema_from_tools=False, retry_handoff_mismatch=False,
                  prepare_review=None, finalization_reserve=FINALIZATION_RESERVE_SECONDS,
-                 tool_parameter_models=None, review_contract=None, evidence_sources=None):
+                 tool_parameter_models=None, review_contract=None, evidence_sources=None,
+                 scope_context=None):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
@@ -222,6 +225,7 @@ class StageModel(Model):
         self.tool_token_floor = 0
         self.review_contract = review_contract
         self.evidence_sources = evidence_sources
+        self.scope_context = scope_context
 
     def handoff_validation(self, response, expected):
         calls = [item for item in response.output if item.type == "function_call"]
@@ -504,7 +508,7 @@ class StageModel(Model):
                     if any(item.type == "message" and any(
                         part.type == "refusal" for part in item.content
                     ) for item in response.output):
-                        raise ModelRefusalError("Model refused source-evidence correction.")
+                        raise ModelRefusalError("Model refused report correction.")
                     if any(item.type == "function_call" for item in response.output):
                         raise AnalysisFailure("analysis_finalization_not_followed")
                     issue = report_output_issue(response, report_correction.schema)
@@ -518,7 +522,11 @@ class StageModel(Model):
                             response = report_correction.response_for(response, merged)
                         except ValueError as exc:
                             issue = (exc.args[0] if exc.args and isinstance(exc.args[0], str)
-                                     and exc.args[0] in CORRECTION_ERRORS
+                                     and exc.args[0] in (
+                                         CORRECTION_ERRORS | MAPPING_CORRECTION_ERRORS
+                                     )
+                                     else "scope_correction_invalid"
+                                     if report_correction.kind == "scope_mapping_correction"
                                      else "evidence_correction_invalid")
                     if issue is not None:
                         self.event("report_validation", issue)
@@ -529,7 +537,7 @@ class StageModel(Model):
                         report_correction.feedback = issue
                         self.event("format_retry", self.role)
                         continue
-                    self.event("evidence_correction_applied", self.role)
+                    self.event(report_correction.kind + "_applied", self.role)
                 if review_schema is not None:
                     issue = report_output_issue(response, review_schema)
                     if (issue is None and self.review_contract is not None
@@ -542,6 +550,19 @@ class StageModel(Model):
                             ))
                             issue = self.review_contract(review)
                     if issue:
+                        if issue == "scope_mapping_invalid" and self.scope_context is not None:
+                            context = self.scope_context()
+                            mapping = report_mapping_issues(review, context)
+                            for detail in mapping:
+                                self.event("scope_mapping_validation", json.dumps(detail))
+                            if self.retries.format_used >= MAX_FORMAT_RETRIES:
+                                raise AnalysisFailure("scope_mapping_invalid")
+                            self.retries.format_used += 1
+                            report_correction = ReportScopeCorrection(review, context, mapping)
+                            self.event("scope_mapping_correction", json.dumps({
+                                "role": self.role, "items": len(mapping),
+                            }))
+                            continue
                         self.event("report_validation", issue)
                         self.event("report_diagnostics", report_diagnostics(response))
                         if self.retries.format_used >= MAX_FORMAT_RETRIES:
@@ -657,7 +678,7 @@ class StageModel(Model):
                 observation = getattr(self.delegate, "observation", {})
                 self.event("output_limit", json.dumps({
                     "role": self.role,
-                    "phase": ("evidence_correction" if report_correction is not None else
+                    "phase": (report_correction.kind if report_correction is not None else
                               "tool_arguments" if tool_repair is not None else
                               "report" if review_schema is not None else "exploration"),
                     "max_tokens": tokens,
@@ -918,10 +939,21 @@ def evidence_issues(review, context, read, ranges):
     return issues
 
 
+def report_mapping_issues(review, context):
+    scope = context.get("task_scope") or {}
+    return scope_mapping_issues(
+        [item.model_dump() for item in review.findings],
+        review.scope_review.model_dump() if review.scope_review else None,
+        {item["key"] for item in scope.get("items", [])},
+        {item["id"] for item in context.get("current_scope_findings", [])},
+    )
+
+
 def scope_report_issue(review, context):
     scope = context.get("task_scope") or {}
     if not scope.get("items"):
-        return None
+        return ("scope_mapping_invalid" if context.get("task_scope") is not None
+                and report_mapping_issues(review, context) else None)
     if review.scope_review is None:
         return "scope_review_required"
     result = review.scope_review
@@ -932,15 +964,17 @@ def scope_report_issue(review, context):
             or len(exclusions) != len(set(exclusions))
             or set(exclusions) != {item["key"] for item in scope.get("execution_limits", [])}):
         return "scope_review_incomplete"
-    return None
+    return "scope_mapping_invalid" if report_mapping_issues(review, context) else None
 
 
 def validate_report(report, context):
     parsed = Review.model_validate({
         key: report[key] for key in Review.model_fields if key in report
     })
-    if scope_report_issue(parsed, context):
-        raise AnalysisFailure("scope_review_incomplete")
+    issue = scope_report_issue(parsed, context)
+    if issue:
+        raise AnalysisFailure("scope_mapping_invalid" if issue == "scope_mapping_invalid"
+                              else "scope_review_incomplete")
     read = set(report.get("files_read", []))
     expected = [f"{a} -> {b}" for a, b in zip(ROLES, ROLES[1:])]
     if report.get("handoffs") != expected:
@@ -1097,8 +1131,12 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
         "a skipped or excluded test as a pass. Append a stronger item if needed, rather "
         "than weakening an existing one. "
         "current_scope_findings are persisted findings from this same analysis. Do not "
-        "duplicate them: map their IDs in scope_review.items[].finding_ids. Their human "
-        "status is authoritative; review cannot change reproduction or repair permission. "
+        "duplicate them: map their IDs in scope_review.items[].finding_ids. "
+        "IDs must be copied exactly from current_scope_findings; no other IDs are valid. "
+        "New findings do not have database IDs yet: link them ONLY with findings[].scope_keys "
+        "using registered task_scope.items[].key values, never invented finding IDs or indices. "
+        "Their human status is authoritative; review cannot change reproduction or repair "
+        "permission. "
         "For desktop_offline evidence, only the selected container unittest scope was tested. "
         "Disclose Windows GUI/native/client integration exclusions; never claim a desktop app "
         "was launched, HTTP checked, or fully accepted from partial offline tests. "
@@ -1192,6 +1230,7 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             evidence_sources=(lambda: source_evidence(context, {
                 "files_read": sorted(inspected), "read_ranges": ranges,
             })) if role == ROLES[-1] else None,
+            scope_context=(lambda: context) if role == ROLES[-1] else None,
         )
         for role in ROLES
     }
@@ -1296,7 +1335,7 @@ class Analyses:
     def event(self, analysis_id, kind, agent):
         with self.store.connection() as db:
             limit = (4096 if kind in {"tool_arguments_invalid", "tool_arguments_preserved",
-                                     "output_limit"}
+                                     "output_limit", "scope_mapping_validation"}
                      else 1024 if kind == "failure" else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
@@ -1837,6 +1876,9 @@ class Analyses:
                 raise AnalysisFailure("analysis_cancelled")
             with self.store.connection() as db:
                 context["task_scope"] = scope_packet(db, row["id"])
+                existing = current_scope_findings(db, row["id"])
+                if existing or "current_scope_findings" in context:
+                    context["current_scope_findings"] = existing
                 original_issue = self.issue_basis(db, row, context)
                 if original_issue is not None:
                     # Re-exploration must see the current cached request too.

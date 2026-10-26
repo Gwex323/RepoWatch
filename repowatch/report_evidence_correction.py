@@ -50,6 +50,7 @@ def _rows(report, section):
 class ReportEvidenceCorrection:
     """Retain good report fields locally and bind edits to server-owned coordinates."""
 
+    kind = "evidence_correction"
     schema = AgentOutputSchema(EvidenceCorrection)
 
     def __init__(self, review, issues, sources=()):

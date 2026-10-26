@@ -50,7 +50,7 @@ const statuses: Record<string, string> = {
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
   scope_review_incomplete: '范围审查遗漏验收项或版本不一致；原范围已保留，请继续分析与范围审查。',
-  scope_mapping_invalid: '问题与验收项的关联不完整，请继续范围审查。',
+  scope_mapping_invalid: '问题与验收项的关联引用未通过校验，报告未保存。请查看具体原因；若可恢复报告，可从已保存证据继续。',
   scope_changed: '任务范围已变化，请刷新后重新审查。',
   analysis_model_changed: '模型配置已变化，请刷新后重试；分析将使用当前配置重新执行。',
   analysis_model_key_required: '请填写分析模型的 API Key。',
@@ -143,8 +143,9 @@ function toolArgumentReason(detail: ToolArgumentDetail) {
 }
 function analysisFailureMessage(analysis: Analysis) {
   const message = errorMessage(analysis.error ?? '');
-  if (['analysis_evidence_unverified', 'analysis_report_invalid'].includes(analysis.error ?? '')) {
-    const kind = analysis.error === 'analysis_evidence_unverified' ? 'evidence_validation' : 'report_validation';
+  if (['analysis_evidence_unverified', 'analysis_report_invalid', 'scope_mapping_invalid'].includes(analysis.error ?? '')) {
+    const kind = analysis.error === 'scope_mapping_invalid' ? 'scope_mapping_validation'
+      : analysis.error === 'analysis_evidence_unverified' ? 'evidence_validation' : 'report_validation';
     for (let index = analysis.events.length - 1; index >= 0; index--) {
       const event = analysis.events[index];
       if (event.kind === 'attempt') break;
@@ -240,10 +241,26 @@ function eventLabel(item: Analysis['events'][number]) {
     } catch { return '保留报告其他内容，仅纠正未通过校验的证据'; }
   }
   if (item.kind === 'evidence_correction_applied') return `${name} · 已合并证据纠正，正在检查完整报告`;
+  if (item.kind === 'scope_mapping_validation') {
+    try {
+      const detail = JSON.parse(item.agent) as { section?: string; item?: number; reason?: string; positions?: number[] };
+      const target = detail.section === 'findings' ? '新问题' : '范围验收项';
+      const reason = detail.reason === 'unknown_scope_key' ? '引用了未登记的验收项'
+        : detail.reason === 'unknown_finding_id' ? '引用了本任务中不存在的问题 ID；新问题应通过验收项 key 关联' : '关联引用无效';
+      return `${target} ${detail.item ?? ''} · ${reason}${detail.positions?.length ? `（第 ${detail.positions.join('、')} 个引用）` : ''}`;
+    } catch { return '问题与验收项关联检查未通过'; }
+  }
+  if (item.kind === 'scope_mapping_correction') {
+    try {
+      const detail = JSON.parse(item.agent) as { role?: string; items?: number };
+      return `${names[detail.role ?? ''] ?? '独立审查'} · 正在纠正 ${detail.items ?? 0} 项关联，保留问题正文与源码证据`;
+    } catch { return '正在纠正问题与验收项关联'; }
+  }
+  if (item.kind === 'scope_mapping_correction_applied') return `${name} · 已合并关联纠正，正在重新校验完整报告`;
   if (item.kind === 'output_limit') {
     try {
       const detail = JSON.parse(item.agent) as { role?: string; phase?: string; max_tokens?: number; reasoning_tokens?: number; payload_tokens?: number; can_expand?: boolean };
-      const phase = ({ evidence_correction: '局部证据纠正', tool_arguments: '工具参数纠正', report: '最终报告', exploration: '分析探索' } as Record<string, string>)[detail.phase ?? ''] ?? '模型请求';
+      const phase = ({ evidence_correction: '局部证据纠正', scope_mapping_correction: '范围关联纠正', tool_arguments: '工具参数纠正', report: '最终报告', exploration: '分析探索' } as Record<string, string>)[detail.phase ?? ''] ?? '模型请求';
       return `${names[detail.role ?? ''] ?? '当前角色'} · ${phase}达到 ${detail.max_tokens ?? 0} tokens 上限${detail.reasoning_tokens !== undefined ? ` · 推理 ${detail.reasoning_tokens}` : ''}${detail.payload_tokens !== undefined ? ` · 非推理输出 ${detail.payload_tokens}` : ''} · ${detail.can_expand ? '按剩余额度扩容' : '扩容空间或重试额度已用完'}`;
     } catch { return '模型输出达到本次生成上限'; }
   }
@@ -266,7 +283,11 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'report_validation') {
     const selectionReason = ({ evidence_correction_unknown_source: '所选源码片段编号不在实际读取目录中',
       evidence_correction_source_range: '所选行区间越界、跨越未读间隙或超过行数上限',
-      evidence_correction_source_length: '所选源码片段为空白或超过 1200 字符' } as Record<string, string>)[item.agent];
+      evidence_correction_source_length: '所选源码片段为空白或超过 1200 字符',
+      scope_correction_targets_mismatch: '未按原错误项目逐项纠正关联',
+      scope_correction_unknown_reference: '所选验收项或问题编号不在本次目录中',
+      scope_correction_invalid_selection: '关联选择重复、为空或不符合项目要求',
+      scope_correction_unresolved_has_links: '待审查关联同时提交了确定引用' } as Record<string, string>)[item.agent];
     if (selectionReason) return `证据选择检查：${selectionReason}`;
     return item.agent === 'invalid_json'
     ? '报告格式检查：不是合法 JSON' : item.agent === 'scope_review_required'
