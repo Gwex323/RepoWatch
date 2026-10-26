@@ -91,7 +91,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_model_output_invalid: '模型返回了无效的工具调用或输出格式，本次未保存问题。',
   analysis_output_truncated: '模型输出达到长度上限而被截断，有限扩容重试仍未完成，本次未保存问题。',
   analysis_provider_empty_response: '模型服务没有返回可用的结果，请检查服务兼容性和状态。',
-  analysis_tool_arguments_invalid: '模型返回的工具参数不是合法 JSON，本次未执行该调用。',
+  analysis_tool_arguments_invalid: '模型工具参数仍不符合 JSON 或字段要求，自动纠正次数已用完，未执行未通过校验的调用。',
   analysis_json_invalid: '模型返回内容未通过 JSON 校验，本次未保存问题。',
   analysis_report_invalid: '模型报告字段不符合要求，本次未保存问题。',
   analysis_model_refused: '模型拒绝完成本次分析，尚未生成报告。',
@@ -138,6 +138,21 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'retry_call') return `${name} · 正在重试当前请求`;
   if (item.kind === 'output_retry') return `${name} · 输出被截断，增加额度后重试当前请求`;
   if (item.kind === 'format_retry') return `${name} · 报告格式不合格，正在纠正一次`;
+  if (item.kind === 'tool_arguments_retry') return `${name} · 保留已有证据，正在自动纠正工具参数`;
+  if (item.kind === 'tool_arguments_invalid') {
+    try {
+      const detail = JSON.parse(item.agent) as {
+        role?: string; tool?: string; reason?: string; fields?: string[];
+        recoverable?: boolean; corrections_remaining?: number;
+      };
+      const reason = detail.reason === 'invalid_json' ? 'JSON 格式不合法'
+        : detail.reason === 'object_required' ? '参数应为 JSON 对象'
+          : detail.reason === 'unexpected_field' ? '包含多余字段' : '字段不符合要求';
+      return `${names[detail.role ?? ''] ?? '当前角色'} · ${detail.tool ?? '工具'}：${reason}${
+        detail.fields?.length ? `（${detail.fields.join('、')}）` : ''}；本批调用未执行，${
+        detail.recoverable ? `准备自动纠正，此后剩余 ${detail.corrections_remaining ?? 0} 次` : '纠正次数已用完'}`;
+    } catch { return '工具参数校验未通过，本批调用未执行'; }
+  }
   if (item.kind === 'evidence_retry') return `${name} · 源码证据不匹配，正在纠正一次`;
   if (item.kind === 'evidence_normalized') return `源码引用已去除显示行号：${item.agent} 处`;
   if (item.kind === 'evidence_validation') {
