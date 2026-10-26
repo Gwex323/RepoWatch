@@ -89,13 +89,9 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_handoff_not_followed: '已要求交接，但模型未返回有效的交接调用。请检查模型服务是否支持指定工具调用。',
   analysis_finalization_not_followed: '已要求提交报告，但模型仍尝试调用工具。请检查模型服务的工具选择支持。',
   analysis_model_output_invalid: '模型返回了无效的工具调用或输出格式，本次未保存问题。',
-  analysis_output_truncated: '模型输出未能在有限额度内完整生成，扩容重试仍未完成，本次未保存问题。',
+  analysis_output_truncated: '模型输出达到长度上限而被截断，有限扩容重试仍未完成，本次未保存问题。',
   analysis_provider_empty_response: '模型服务没有返回可用的结果，请检查服务兼容性和状态。',
-  analysis_tool_arguments_invalid: '模型工具参数未通过 JSON 或字段校验，本次未执行该调用。',
-  analysis_tool_arguments_exhausted: '模型工具参数仍不符合 JSON 或字段要求，自动纠正次数已用完，未执行未通过校验的调用。',
-  analysis_tool_not_allowed: '模型请求了当前角色无权使用的工具，该调用已阻止。请查看角色与工具记录。',
-  analysis_scope_unregistered: '仓库分析尚未成功登记任务范围，阶段预算已耗尽，本轮未进入后续处理。',
-  analysis_scope_read_not_followed: '模型未按要求登记任务范围，本轮未进入后续处理。',
+  analysis_tool_arguments_invalid: '模型返回的工具参数不是合法 JSON，本次未执行该调用。',
   analysis_json_invalid: '模型返回内容未通过 JSON 校验，本次未保存问题。',
   analysis_report_invalid: '模型报告字段不符合要求，本次未保存问题。',
   analysis_model_refused: '模型拒绝完成本次分析，尚未生成报告。',
@@ -142,45 +138,6 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'retry_call') return `${name} · 正在重试当前请求`;
   if (item.kind === 'output_retry') return `${name} · 输出被截断，增加额度后重试当前请求`;
   if (item.kind === 'format_retry') return `${name} · 报告格式不合格，正在纠正一次`;
-  if (item.kind === 'tool_arguments_retry') return `${name} · 保留已有证据，正在自动纠正工具参数`;
-  if (item.kind === 'scope_registered') return `任务范围已登记：${item.agent} 项`;
-  if (item.kind === 'tool_output_budget' || item.kind === 'tool_output_retry') {
-    try {
-      const budget = JSON.parse(item.agent) as { role?: string; max_tokens?: number; from?: number; to?: number };
-      return `${names[budget.role ?? ''] ?? '当前角色'} · ${budget.to
-        ? `疑似输出额度不足，扩容 ${budget.from} → ${budget.to}` : `工具输出预算 ${budget.max_tokens}`} tokens · 保持已配置推理强度`;
-    } catch { return '已调整工具输出预算'; }
-  }
-  if (item.kind === 'tool_access_rejected') {
-    try {
-      const denied = JSON.parse(item.agent) as { role?: string; tool?: string };
-      return `${names[denied.role ?? ''] ?? '当前角色'} · 已阻止越权工具 ${denied.tool ?? ''}`;
-    } catch { return '已阻止越权工具调用'; }
-  }
-  if (item.kind === 'tool_arguments_invalid') {
-    try {
-      const detail = JSON.parse(item.agent) as {
-        role?: string; tool?: string; reason?: string; fields?: string[];
-        recoverable?: boolean; corrections_remaining?: number;
-        issues?: { field: string; code: string }[]; line?: number; column?: number;
-        suspected_output_limit?: boolean;
-      };
-      const reason = detail.reason === 'invalid_json' ? 'JSON 格式不合法'
-        : detail.reason === 'object_required' ? '参数应为 JSON 对象'
-          : detail.reason === 'unexpected_field' ? '包含多余字段' : '字段不符合要求';
-      const labels: Record<string, string> = { required_field: '缺少必填字段', enum_value: '不在允许选项中',
-        string_required: '应为文本', integer_required: '应为整数', list_required: '应为列表',
-        object_required: '应为对象', unexpected_field: '多余字段', too_long: '超过长度上限',
-        too_short: '未达到最小长度', pattern: '格式不符合要求', invalid_value: '值不符合要求' };
-      const fields = detail.issues?.length
-        ? detail.issues.map(issue => `${issue.field}：${labels[issue.code] ?? '不符合要求'}`).join('；')
-        : detail.fields?.join('、');
-      return `${names[detail.role ?? ''] ?? '当前角色'} · ${detail.tool ?? '工具'}：${reason}${
-        fields ? `（${fields}）` : ''}${detail.line ? ` · 第 ${detail.line} 行第 ${detail.column} 列` : ''}${
-        detail.suspected_output_limit ? ' · 疑似达到输出额度' : ''}；本批调用未执行，${
-        detail.recoverable ? `准备自动纠正，此后剩余 ${detail.corrections_remaining ?? 0} 次` : '本次自动纠正已停止'}`;
-    } catch { return '工具参数校验未通过，本批调用未执行'; }
-  }
   if (item.kind === 'evidence_retry') return `${name} · 源码证据不匹配，正在纠正一次`;
   if (item.kind === 'evidence_normalized') return `源码引用已去除显示行号：${item.agent} 处`;
   if (item.kind === 'evidence_validation') {
@@ -198,9 +155,7 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'report_finalization') return `${name} · 使用已读取证据生成最终报告`;
   if (item.kind === 'finalization_thinking') return '最终报告请求：已关闭额外思考';
   if (item.kind === 'report_validation') return item.agent === 'invalid_json'
-    ? '报告格式检查：不是合法 JSON' : item.agent === 'scope_review_required'
-      ? '报告范围检查：缺少已登记验收项的审查结论' : item.agent === 'scope_review_incomplete'
-        ? '报告范围检查：版本、验收项或运行限制未完整覆盖' : '报告格式检查：字段不符合要求';
+    ? '报告格式检查：不是合法 JSON' : '报告格式检查：字段不符合要求';
   if (item.kind === 'report_diagnostics') {
     try {
       const detail = JSON.parse(item.agent) as { category?: string; text_chars?: number; line?: number; column?: number };
@@ -235,13 +190,12 @@ function eventLabel(item: Analysis['events'][number]) {
       const check = JSON.parse(item.agent) as {
         required?: string; calls?: number; matching?: number; other?: number; allowed?: number; messages?: number;
       };
-      return `前置请求检查（${check.required === 'execution' ? '运行记录' : check.required === 'scope' ? '任务范围' : '源码'}）：${
+      return `必读请求检查（${check.required === 'execution' ? '运行记录' : '源码'}）：${
         check.calls ?? 0} 条调用 · 匹配 ${check.matching ?? 0} · 其他 ${check.other ?? 0} · 上限 ${check.allowed ?? 0} · 正文 ${check.messages ?? 0}`;
     } catch { return '必读请求检查已记录'; }
   }
   if (item.kind === 'required_read') return item.agent === 'read_execution_records'
-    ? '必读检查：先读取已保存的测试／启动记录' : item.agent === 'register_task_scope'
-      ? '范围检查：仓库分析交接前先登记验收项（每批最多三项）' : '必读检查：先读取当前源码';
+    ? '必读检查：先读取已保存的测试／启动记录' : '必读检查：先读取当前源码';
   if (item.kind === 'evidence') return '读取运行记录';
   if (item.kind === 'handoff') return item.agent.split(' -> ').map(value => names[value] ?? value).join(' → ');
   return name;

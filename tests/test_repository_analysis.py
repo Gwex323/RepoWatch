@@ -68,36 +68,14 @@ class ReviewModel(Model):
     def __init__(self, *, invented=False, skip_review=False, findings=True):
         self.calls = 0
         self.invented, self.skip_review, self.findings = invented, skip_review, findings
-        self.scope = None
 
     async def get_response(self, system_instructions, input, **kwargs):
-        packets = [input] if isinstance(input, str) else [
-            item.get("output", item.get("content", "")) for item in input
-            if isinstance(item, dict) and (
-                item.get("type") == "function_call_output" or item.get("role") == "user"
-            )
-        ]
-        for packet in packets:
-            try:
-                value = json.loads(packet)
-            except (TypeError, ValueError):
-                continue
-            if isinstance(value, dict):
-                scope = value.get("run_context", value).get("task_scope", value)
-                if isinstance(scope, dict) and "items" in scope and "version" in scope:
-                    self.scope = scope
         self.calls += 1
         identity = f"analysis_call_{self.calls}"
         if self.calls == 1:
             name, args = "read_execution_records", {}
         elif self.calls == 2:
             name, args = "read_source_file", {"path": "app.py", "start_line": 1, "end_line": 3}
-        elif kwargs["model_settings"].tool_choice == "register_task_scope":
-            name, args = "register_task_scope", {"items": [{
-                "key": "fixture_behavior", "title": "Fixture behavior",
-                "expected": "Preserve the original fixture behavior", "paths": ["app.py"],
-                "required_evidence": ["regression"],
-            }]}
         elif kwargs["handoffs"] and not self.skip_review:
             name, args = kwargs["handoffs"][0].tool_name, {}
         else:
@@ -112,18 +90,6 @@ class ReviewModel(Model):
                                   "quote": "invented quote" if self.invented else "print('ok')"}],
                 }] if self.findings else [],
             }
-            if self.scope and self.scope.get("items"):
-                data["scope_review"] = {
-                    "version": self.scope["version"], "accepted": False,
-                    "rationale": "Fixture scope review does not prove completion.",
-                    "items": [{"key": item["key"], "outcome": "investigating",
-                               "rationale": "Fixture only.", "evidence": [], "finding_ids": []}
-                              for item in self.scope["items"]],
-                    "exclusions": [{"key": item["key"], "outcome": "unknown",
-                                    "required_keys": [], "rationale": "Fixture limitation.",
-                                    "evidence": []}
-                                   for item in self.scope.get("execution_limits", [])],
-                }
             return ModelResponse(output=[ResponseOutputMessage(
                 id=identity, type="message", role="assistant", status="completed",
                 content=[ResponseOutputText(type="output_text", text=json.dumps(data),
@@ -1520,7 +1486,7 @@ def test_failure_stage_and_retry_attempt_are_persisted_without_secrets(
     completed = analyses.get(row["id"])
     assert completed["status"] == "completed"
     assert completed["failure_details"] is None
-    assert completed["progress"]["model_calls"] == 7  # Includes durable scope registration.
+    assert completed["progress"]["model_calls"] == 6
     assert sum(event["kind"] == "attempt" for event in completed["events"]) == 2
 
 
