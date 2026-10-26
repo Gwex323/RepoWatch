@@ -16,6 +16,7 @@ type Repair = {
   workspace_recovery_available?: boolean;
   verification_recovery_available?: boolean;
   review_evidence_recovery_available?: boolean;
+  review_feedback_recovery_available?: boolean;
   verification_resume_available?: boolean;
   publication_retry_available?: boolean;
   docker_recovery_available?: boolean;
@@ -27,6 +28,8 @@ type Repair = {
   patch: { summary: string; edits: { path: string }[] } | null;
   diff: string; verification: Verification | null;
   verification_rounds?: { revision: number; diff: string; verification: Verification }[];
+  review_rounds?: { revision: number; patch_digest: string;
+    review: { approved: boolean; summary: string; risks: string[] } }[];
   review: { approved: boolean; summary: string; risks: string[] } | null;
   remote: { branch: string; pr: { number: number; url: string }; issue: { number: number; url: string } } | null;
   events: { kind: string; value: string; created: number }[];
@@ -70,7 +73,7 @@ const errors: Record<string, string> = {
   repair_tests_failed: '回归测试未满足修复前失败、修复后通过及完整测试通过的要求。',
   repair_verification_required: '补丁尚未完成真实测试验证，已阻止提前进入独立审查。',
   repair_setup_failed: '修复验证环境安装失败，请查看测试日志。',
-  repair_review_rejected: '独立审查未批准补丁，请查看审查结论。',
+  repair_review_rejected: '补丁仍未获独立审查批准，自动返工已结束，请查看各轮结论及停止原因。',
   repair_review_required: '缺少通过的测试或独立审查，未提交 PR。',
   repair_patch_unchanged: '补丁未发生实质变化，需要先分析失败原因再修改。',
   repair_unsafe_path: '文件路径未通过保护检查。',
@@ -210,6 +213,14 @@ const verificationEvent = (kind: string, value: string) => {
     return `根据第 ${item.revision} 版失败日志分析并纠正 · 还可生成 ${item.corrections_remaining} 版补丁`;
   } catch { return '修复验证记录'; }
 };
+const reviewEvent = (kind: string, value: string) => {
+  try {
+    const item = JSON.parse(value);
+    if (!Number.isInteger(item.revision)) return '独立审查记录';
+    if (kind === 'review_round') return `第 ${item.revision} 版审查${item.approved ? '批准' : '未批准'}`;
+    return `根据第 ${item.revision} 版审查结论自动修改补丁 · 还可返工 ${item.corrections_remaining} 轮`;
+  } catch { return '独立审查记录'; }
+};
 const providerEvent = (value: string) => {
   try {
     const item = JSON.parse(value);
@@ -334,6 +345,8 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
             ? 'repair_review_evidence_required' : task.error)}</p>}
       {task.review_evidence_recovery_available && task.can_retry &&
         <p>补丁已通过测试，但旧版审查遗漏证据读取。可额外恢复一次：重新验证已保存补丁后继续独立审查。</p>}
+      {task.review_feedback_recovery_available && task.can_retry &&
+        <p>旧版任务在审查拒绝后直接停止。自动修复启用且证据仍有效时，系统将自动续办一次，保留原记录。</p>}
       {task.timeout_recovery_available && task.can_retry &&
         <p>超时策略已更新，此任务可额外重试一次。</p>}
       {task.source_read_recovery_available && task.can_retry &&
@@ -369,6 +382,9 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
       {task.events.filter(event => event.kind === 'verification_round' || event.kind === 'verification_feedback')
         .slice(-3).map((event, i) => <p className="diagnosis-meta" key={`verify-${i}`}>
           {verificationEvent(event.kind, event.value)}</p>)}
+      {task.events.filter(event => event.kind === 'review_round' || event.kind === 'review_feedback')
+        .slice(-3).map((event, i) => <p className="diagnosis-meta" key={`review-${i}`}>
+          {reviewEvent(event.kind, event.value)}</p>)}
       {task.events.filter(event => event.kind === 'repair_unresolved').slice(-1).map((event, i) =>
         <p key={`unresolved-${i}`}>未解决说明（模型判断，验证未通过）：{event.value}</p>)}
       {task.events.filter(event => event.kind === 'source_path_rejected').slice(-2).map((event, i) =>
@@ -380,6 +396,13 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
         <ul>{task.patch.edits.map(edit => <li key={edit.path}><code>{edit.path}</code></li>)}</ul></>}
       {task.review && <p className="diagnosis-summary">独立审查：{task.review.summary}</p>}
       {task.review && task.review.risks.length > 0 && <ul>{task.review.risks.map((risk, i) => <li key={i}>{risk}</li>)}</ul>}
+      {!!task.review_rounds?.length && <details><summary>各轮独立审查</summary>
+        {task.review_rounds.map(round => <div key={round.revision}>
+          <strong>第 {round.revision} 版 · {round.review.approved ? '已批准' : '未批准'}</strong>
+          <p>{round.review.summary}</p>
+          {round.review.risks.length > 0 && <ul>{round.review.risks.map((risk, i) => <li key={i}>{risk}</li>)}</ul>}
+        </div>)}
+      </details>}
       {task.remote && <div className="execution-actions"><code>{task.remote.branch}</code>
         <a className="button secondary" href={task.remote.pr.url} target="_blank" rel="noopener noreferrer">
           <GitPullRequest size={15} />PR #{task.remote.pr.number}<ExternalLink size={13} /></a>
@@ -414,6 +437,8 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
           {' · '}{event.kind === 'failure' ? message(event.value) :
             event.kind === 'failure_details' ? failureDetails(event.value) :
             event.kind === 'verification_round' || event.kind === 'verification_feedback' ? verificationEvent(event.kind, event.value) :
+            event.kind === 'review_round' || event.kind === 'review_feedback' ? reviewEvent(event.kind, event.value) :
+            event.kind === 'review_feedback_recovery' ? '已自动续办旧版审查拒绝任务，按原结论修订补丁' :
             event.kind === 'repair_unresolved' ? `未解决说明（模型判断）：${event.value}` :
             event.kind === 'provider_response' ? providerEvent(event.value) :
             event.kind === 'model_configuration' ? agentModelEvent(event.value) :

@@ -100,7 +100,10 @@ class RepairModel(Model):
         if self.calls == 1:
             name, args = "read_repair_source", {"path": "app.py", "candidate": False}
         elif self.calls == 2:
-            name, args = "submit_and_test_repair", {"patch": fixture_patch()}
+            patch = fixture_patch()
+            if getattr(self, "retry_review", False):
+                patch["edits"][0]["content"] = "print('retry corrected')\n"
+            name, args = "submit_and_test_repair", {"patch": patch}
         elif self.calls == 3 and not self.skip_handoff:
             name = kwargs["handoffs"][0].tool_name
         elif self.calls == 4:
@@ -139,6 +142,7 @@ class RepairEngine:
 
     async def repair(self, context, event, *, workspace):
         model = RepairModel(approved=self.approved)
+        model.retry_review = bool(context.get("previous_review"))
         self.models.append(model)
         return await run_repair(model, context, event, workspace=workspace)
 
@@ -1824,9 +1828,10 @@ def test_output_recovery_reduces_reasoning_and_keeps_it_for_later_calls(role, ef
             raise OutputTruncated("private-unfinished-tool-arguments")
         return SimpleNamespace(output=[])
 
-    workspace = SimpleNamespace(check=lambda: None, verification=None)
+    workspace = SimpleNamespace(check=lambda: None, verification=None, ready_for_review=False)
     model = RepairStageModel(SimpleNamespace(get_response=provider), role, workspace,
-                             lambda *args: events.append(args), dict, {"timeouts": 0})
+                             lambda *args: events.append(args),
+                             lambda: {"verification_read": True}, {"timeouts": 0})
     for _ in range(2):
         asyncio.run(model.get_response("trusted instructions", [], handoffs=[], tools=[],
                                       model_settings=settings))
@@ -1853,7 +1858,8 @@ def test_output_recovery_preserves_default_and_already_low_reasoning(effort):
         return SimpleNamespace(output=[])
 
     model = RepairStageModel(SimpleNamespace(get_response=provider), "repair_agent",
-                             SimpleNamespace(check=lambda: None, verification=None),
+                             SimpleNamespace(check=lambda: None, verification=None,
+                                             ready_for_review=False),
                              lambda *args: events.append(args), dict, {"timeouts": 0})
     asyncio.run(model.get_response("", [], handoffs=[], tools=[], model_settings=settings))
     assert [s.max_tokens for s in requests] == [12000, 16000]

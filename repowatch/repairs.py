@@ -17,6 +17,7 @@ from .repair_model import (
     OUTPUT_POLICY,
     PROTOCOL_POLICY,
     REVIEW_EVIDENCE_POLICY,
+    REVIEW_FEEDBACK_POLICY,
     VERIFICATION_POLICY,
     RepairReview,
     repair_failure_code,
@@ -139,6 +140,9 @@ class Repairs(EnvironmentRecovery):
             result["verification_rounds"] = (
                 result["verification"].pop("_rounds", []) if result["verification"] else []
             )
+            result["review_rounds"] = (
+                result["verification"].pop("_reviews", []) if result["verification"] else []
+            )
             result["diff"] = row["diff"] or ""
             result["events"] = [dict(item) for item in db.execute(
                 "SELECT kind,value,created FROM repair_events WHERE repair_id=? ORDER BY id",
@@ -159,6 +163,7 @@ class Repairs(EnvironmentRecovery):
             result["workspace_recovery_available"] = self._workspace_recovery(db, row)
             result["verification_recovery_available"] = self._verification_recovery(row)
             result["review_evidence_recovery_available"] = self._review_evidence_recovery(db, row)
+            result["review_feedback_recovery_available"] = self._review_feedback_recovery(row)
             result["verification_resume_available"] = (
                 self._can_resume_verification(row) or result["review_evidence_recovery_available"]
             )
@@ -177,7 +182,8 @@ class Repairs(EnvironmentRecovery):
                      or result["protocol_recovery_available"]
                      or result["workspace_recovery_available"]
                      or result["verification_recovery_available"]
-                     or result["review_evidence_recovery_available"])
+                     or result["review_evidence_recovery_available"]
+                     or result["review_feedback_recovery_available"])
                 and self.current(db, row)
             )
             if result["source_error"] or row["error"] in (
@@ -211,7 +217,51 @@ class Repairs(EnvironmentRecovery):
                 + int(context.get("workspace_recovery_used") is True)
                 + int(context.get("verification_recovery_used") is True)
                 + int(context.get("review_evidence_recovery_used") is True)
-                + int(context.get("environment_recovery_used") is True))
+                + int(context.get("environment_recovery_used") is True)
+                + int(context.get("review_feedback_recovery_used") is True))
+
+    @classmethod
+    def _review_feedback_recovery(cls, row):
+        context = json.loads(row["context"])
+        if (row["status"] != "failed" or row["error"] != "repair_review_rejected"
+                or not 1 <= row["attempt"] <= cls._attempt_limit(row)
+                or context.get("review_feedback_policy") == REVIEW_FEEDBACK_POLICY
+                or context.get("review_feedback_recovery_used") or row["remote"]
+                or not re.fullmatch(r"[a-f0-9]{64}", row["source_digest"] or "")):
+            return False
+        try:
+            patch, verification = cls._json(row, "patch"), cls._json(row, "verification")
+            review = RepairReview.model_validate(cls._json(row, "review"))
+            Patch.model_validate({
+                **{key: patch[key] for key in Patch.model_fields if key != "edits"},
+                "edits": [{key: edit[key] for key in ("path", "original_sha256", "content")}
+                          for edit in patch["edits"]],
+            })
+            return (review.approved is False and verification.get("passed") is True
+                    and len(verification_feedback(verification)) == 4)
+        except (ValueError, TypeError, KeyError):
+            return False
+
+    def _queue_review_feedback_recovery(self):
+        """Resume an authorized old-policy rejection once while automation is enabled."""
+        if (self.closing.is_set() or self.execution.closing.is_set()
+                or not self.engine or not self.engine.status()["enabled"]):
+            return
+        with self.store.connection() as db:
+            if not db.execute("SELECT enabled FROM repair_settings WHERE id=1").fetchone()[0]:
+                return
+            if db.execute("SELECT 1 FROM repair_tasks WHERE status='running'").fetchone():
+                return
+            candidates = [dict(row) for row in db.execute(
+                "SELECT * FROM repair_tasks WHERE status='failed' "
+                "AND error='repair_review_rejected' ORDER BY updated DESC LIMIT 32",
+            ) if self._review_feedback_recovery(row) and self.current(db, row)]
+        for row in candidates:
+            try:
+                self.retry(row["id"], row["version"])
+            except Conflict:
+                continue
+            return
 
     @classmethod
     def _verification_recovery(cls, row):
@@ -544,6 +594,7 @@ class Repairs(EnvironmentRecovery):
             workspace_recovery = self._workspace_recovery(db, row)
             verification_recovery = self._verification_recovery(row)
             review_evidence_recovery = self._review_evidence_recovery(db, row)
+            review_feedback_recovery = self._review_feedback_recovery(row)
             publication_retry = self._publication_retry_available(row)
             docker_recovery = self._docker_recovery(db, row)
             if (self._publication_failure(row) and not publication_retry):
@@ -557,7 +608,7 @@ class Repairs(EnvironmentRecovery):
                         and not output_recovery and not protocol_recovery
                         and not workspace_recovery and not publication_retry
                         and not docker_recovery and not verification_recovery
-                        and not review_evidence_recovery)):
+                        and not review_evidence_recovery and not review_feedback_recovery)):
                 raise Conflict("repair_changed")
             if not self.current(db, row):
                 raise Conflict("repair_stale")
@@ -587,6 +638,16 @@ class Repairs(EnvironmentRecovery):
             if verification_recovery:
                 context.update(verification_recovery_used=True,
                                verification_policy=VERIFICATION_POLICY)
+            if review_feedback_recovery:
+                context.update(review_feedback_recovery_used=True,
+                               review_feedback_policy=REVIEW_FEEDBACK_POLICY)
+            if row["error"] == "repair_review_rejected" and row["review"] and row["patch"]:
+                context["previous_review"] = {
+                    "review": self._json(row, "review"), "patch": self._json(row, "patch"),
+                    "diff": redact(row["diff"] or "")[-12000:],
+                    "verification": verification_feedback(self._json(row, "verification")),
+                    "source_digest": row["source_digest"],
+                }
             if row["error"] == "repair_tests_failed" and row["verification"]:
                 context["previous_failure"] = {
                     "verification": verification_feedback(self._json(row, "verification")),
@@ -629,6 +690,8 @@ class Repairs(EnvironmentRecovery):
         self.event(repair_id, "retry", str(row["attempt"] + 1))
         if review_evidence_recovery:
             self.event(repair_id, "review_evidence_recovery", REVIEW_EVIDENCE_POLICY)
+        if review_feedback_recovery:
+            self.event(repair_id, "review_feedback_recovery", REVIEW_FEEDBACK_POLICY)
         if docker_recovery:
             self.event(repair_id, "environment_recovery", "docker_ready")
         if publication_retry:
@@ -706,6 +769,7 @@ class Repairs(EnvironmentRecovery):
             context["workspace_policy"] = WORKSPACE_POLICY
             context["verification_policy"] = VERIFICATION_POLICY
             context["review_evidence_policy"] = REVIEW_EVIDENCE_POLICY
+            context["review_feedback_policy"] = REVIEW_FEEDBACK_POLICY
             if not self._verified(row):
                 context["task_scope"] = scope_packet(db, row["analysis_id"])
             encoded_context = json.dumps(context, ensure_ascii=False)
@@ -720,6 +784,7 @@ class Repairs(EnvironmentRecovery):
 
     async def tick(self):
         self.backfill()
+        await asyncio.to_thread(self._queue_review_feedback_recovery)
         row = await asyncio.to_thread(
             self.claim, allow_work=bool(self.engine and self.engine.status()["enabled"]),
         )
@@ -752,9 +817,9 @@ class Repairs(EnvironmentRecovery):
                 context.update(repair_origin(db, row))
             def event(kind, value=""):
                 self.event(row["id"], kind, value)
-                if kind == "verification_round" and workspace:
+                if kind in ("patch", "verification_round", "review_round") and workspace:
                     self._save_artifacts(row["id"], workspace)
-                if kind == "verification_feedback":
+                if kind in ("verification_feedback", "review_feedback"):
                     with self.store.connection() as db:
                         db.execute("UPDATE repair_tasks SET stage='repair_agent',updated=? "
                                    "WHERE id=?",
@@ -809,6 +874,11 @@ class Repairs(EnvironmentRecovery):
                 raise Conflict("repair_source_changed")
             if context.get("resume_verification") and row["source_digest"] != source_digest:
                 raise Conflict("repair_source_changed")
+            previous_review = context.get("previous_review")
+            if previous_review:
+                if previous_review.get("source_digest") != source_digest:
+                    raise Conflict("repair_source_changed")
+                workspace.prior_rejected_patches.append(previous_review["patch"])
             with self.store.connection() as db:
                 db.execute("UPDATE repair_tasks SET source_digest=? WHERE id=?",
                            (source_digest, row["id"]))
@@ -907,6 +977,10 @@ class Repairs(EnvironmentRecovery):
     def _save_artifacts(self, repair_id, workspace, review=None):
         if workspace.patch is None:
             return
+        current_review = review if review is not None else workspace.review
+        if current_review is not None:
+            current_review = {key: current_review[key] for key in RepairReview.model_fields
+                              if key in current_review}
         patch = workspace.patch.model_dump()
         for edit in patch["edits"]:
             original = workspace.original / edit["path"]
@@ -921,13 +995,16 @@ class Repairs(EnvironmentRecovery):
         with self.store.connection() as db:
             db.execute(
                 "UPDATE repair_tasks SET patch=?,diff=?,verification=?,"
-                "review=COALESCE(?,review),updated=? WHERE id=?",
+                "review=?,updated=? WHERE id=?",
                 (json.dumps(patch, ensure_ascii=False), workspace.diff,
                  json.dumps({**(workspace.verification or {}),
-                             "_rounds": workspace.verification_history}
-                            if workspace.verification or workspace.verification_history else None,
+                             "_rounds": workspace.verification_history,
+                             "_reviews": workspace.review_history}
+                            if workspace.verification or workspace.verification_history
+                            or workspace.review_history else None,
                             ensure_ascii=False),
-                 json.dumps(review, ensure_ascii=False) if review is not None else None,
+                 json.dumps(current_review, ensure_ascii=False)
+                 if current_review is not None else None,
                  time.time(), repair_id),
             )
 

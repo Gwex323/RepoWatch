@@ -48,8 +48,9 @@ def test_output_retry_sends_lower_reasoning_to_chat_provider(role):
         ) as client:
             model = RepairStageModel(
                 ObservedModel(OpenAIChatCompletionsModel("fixture", client), observation),
-                role, SimpleNamespace(check=lambda: None, verification=None),
-                record, dict, {"timeouts": 0},
+                role,
+                SimpleNamespace(check=lambda: None, verification=None, ready_for_review=False),
+                record, lambda: {"verification_read": True}, {"timeouts": 0},
             )
             return await Runner.run(Agent(
                 name=role, instructions="Return a short response.", model=model,
