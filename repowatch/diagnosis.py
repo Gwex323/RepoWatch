@@ -17,13 +17,13 @@ from agents import (
     OpenAIChatCompletionsModel,
     OpenAIResponsesModel,
     RunConfig,
-    RunHooks,
     Runner,
 )
 from openai import AsyncOpenAI
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 
+from .observability import TracingHooks, task_binding
 from .repository_source import uses_pytest
 
 CONFIG_KEYS = ("language", "install", "test", "start", "port", "install_network")
@@ -217,12 +217,13 @@ def local_report(context):
     return report
 
 
-class HandoffAudit(RunHooks):
+class HandoffAudit(TracingHooks):
     def __init__(self):
         self.handoffs = []
 
     async def on_handoff(self, context, from_agent, to_agent):
         self.handoffs.append(f"{from_agent.name} -> {to_agent.name}")
+        await super().on_handoff(context, from_agent, to_agent)
 
 
 def agents_for(model, reasoning_effort=None):
@@ -461,7 +462,9 @@ class Diagnoses:
                     (json.dumps(report, ensure_ascii=False), now, item["job_id"]),
                 )
             row = db.execute(
-                "SELECT * FROM execution_diagnoses WHERE state='queued' ORDER BY created LIMIT 1"
+                "SELECT d.*,e.repo_id FROM execution_diagnoses d "
+                "JOIN environments e ON e.id=d.env_id "
+                "WHERE d.state='queued' ORDER BY d.created LIMIT 1"
             ).fetchone()
             if not row:
                 return False
@@ -471,7 +474,9 @@ class Diagnoses:
             )
         report = json.loads(row["report"])
         try:
-            task = asyncio.create_task(self.engine.analyze(json.loads(row["context"])))
+            with task_binding(task_id=row["job_id"], env_id=row["env_id"], repo_id=row["repo_id"],
+                              revision=row["revision"]):
+                task = asyncio.create_task(self.engine.analyze(json.loads(row["context"])))
             deadline = time.monotonic() + 90
             try:
                 while not task.done():

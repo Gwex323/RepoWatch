@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from traceback import walk_tb
 
-from agents import Agent, Model, ModelSettings, RunConfig, RunHooks, Runner, function_tool, handoff
+from agents import Agent, Model, ModelSettings, RunConfig, Runner, function_tool, handoff
 from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError, UserError
 from agents.function_schema import function_schema
 from openai import (
@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from .analysis_model import REPAIR_REQUEST_TIMEOUT_SECONDS, OutputTruncated
 from .diagnosis import redact
 from .github_accounts import GitHubError
+from .observability import TracingHooks
 from .repair_workspace import (
     MAX_VERIFICATION_REVISIONS,
     Patch,
@@ -499,11 +500,12 @@ async def run_repair(model, context, event, *, workspace, reasoning_effort=None)
         review_read = True
         return {"diff": workspace.diff, "verification": workspace.verification}
 
-    class Audit(RunHooks):
+    class Audit(TracingHooks):
         async def on_agent_start(self, context, agent):
             nonlocal active
             active = agent.name
             event("agent", agent.name)
+            await super().on_agent_start(context, agent)
 
         async def on_handoff(self, context, from_agent, to_agent):
             if not workspace.verification or not workspace.verification.get("passed"):
@@ -511,6 +513,7 @@ async def run_repair(model, context, event, *, workspace, reasoning_effort=None)
                                else "repair_verification_required")
             handoffs.append(f"{from_agent.name} -> {to_agent.name}")
             event("handoff", handoffs[-1])
+            await super().on_handoff(context, from_agent, to_agent)
 
     def packet():
         return {
