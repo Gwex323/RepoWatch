@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { Check, FileSearch, Loader2, RefreshCw, X } from 'lucide-react';
-import { RepairPanel } from './repair';
 import { agentModelEvent } from './agent-models';
+import { TaskScopePanel, type TaskScope } from './task-scope';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Finding = {
@@ -29,6 +29,8 @@ type Analysis = {
   id: string; status: string; error: string | null; version: number; revision: string;
   current: boolean; created: number; findings: Finding[];
   historical_review?: HistoricalReview | null;
+  task_scope?: TaskScope;
+  report_recovery?: { available: boolean };
   report: { summary: string; limitations: string[]; files_read: string[]; model?: string;
     execution_scope?: { kind: string; executed: number | null; skipped: number;
       uncovered: string[]; complete: boolean } } | null;
@@ -47,10 +49,13 @@ const statuses: Record<string, string> = {
 };
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
-  analysis_model_changed: '模型配置已变化，请刷新后重试。',
+  scope_review_incomplete: '范围审查遗漏验收项或版本不一致；原范围已保留，请继续分析与范围审查。',
+  scope_mapping_invalid: '问题与验收项的关联不完整，请继续范围审查。',
+  scope_changed: '任务范围已变化，请刷新后重新审查。',
+  analysis_model_changed: '模型配置已变化，请刷新后重试；分析将使用当前配置重新执行。',
   analysis_model_key_required: '请填写分析模型的 API Key。',
   analysis_model_new_key_required: '更换服务地址时，请重新填写对应的 API Key。',
-  analysis_model_key_unavailable: '无法读取模型密钥，请在运行配置中重新保存。',
+  analysis_model_key_unavailable: '无法读取模型密钥，请在「设置 → 模型与供应商」中重新保存。',
   secure_storage_unavailable: '本机系统凭据库不可用，密钥尚未保存。',
   analysis_execution_required: '先完成一次测试或启动，系统会自动安排分析。',
   environment_busy: '环境正在执行任务，完成后将自动安排分析。',
@@ -62,7 +67,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_failed: '分析遇到未分类错误。请查看失败阶段和服务日志；旧记录可能没有详细原因。',
   analysis_timeout_or_stopped: '分析已超时或停止，可以重新尝试。',
   analysis_interrupted: '上次分析因服务中断而停止，可以重新尝试。',
-  analysis_authentication_failed: '模型服务拒绝了密钥，请在运行配置中更新。',
+  analysis_authentication_failed: '模型服务拒绝了密钥，请在「设置 → 模型与供应商」中更新。',
   analysis_rate_limited: '模型服务限流或额度不足，请检查账户后重试。',
   analysis_provider_timeout: '模型服务响应超时。请检查模型服务负载或网络；旧失败记录不会因配置更新而自动消失。',
   analysis_provider_timeout_exhausted: '模型请求超过等待时限，且本次允许的自动重试已用完。请检查模型服务负载或网络后再重试。',
@@ -107,6 +112,15 @@ function eventLabel(item: Analysis['events'][number]) {
   const name = names[item.agent] ?? item.agent;
   if (item.kind === 'model_configuration') return agentModelEvent(item.agent);
   if (item.kind === 'attempt') return '开始新一次分析';
+  if (item.kind === 'report_checkpoint_saved') return '已保存最终审查输入及真实读取、交接记录';
+  if (item.kind === 'report_checkpoint_invalidated') return '已保存的审查依据发生变化，重新执行完整分析';
+  if (item.kind === 'report_resumed') return '从已保存证据恢复最终报告，仅调用独立审查员';
+  if (item.kind === 'report_budget') {
+    try {
+      const budget = JSON.parse(item.agent) as { max_tokens: number; reserve_seconds: number; review_items: number };
+      return `报告预算：${budget.review_items} 项复核 · 输出上限 ${budget.max_tokens} tokens · 预留 ${budget.reserve_seconds} 秒`;
+    } catch { return '已分配最终报告预算'; }
+  }
   if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
   if (item.kind === 'handoff_retry') return `${name} · 指定交接未通过，使用同一轮证据重试一次`;
   if (item.kind === 'handoff_validation') {
@@ -265,8 +279,8 @@ function HistoricalItem({ item, api, refresh }: {
   </article>;
 }
 
-export function AnalysisPanel({ envId, version, api, pipelineActive = false, focusAnalysisId }: {
-  envId: string; version: number; api: Api; pipelineActive?: boolean; focusAnalysisId?: string;
+export function AnalysisPanel({ envId, version, api, pipelineActive = false, focusAnalysisId, view = 'analysis', onNavigate }: {
+  envId: string; version: number; api: Api; pipelineActive?: boolean; focusAnalysisId?: string; view?: 'analysis' | 'reproduction'; onNavigate?: (view: string) => void;
 }) {
   const [analyses, setAnalyses] = useState<Analysis[]>([]);
   const [selected, setSelected] = useState('');
@@ -292,17 +306,19 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
   const active = analyses.some(item => ['queued', 'running', 'waiting_model'].includes(item.status));
   const stage = analysis?.progress?.stage ??
     analysis?.events.filter(event => event.kind === 'agent').at(-1)?.agent;
-  return <section id="repository-analysis" className="repository-analysis" aria-label="仓库自动分析">
-    <div className="section-heading"><h3><FileSearch size={18} />仓库自动分析</h3>
+  return <section id="repository-analysis" className="repository-analysis" aria-label={view === 'analysis' ? '仓库自动分析' : '复现结果'}>
+    <div className="section-heading"><h3><FileSearch size={18} />{view === 'analysis' ? '项目分析' : '复现结果'}</h3>
       <span className="tag neutral">{analysis ? statuses[analysis.status] : '等待执行结果'}</span>
-      <button className="button secondary" disabled={busy || active || pipelineActive}
-        onClick={() => perform(`/environments/${envId}/analyses`, { version })}><RefreshCw size={15} />分析当前版本</button>
+      {view === 'analysis' && <button className="button secondary" disabled={busy || active || pipelineActive}
+        onClick={() => perform(`/environments/${envId}/analyses`, { version })}><RefreshCw size={15} />分析当前版本</button>}
     </div>
     {analyses.length > 1 && <label>分析记录<select value={analysis?.id} onChange={e => setSelected(e.target.value)}>
       {analyses.map(item => <option key={item.id} value={item.id}>{new Date(item.created * 1000).toLocaleString('zh-CN')} · {statuses[item.status]}</option>)}
     </select></label>}
     {error && <p role="alert">{error}</p>}
-    {analysis?.status === 'waiting_model' && <p className="error-inline">请在“运行配置 → 智能体模型配置”配置分析所需的四个角色，并启用模型工作流，任务将自动继续。</p>}
+    <div hidden={view !== 'analysis'}>
+    {!analysis && <p className="action-hint">尚无分析记录，可分析当前版本或从 Issue 页选择问题。</p>}
+    {analysis?.status === 'waiting_model' && <p className="error-inline">请在“设置 → 模型与供应商 → 分配模型”配置分析所需的四个角色，并启用模型工作流，任务将自动继续。</p>}
     {analysis?.status === 'running' && <p><Loader2 size={14} className="spin" /> {names[stage ?? ''] ?? '正在准备源码与执行证据'}</p>}
     {analysis?.status === 'running' &&
       ['timeout_retry', 'retry_call', 'output_retry', 'format_retry', 'evidence_retry'].includes(analysis.events.at(-1)?.kind ?? '') &&
@@ -326,7 +342,14 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
     </p>}
     {analysis && ['failed', 'interrupted'].includes(analysis.status) &&
       <button className="button secondary" disabled={busy || !analysis.current}
-        onClick={() => perform(`/analyses/${analysis.id}/retry`, { version: analysis.version })}><RefreshCw size={15} />重试分析</button>}
+        onClick={() => perform(`/analyses/${analysis.id}/retry`, { version: analysis.version })}><RefreshCw size={15} />
+        {analysis.report_recovery?.available ? '从已保存证据恢复报告' : '重试分析'}</button>}
+    {analysis?.report_recovery?.available && <p className="diagnosis-meta">
+      已保存审查输入。恢复时会再次检查源码、执行记录、需求和模型配置；依据变化后将重新分析。
+    </p>}
+    {analysis?.task_scope && <details className="disclosure"><summary>任务验收范围 · {analysis.task_scope.done} / {analysis.task_scope.total} 项已完成</summary><TaskScopePanel key={analysis.id} scope={analysis.task_scope} analysisId={analysis.id}
+      analysisVersion={analysis.version} analysisStatus={analysis.status} current={analysis.current}
+      envId={envId} api={api} refresh={refresh} /></details>}
     {analysis?.report && <>
       <p>{analysis.report.summary}</p>
       {analysis.report.execution_scope?.kind === 'desktop_offline' &&
@@ -338,7 +361,18 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       <ul>{analysis.report.limitations.map((item, index) => <li key={index}>{item}</li>)}</ul>
       {analysis.coverage && <p className="diagnosis-meta">源码快照：{analysis.coverage.captured} / {analysis.coverage.eligible} 个可分析文件
         {!analysis.coverage.complete && ' · 存在截断或未采集文件'}</p>}
-      {analysis.historical_review && <section className="historical-review" aria-label="旧问题逐条复核">
+      {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
+      {!!analysis.findings.length && <p>{analysis.findings.length} 个疑似问题等待核验。<button className="text-link" onClick={() => onNavigate?.('reproduction')}>前往复现结果</button></p>}
+    </>}
+    {analysis && analysis.events.length > 0 && <details><summary>Agent 分析记录（{analysis.events.length}）</summary>
+      <ol className="analysis-events">{analysis.events.map((item, index) => <li key={index}>
+        {new Date(item.created * 1000).toLocaleTimeString('zh-CN')} · {eventLabel(item)}
+      </li>)}</ol></details>}
+    </div>
+    <div hidden={view !== 'reproduction'}>
+      {!analysis?.report ? <p className="action-hint">尚无可复现的分析报告，请先完成项目分析。</p> : <>
+      {analysis.findings.length === 0 && <p>本轮没有待反馈的新问题。</p>}
+      <div className="content-card-grid">{analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}</div>      {analysis.historical_review && <section className="historical-review" aria-label="旧问题逐条复核">
         <h4>旧问题逐条复核</h4>
         <p className="diagnosis-meta">同仓库待复核 {analysis.historical_review.total} 项 · 本轮带入 {analysis.historical_review.included} 项。
           这些是模型复核意见，不会自动更改人工确认，也不会自动修复或发布；你可以在条目下方标记处置结论。</p>
@@ -349,13 +383,9 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
         {analysis.historical_review.items.map(item =>
           <HistoricalItem key={item.finding_id} item={item} api={api} refresh={refresh} />)}
       </section>}
-      {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
-      {analysis.findings.map(finding => <FindingItem key={finding.id} analysis={analysis} finding={finding} api={api} refresh={refresh} />)}
-    </>}
-    {analysis && analysis.events.length > 0 && <details><summary>Agent 分析记录（{analysis.events.length}）</summary>
-      <ol className="analysis-events">{analysis.events.map((item, index) => <li key={index}>
-        {new Date(item.created * 1000).toLocaleTimeString('zh-CN')} · {eventLabel(item)}
-      </li>)}</ol></details>}
-    <RepairPanel envId={envId} api={api} />
+
+      <button className="button secondary" onClick={() => onNavigate?.('repair')}>查看修复进度 →</button>
+      </>}
+    </div>
   </section>;
 }

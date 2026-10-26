@@ -16,23 +16,24 @@ FLOW_ROLES = {
 
 ROLE_DETAILS = {
     "repository_analyst": {
-        "name": "仓库分析", "description": "梳理源码入口与执行证据，定位环境故障原因。",
+        "name": "仓库分析", "description": "拆解原始任务范围、入口和平台，梳理源码与执行证据。",
         "flows": ["仓库分析", "环境诊断"],
     },
     "problem_investigator": {
-        "name": "问题调查", "description": "追踪代码路径与触发条件，调查疑似缺陷。",
+        "name": "问题调查", "description": "追踪缺陷与相似实现，补充遗漏的验收项和受阻条件。",
         "flows": ["仓库分析"],
     },
     "reproduction_assistant": {
-        "name": "复现辅助", "description": "整理复现步骤和环境处理建议，复现结果仍由本人确认。",
+        "name": "复现辅助", "description": "逐项整理复现步骤和必要验证；复现结果仍由本人确认。",
         "flows": ["仓库分析", "环境诊断"],
     },
     "repair_agent": {
-        "name": "代码修复", "description": "生成源码修改与新增回归测试，提交隔离验证。",
+        "name": "代码修复", "description": "修复本人确认的问题并新增回归测试，保留范围内未解决项。",
         "flows": ["自动修复"],
     },
     "independent_reviewer": {
-        "name": "独立审查", "description": "审查发现、建议、实际差异与测试证据，给出结论和风险。",
+        "name": "独立审查",
+        "description": "审查任务范围、排除项、实际差异与逐项证据，分别判断覆盖和补丁。",
         "flows": ["仓库分析", "环境诊断", "自动修复"],
     },
 }

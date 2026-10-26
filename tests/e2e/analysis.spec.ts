@@ -16,6 +16,7 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   let evidenceFailure = false;
   let prerequisiteFailure = false;
   let recoveringHandoff = false;
+  let checkpointAvailable = false;
   const provider = { model: '', base_url: 'https://api.openai.com/v1',
     api: 'responses', has_key: false, version: 0, output_protocol: 'json_schema',
     reasoning_effort: 'auto', effective_reasoning_effort: null, configured: false,
@@ -107,7 +108,9 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
         finish_reason: formatFailure ? 'stop' : 'length', output_tokens: formatFailure ? 31 : 6000,
         reasoning_tokens: formatFailure ? 1 : 5999, truncated: !formatFailure,
       } : null,
-      events: prerequisiteFailure ? [...analysis.events,
+      report_recovery: { available: checkpointAvailable && !retried && !recoveringHandoff },
+      events: retried && checkpointAvailable ? [...analysis.events,
+        { kind: 'report_resumed', agent: 'saved_reads_and_handoffs', created: 6 }] : prerequisiteFailure ? [...analysis.events,
         { kind: 'required_read', agent: 'read_execution_records', created: 2 },
         { kind: 'required_read', agent: 'read_source_file', created: 3 },
         { kind: 'required_read_validation', agent: JSON.stringify({ required: 'source',
@@ -160,19 +163,20 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await page.getByRole('button', { name: '运行配置', exact: true }).click();
   const modelCard = page.locator('.agent-model-card').filter({ hasText: 'repository_analyst' });
   await modelCard.getByLabel('模型名称', { exact: true }).fill(deepseek ? 'deepseek-flash' : 'glm-4.7');
-  await modelCard.getByLabel('模型接口', { exact: true }).selectOption('chat_completions');
+  await modelCard.getByRole('combobox', { name: '模型接口', exact: true }).selectOption('chat_completions');
   await modelCard.getByLabel('模型服务地址', { exact: true }).fill(
     deepseek ? 'https://api.deepseek.com' : 'https://open.bigmodel.cn/api/paas/v4');
-  await modelCard.getByLabel('推理强度').selectOption(deepseek ? 'high' : 'auto');
+  await modelCard.getByRole('combobox', { name: '推理强度', exact: true }).selectOption(deepseek ? 'high' : 'auto');
   await modelCard.getByLabel('API Key', { exact: true }).fill('test-key-not-a-real-credential');
   await modelCard.getByRole('button', { name: '保存仓库分析模型' }).click();
   await expect.poll(() => keySaved).toBe(true);
-  await modelCard.getByText(/^当前模型：/).click();
+  await modelCard.getByText('此角色独立配置（兼容已有手工设置）', { exact: true }).click();
   await expect(modelCard.getByLabel('API Key', { exact: true })).toHaveValue('');
   await expect(modelCard.getByText('已保存输出协议：JSON Object', { exact: false })).toBeVisible();
   await expect(modelCard.getByText(deepseek
     ? 'DeepSeek 兼容模式，推理强度不生效' : 'GLM-4.7 直接报告模式', { exact: false })).toBeVisible();
-  await page.getByLabel('启用模型工作流').check();
+  await page.getByLabel('启用模型工作流').click();
+  await expect(page.getByLabel('启用模型工作流')).toBeChecked();
   await page.screenshot({ path: 'test-results/analysis-model-desktop.png', fullPage: true, animations: 'disabled' });
   await page.getByRole('button', { name: '仓库', exact: true }).click();
   await open();
@@ -221,9 +225,21 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await expect(panel.getByText('正在重试当前模型请求，已完成的阶段保留。')).toHaveCount(0);
   recoveringHandoff = false;
 
-  await panel.getByRole('button', { name: '重试分析', exact: true }).click();
+  if (deepseek) {
+    prerequisiteFailure = false;
+    evidenceFailure = false;
+    checkpointAvailable = true;
+    await expect(panel.getByText('已保存审查输入。', { exact: false })).toBeVisible();
+  }
+  await panel.getByRole('button', {
+    name: deepseek ? '从已保存证据恢复报告' : '重试分析', exact: true,
+  }).click();
   await page.setViewportSize({ width: 1440, height: 1080 });
   await expect(panel.getByText('分析已完成', { exact: true })).toBeVisible();
+  if (deepseek) {
+    await expect(panel.getByText('从已保存证据恢复最终报告，仅调用独立审查员', { exact: false })).toBeVisible();
+    await expect(panel.getByRole('button', { name: '从已保存证据恢复报告' })).toHaveCount(0);
+  }
   const historical = panel.getByLabel('旧问题逐条复核');
   await expect(historical).toBeVisible();
   for (const outcome of ['仍存在', '已修复', '疑似误报', '本轮未覆盖']) {
