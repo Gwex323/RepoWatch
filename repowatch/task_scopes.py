@@ -6,7 +6,6 @@ import re
 import time
 
 from .analysis_basis import analysis_current
-from .analysis_tools import tool_allowed
 from .diagnosis import redact, redact_values
 from .scope_models import ScopeRequirement, ScopeReview
 from .store import Conflict, Missing, uid
@@ -214,7 +213,7 @@ def request_scope_review(db, analysis):
 
 
 def register_scope(db, analysis, proposals, actor):
-    if actor != "owner" and not tool_allowed(actor, "register_task_scope"):
+    if actor not in ("repository_analyst", "problem_investigator", "independent_reviewer", "owner"):
         raise Conflict("scope_role_required")
     scope = _bound(db, analysis["id"])
     allowed_status = ("completed", "failed", "interrupted") if actor == "owner" else ("running",)

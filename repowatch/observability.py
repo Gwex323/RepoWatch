@@ -21,8 +21,6 @@ _binding = ContextVar("repowatch_trace_binding", default=None)
 _run = ContextVar("repowatch_trace_run", default=None)
 _IDENTIFIERS = {"task_id", "repo_id", "env_id", "revision", "attempt", "issue_number"}
 _EVENTS = {
-    "tool_arguments_invalid", "tool_arguments_retry", "tool_output_budget",
-    "tool_output_retry", "tool_access_rejected", "scope_registered",
     "timeout_retry", "retry_call", "output_retry", "format_retry", "evidence_retry",
     "handoff_retry", "report_finalization", "report_validation", "verification_resume",
 }
@@ -31,8 +29,6 @@ _FAILURE_CODES = {
     "analysis_service_stopped", "analysis_model_disabled", "analysis_model_required",
     "analysis_model_changed", "analysis_output_truncated", "analysis_json_invalid",
     "analysis_report_invalid", "analysis_evidence_unverified", "analysis_handoff_not_followed",
-    "analysis_tool_arguments_exhausted", "analysis_tool_not_allowed",
-    "analysis_scope_unregistered", "analysis_scope_read_not_followed",
     "repair_deadline_exceeded", "repair_tests_failed", "repair_verification_required",
     "repair_output_truncated", "repair_handoff_incomplete",
 }
