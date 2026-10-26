@@ -141,7 +141,8 @@ def test_cap_inference_expands_budget_but_keeps_high_effort_and_observations():
     assert result is good
     assert [r["model_settings"].max_tokens for r in delegate.requests] == [8000, 12000]
     assert all(r["model_settings"].reasoning.effort == "high" for r in delegate.requests)
-    assert all(r["input"] == "Saved evidence" for r in delegate.requests)
+    assert delegate.requests[0]["input"] == "Saved evidence"
+    assert delegate.requests[1]["input"][0] == {"role": "user", "content": "Saved evidence"}
     diagnostic = json.loads(next(v for k, v in events if k == "tool_arguments_invalid"))
     assert diagnostic["suspected_output_limit"] is True
     assert any(kind == "tool_output_retry" for kind, _ in events)
@@ -209,6 +210,7 @@ def test_native_runner_rejects_whole_batch_and_keeps_prior_real_reads():
     events = []
     class Mixed(ReviewModel):
         invalid_sent = False
+        corrected_sent = False
         async def get_response(self, *args, **kwargs):
             if self.calls == 2 and not self.invalid_sent:
                 self.invalid_sent = True
@@ -216,13 +218,22 @@ def test_native_runner_rejects_whole_batch_and_keeps_prior_real_reads():
                                                      "end_line": 2}),
                                 ("register_task_scope", {"items": [{**ITEM,
                                     "required_evidence": ["wrong"]}]}))
+            if self.invalid_sent and not self.corrected_sent:
+                self.corrected_sent = True
+                return response(("read_source_file", {"path": "app.py", "start_line": 2,
+                                                     "end_line": 2}),
+                                ("register_task_scope", {"items": [ITEM]}))
             return await super().get_response(*args, **kwargs)
+    def event(kind, value):
+        events.append((kind, value))
+        if kind == "scope_proposal":
+            return {"version": 1, "items": json.loads(value), "execution_limits": []}
     report = asyncio.run(run_analysis(Mixed(), {"files": {"app.py": "print('ok')\npass"},
-        "config": {}, "jobs": [], "test_result": None}, lambda *e: events.append(e)))
+        "config": {}, "jobs": [], "test_result": None}, event))
     assert report["execution_read"] and report["files_read"] == ["app.py"]
-    assert sum(kind == "source" for kind, _ in events) == 1
+    assert sum(kind == "source" for kind, _ in events) == 2
     assert sum(kind == "evidence" for kind, _ in events) == 1
-    assert not any(kind == "scope_proposal" for kind, _ in events)
+    assert sum(kind == "scope_proposal" for kind, _ in events) == 1
     assert sum(kind == "handoff" for kind, _ in events) == 3
 
 

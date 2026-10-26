@@ -21,8 +21,8 @@ _binding = ContextVar("repowatch_trace_binding", default=None)
 _run = ContextVar("repowatch_trace_run", default=None)
 _IDENTIFIERS = {"task_id", "repo_id", "env_id", "revision", "attempt", "issue_number"}
 _EVENTS = {
-    "tool_arguments_invalid", "tool_arguments_retry", "tool_output_budget",
-    "tool_output_retry", "tool_access_rejected", "scope_registered",
+    "tool_arguments_invalid", "tool_arguments_retry", "tool_arguments_repaired",
+    "tool_output_budget", "tool_output_retry", "tool_access_rejected", "scope_registered",
     "timeout_retry", "retry_call", "output_retry", "format_retry", "evidence_retry",
     "handoff_retry", "report_finalization", "report_validation", "verification_resume",
 }

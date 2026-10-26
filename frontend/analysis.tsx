@@ -92,7 +92,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_output_truncated: '模型输出未能在有限额度内完整生成，扩容重试仍未完成，本次未保存问题。',
   analysis_provider_empty_response: '模型服务没有返回可用的结果，请检查服务兼容性和状态。',
   analysis_tool_arguments_invalid: '模型工具参数未通过 JSON 或字段校验，本次未执行该调用。',
-  analysis_tool_arguments_exhausted: '模型工具参数仍不符合 JSON 或字段要求，自动纠正次数已用完，未执行未通过校验的调用。',
+  analysis_tool_arguments_exhausted: '工具调用的自动纠正次数已用完，本批调用未执行。请查看最后一次参数校验的具体原因。',
   analysis_tool_not_allowed: '模型请求了当前角色无权使用的工具，该调用已阻止。请查看角色与工具记录。',
   analysis_scope_unregistered: '仓库分析尚未成功登记任务范围，阶段预算已耗尽，本轮未进入后续处理。',
   analysis_scope_read_not_followed: '模型未按要求登记任务范围，本轮未进入后续处理。',
@@ -112,6 +112,49 @@ const names: Record<string, string> = {
   repository_analyst: '仓库分析', problem_investigator: '问题调查',
   reproduction_assistant: '复现辅助', independent_reviewer: '独立审查',
 };
+type ToolArgumentDetail = {
+  role?: string; tool?: string; reason?: string; fields?: string[];
+  recoverable?: boolean; corrections_remaining?: number;
+  issues?: { field: string; code: string }[]; line?: number; column?: number;
+  suspected_output_limit?: boolean;
+};
+const toolNames: Record<string, string> = {
+  register_task_scope: '登记任务范围', read_source_file: '读取源码',
+  read_execution_records: '读取运行记录',
+};
+function toolArgumentReason(detail: ToolArgumentDetail) {
+  const reasons: Record<string, string> = {
+    invalid_json: 'JSON 语法错误', object_required: '参数应为 JSON 对象',
+    unexpected_field: '包含多余字段', arguments_schema: 'JSON 可解析，但字段不符合要求',
+    repair_batch_mismatch: '未按要求纠正原工具批次，不能改为交接、报告或其他调用',
+    repair_valid_fields_changed: '纠正时改动了原有合法字段或条目数量',
+  };
+  const labels: Record<string, string> = {
+    required_field: '缺少必填字段', enum_value: '不在允许选项中',
+    string_required: '应为文本', integer_required: '应为整数', list_required: '应为列表',
+    object_required: '应为对象', unexpected_field: '多余字段', too_long: '超过长度上限',
+    too_short: '未达到最小长度', pattern: '格式不符合要求', invalid_value: '值不符合要求',
+  };
+  const fields = detail.issues?.length
+    ? detail.issues.map(issue => `${issue.field}：${labels[issue.code] ?? '不符合要求'}`).join('；')
+    : detail.fields?.join('、');
+  return `${reasons[detail.reason ?? ''] ?? '字段不符合要求'}${fields ? `（${fields}）` : ''}${
+    detail.line ? ` · 第 ${detail.line} 行第 ${detail.column} 列` : ''}`;
+}
+function analysisFailureMessage(analysis: Analysis) {
+  const message = errorMessage(analysis.error ?? '');
+  if (!['analysis_tool_arguments_invalid', 'analysis_tool_arguments_exhausted'].includes(analysis.error ?? '')) return message;
+  for (let index = analysis.events.length - 1; index >= 0; index--) {
+    const event = analysis.events[index];
+    if (event.kind === 'attempt') break;
+    if (event.kind !== 'tool_arguments_invalid') continue;
+    try {
+      const detail = JSON.parse(event.agent) as ToolArgumentDetail;
+      return `${message} ${toolNames[detail.tool ?? ''] ?? '工具调用'}：${toolArgumentReason(detail)}。`;
+    } catch { return message; }
+  }
+  return message;
+}
 function eventLabel(item: Analysis['events'][number]) {
   const name = names[item.agent] ?? item.agent;
   if (item.kind === 'model_configuration') return agentModelEvent(item.agent);
@@ -142,7 +185,8 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'retry_call') return `${name} · 正在重试当前请求`;
   if (item.kind === 'output_retry') return `${name} · 输出被截断，增加额度后重试当前请求`;
   if (item.kind === 'format_retry') return `${name} · 报告格式不合格，正在纠正一次`;
-  if (item.kind === 'tool_arguments_retry') return `${name} · 保留已有证据，正在自动纠正工具参数`;
+  if (item.kind === 'tool_arguments_retry') return `${name} · 保留已有证据，正在纠正原工具批次`;
+  if (item.kind === 'tool_arguments_repaired') return `${name} · 参数纠正通过校验，等待工具实际执行`;
   if (item.kind === 'scope_registered') return `任务范围已登记：${item.agent} 项`;
   if (item.kind === 'tool_output_budget' || item.kind === 'tool_output_retry') {
     try {
@@ -159,24 +203,8 @@ function eventLabel(item: Analysis['events'][number]) {
   }
   if (item.kind === 'tool_arguments_invalid') {
     try {
-      const detail = JSON.parse(item.agent) as {
-        role?: string; tool?: string; reason?: string; fields?: string[];
-        recoverable?: boolean; corrections_remaining?: number;
-        issues?: { field: string; code: string }[]; line?: number; column?: number;
-        suspected_output_limit?: boolean;
-      };
-      const reason = detail.reason === 'invalid_json' ? 'JSON 格式不合法'
-        : detail.reason === 'object_required' ? '参数应为 JSON 对象'
-          : detail.reason === 'unexpected_field' ? '包含多余字段' : '字段不符合要求';
-      const labels: Record<string, string> = { required_field: '缺少必填字段', enum_value: '不在允许选项中',
-        string_required: '应为文本', integer_required: '应为整数', list_required: '应为列表',
-        object_required: '应为对象', unexpected_field: '多余字段', too_long: '超过长度上限',
-        too_short: '未达到最小长度', pattern: '格式不符合要求', invalid_value: '值不符合要求' };
-      const fields = detail.issues?.length
-        ? detail.issues.map(issue => `${issue.field}：${labels[issue.code] ?? '不符合要求'}`).join('；')
-        : detail.fields?.join('、');
-      return `${names[detail.role ?? ''] ?? '当前角色'} · ${detail.tool ?? '工具'}：${reason}${
-        fields ? `（${fields}）` : ''}${detail.line ? ` · 第 ${detail.line} 行第 ${detail.column} 列` : ''}${
+      const detail = JSON.parse(item.agent) as ToolArgumentDetail;
+      return `${names[detail.role ?? ''] ?? '当前角色'} · ${toolNames[detail.tool ?? ''] ?? '工具调用'}：${toolArgumentReason(detail)}${
         detail.suspected_output_limit ? ' · 疑似达到输出额度' : ''}；本批调用未执行，${
         detail.recoverable ? `准备自动纠正，此后剩余 ${detail.corrections_remaining ?? 0} 次` : '本次自动纠正已停止'}`;
     } catch { return '工具参数校验未通过，本批调用未执行'; }
@@ -375,7 +403,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       本次模型调用 {analysis.progress.model_calls} 轮 · 已读取源码 {analysis.progress.source_reads} 次
     </p>}
     {analysis && !analysis.current && <p className="diagnosis-meta">历史分析 · 当前配置已变化</p>}
-    {analysis?.error && <p role="alert">{errorMessage(analysis.error)}</p>}
+    {analysis?.error && <p role="alert">{analysisFailureMessage(analysis)}</p>}
     {analysis?.error && analysis.failure_details && <p className="diagnosis-meta">
       失败阶段：{names[analysis.failure_details.stage ?? ''] ?? '准备分析'}
       {' · '}耗时 {analysis.failure_details.elapsed_seconds} 秒

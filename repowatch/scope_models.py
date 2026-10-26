@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class ScopeRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=200,
+                       description="Required short title for this acceptance item; never omit.")
     expected: str = Field(min_length=1, max_length=1600)
     paths: list[str] = Field(min_length=1, max_length=12)
     required_evidence: list[Literal["regression", "integration", "client"]] = Field(
