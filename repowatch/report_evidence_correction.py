@@ -7,21 +7,23 @@ from typing import Literal
 from agents import AgentOutputSchema
 from pydantic import BaseModel, ConfigDict, Field
 
-from .scope_models import ScopeSourceEvidence
-
 SECTIONS = ("findings", "historical_rechecks", "scope_items", "scope_exclusions")
 CORRECTION_ERRORS = {
     "evidence_correction_targets_mismatch", "evidence_correction_summary_mismatch",
     "evidence_correction_withdrawal_has_edits", "evidence_correction_requires_withdrawal",
     "evidence_correction_indices_mismatch", "evidence_correction_cannot_append",
     "evidence_correction_invalid_index", "evidence_correction_missing_text",
+    "evidence_correction_unknown_source", "evidence_correction_source_range",
+    "evidence_correction_source_length",
 }
 
 
 class EvidenceEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     evidence: int = Field(ge=0, le=5, strict=True)
-    value: ScopeSourceEvidence
+    source: int = Field(ge=1, strict=True)
+    start_line: int = Field(ge=1, strict=True)
+    end_line: int = Field(ge=1, strict=True)
 
 
 class ItemCorrection(BaseModel):
@@ -50,10 +52,15 @@ class ReportEvidenceCorrection:
 
     schema = AgentOutputSchema(EvidenceCorrection)
 
-    def __init__(self, review, issues):
+    def __init__(self, review, issues, sources=()):
         self.original = review.model_copy(deep=True)
         self.targets = {}
         self.feedback = ""
+        self.sources = {}
+        for file in sources:
+            for block in file["source_blocks"]:
+                reference = len(self.sources) + 1
+                self.sources[reference] = {"source": reference, "path": file["path"], **block}
         data = self.original.model_dump()
         for issue in issues:
             section = ("historical_rechecks" if issue.get("historical") else
@@ -76,9 +83,14 @@ class ReportEvidenceCorrection:
             "The server retains every other report field. Return ONLY the small correction "
             "object below, NOT the complete review. Use the supplied section/item coordinates "
             "exactly once for each target. Indices are 1-based; evidence 0 means add evidence "
-            "only for missing_current_evidence on an empty evidence list. Copy exact text from "
-            "actually read source_blocks, preserving indentation without display line numbers. "
-            "Do not move a quote to an unrelated location to make it pass. For each target, "
+            "only for missing_current_evidence on an empty evidence list. Each edit selects "
+            "one server-supplied source reference and an inclusive start_line/end_line within "
+            "that block. Do NOT return path, quote, value, rewritten code or new source data. "
+            "The server copies the exact selected lines from the immutable, actually read "
+            "snapshot. Select at most 121 lines and 1200 characters, with nonblank text. "
+            "Use a minimal excerpt that actually supports the ORIGINAL claim; prefer its "
+            "existing location. A valid source ID alone does not prove the claim. Do not move "
+            "a quote to an unrelated location to make it pass. For each target, "
             "provide edits for ALL and ONLY the flagged evidence indices. If the claim lacks "
             "support, set withdraw=true, edits=[], and give a concise rationale. Unknown or "
             "duplicate historical IDs MUST be withdrawn. A withdrawn finding is removed with "
@@ -101,8 +113,29 @@ class ReportEvidenceCorrection:
                 evidence_input = json.loads(evidence_input)
             except (ValueError, RecursionError):
                 pass
+        if isinstance(evidence_input, dict):
+            # References below contain the same trusted reads; avoid sending them twice.
+            evidence_input = {key: value for key, value in evidence_input.items()
+                              if key not in {"source_evidence", "review_request"}}
         return json.dumps({"accepted": False, "targets": targets,
+                           "source_references": list(self.sources.values()),
                            "evidence_data": evidence_input}, ensure_ascii=False)
+
+    def selected_evidence(self, edit):
+        """Resolve model coordinates, never accept model-written source text."""
+        source = self.sources.get(edit.source)
+        if source is None:
+            raise ValueError("evidence_correction_unknown_source")
+        if (not source["start_line"] <= edit.start_line <= edit.end_line <= source["end_line"]
+                or edit.end_line - edit.start_line > 120):
+            raise ValueError("evidence_correction_source_range")
+        lines = source["text"].split("\n")
+        quote = "\n".join(lines[edit.start_line - source["start_line"]:
+                                edit.end_line - source["start_line"] + 1])
+        if not quote.strip() or len(quote) > 1200:
+            raise ValueError("evidence_correction_source_length")
+        return {"path": source["path"], "start_line": edit.start_line,
+                "end_line": edit.end_line, "quote": quote}
 
     def apply(self, correction):
         keys = [(item.section, item.item) for item in correction.corrections]
@@ -149,9 +182,9 @@ class ReportEvidenceCorrection:
                         issue["reason"] != "missing_current_evidence" for issue in issues
                     ):
                         raise ValueError("evidence_correction_cannot_append")
-                    row["evidence"].append(edit.value.model_dump())
+                    row["evidence"].append(self.selected_evidence(edit))
                 elif 1 <= edit.evidence <= len(row["evidence"]):
-                    row["evidence"][edit.evidence - 1] = edit.value.model_dump()
+                    row["evidence"][edit.evidence - 1] = self.selected_evidence(edit)
                 else:
                     raise ValueError("evidence_correction_invalid_index")
         for section in ("findings", "historical_rechecks"):

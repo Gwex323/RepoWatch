@@ -51,6 +51,7 @@ from .report_recovery import (
     final_input,
     output_budget,
     public_context,
+    source_evidence,
     valid_checkpoint,
 )
 from .roles import FLOW_ROLES, model_for_role, reasoning_for_role
@@ -205,7 +206,7 @@ class StageModel(Model):
                  final_input=None, review_evidence=None, required_read=None,
                  separate_schema_from_tools=False, retry_handoff_mismatch=False,
                  prepare_review=None, finalization_reserve=FINALIZATION_RESERVE_SECONDS,
-                 tool_parameter_models=None, review_contract=None):
+                 tool_parameter_models=None, review_contract=None, evidence_sources=None):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
@@ -220,6 +221,7 @@ class StageModel(Model):
         self.tool_parameter_models = tool_parameter_models or {}
         self.tool_token_floor = 0
         self.review_contract = review_contract
+        self.evidence_sources = evidence_sources
 
     def handoff_validation(self, response, expected):
         calls = [item for item in response.output if item.type == "function_call"]
@@ -603,11 +605,14 @@ class StageModel(Model):
                                 self.final_input(input) if self.final_input is not None
                                 else final_report_input(input)
                             )
-                            report_correction = ReportEvidenceCorrection(review, issues)
+                            sources = self.evidence_sources() if self.evidence_sources else []
+                            report_correction = ReportEvidenceCorrection(review, issues, sources)
                             correction = ""
                             self.event("evidence_correction", json.dumps({
                                 "role": self.role, "items": len(report_correction.targets),
                                 "issues": len(issues),
+                                "sources": len(report_correction.sources),
+                                "protocol": "source_references",
                             }))
                             continue
                         texts[-1].text = review.model_dump_json()
@@ -1184,6 +1189,9 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             tool_parameter_models=tool_parameter_models,
             review_contract=(lambda review: scope_report_issue(review, context))
             if role == ROLES[-1] else None,
+            evidence_sources=(lambda: source_evidence(context, {
+                "files_read": sorted(inspected), "read_ranges": ranges,
+            })) if role == ROLES[-1] else None,
         )
         for role in ROLES
     }

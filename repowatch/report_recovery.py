@@ -130,7 +130,8 @@ def compact_context(context):
     return replace(value), {reference: text for text, reference in refs.items()}
 
 
-def final_input(context, state):
+def source_evidence(context, state):
+    """Materialize only immutable snapshot lines covered by successful reads."""
     evidence = []
     for path in state["files_read"]:
         lines = context["files"][path].splitlines()
@@ -144,6 +145,11 @@ def final_input(context, state):
             {"start_line": start, "end_line": end, "text": "\n".join(lines[start-1:end])}
             for start, end in merged
         ]})
+    return evidence
+
+
+def final_input(context, state):
+    evidence = source_evidence(context, state)
     run_context, shared_texts = compact_context(context)
     return json.dumps({
         "review_request": (

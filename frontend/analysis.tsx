@@ -72,7 +72,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_provider_timeout: '模型服务响应超时。请检查模型服务负载或网络；旧失败记录不会因配置更新而自动消失。',
   analysis_provider_timeout_exhausted: '模型请求超过等待时限，且本次允许的自动重试已用完。请检查模型服务负载或网络后再重试。',
   analysis_provider_unreachable: '无法连接模型服务，请检查地址与网络。',
-  analysis_evidence_unverified: '模型返回的源码证据未通过校验，本次未保存问题，请重试。',
+  analysis_evidence_unverified: '源码证据未通过完整校验，本次未保存问题。请查看具体原因；若可恢复报告，可从已保存证据继续。',
   analysis_review_incomplete: 'Agent 未完成规定的源码读取与交接，本次未保存问题，请重试。',
   analysis_execution_unread: 'Agent 未读取已保存的测试／启动记录，报告未保存。请重试分析。',
   analysis_source_unread: 'Agent 未成功读取任何源码，报告未保存。请重试分析。',
@@ -143,6 +143,15 @@ function toolArgumentReason(detail: ToolArgumentDetail) {
 }
 function analysisFailureMessage(analysis: Analysis) {
   const message = errorMessage(analysis.error ?? '');
+  if (['analysis_evidence_unverified', 'analysis_report_invalid'].includes(analysis.error ?? '')) {
+    const kind = analysis.error === 'analysis_evidence_unverified' ? 'evidence_validation' : 'report_validation';
+    for (let index = analysis.events.length - 1; index >= 0; index--) {
+      const event = analysis.events[index];
+      if (event.kind === 'attempt') break;
+      if (event.kind === kind) return `${message} ${eventLabel(event)}。`;
+    }
+    return message;
+  }
   if (analysis.error === 'analysis_output_truncated') {
     const response = analysis.provider_response;
     const content = response?.payload_tokens ?? (response?.output_tokens !== undefined && response.reasoning_tokens !== undefined
@@ -226,8 +235,8 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'evidence_retry') return `${name} · 源码证据不匹配，正在纠正一次`;
   if (item.kind === 'evidence_correction') {
     try {
-      const detail = JSON.parse(item.agent) as { role?: string; items?: number; issues?: number };
-      return `${names[detail.role ?? ''] ?? '独立审查'} · 保留报告其他内容，仅纠正 ${detail.items ?? 0} 项中的 ${detail.issues ?? 0} 处证据`;
+      const detail = JSON.parse(item.agent) as { role?: string; items?: number; issues?: number; protocol?: string };
+      return `${names[detail.role ?? ''] ?? '独立审查'} · 保留报告其他内容，仅纠正 ${detail.items ?? 0} 项中的 ${detail.issues ?? 0} 处证据${detail.protocol === 'source_references' ? '；选择已读片段，由程序复制源码原文' : ''}`;
     } catch { return '保留报告其他内容，仅纠正未通过校验的证据'; }
   }
   if (item.kind === 'evidence_correction_applied') return `${name} · 已合并证据纠正，正在检查完整报告`;
@@ -254,10 +263,16 @@ function eventLabel(item: Analysis['events'][number]) {
   }
   if (item.kind === 'report_finalization') return `${name} · 使用已读取证据生成最终报告`;
   if (item.kind === 'finalization_thinking') return '最终报告请求：已关闭额外思考';
-  if (item.kind === 'report_validation') return item.agent === 'invalid_json'
+  if (item.kind === 'report_validation') {
+    const selectionReason = ({ evidence_correction_unknown_source: '所选源码片段编号不在实际读取目录中',
+      evidence_correction_source_range: '所选行区间越界、跨越未读间隙或超过行数上限',
+      evidence_correction_source_length: '所选源码片段为空白或超过 1200 字符' } as Record<string, string>)[item.agent];
+    if (selectionReason) return `证据选择检查：${selectionReason}`;
+    return item.agent === 'invalid_json'
     ? '报告格式检查：不是合法 JSON' : item.agent === 'scope_review_required'
       ? '报告范围检查：缺少已登记验收项的审查结论' : item.agent === 'scope_review_incomplete'
         ? '报告范围检查：版本、验收项或运行限制未完整覆盖' : '报告格式检查：字段不符合要求';
+  }
   if (item.kind === 'report_diagnostics') {
     try {
       const detail = JSON.parse(item.agent) as { category?: string; text_chars?: number; line?: number; column?: number };

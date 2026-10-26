@@ -94,10 +94,9 @@ class ReviewModel(Model):
             return final_message(json.dumps({"summary": None, "corrections": [{
                 "section": target["section"], "item": target["item"], "withdraw": False,
                 "rationale": "Synthetic evidence correction only.",
-                "edits": [{"evidence": issue["evidence"], "value": {
-                    "path": "app.py", "start_line": 1, "end_line": 1,
-                    "quote": "invented quote" if self.invented else "print('ok')",
-                }} for issue in target["issues"]],
+                "edits": [{"evidence": issue["evidence"],
+                           "source": len(packet["source_references"]) + 1 if self.invented else 1,
+                           "start_line": 1, "end_line": 1} for issue in target["issues"]],
             } for target in packet["targets"]]}))
         if self.calls == 1:
             name, args = "read_execution_records", {}
@@ -711,7 +710,7 @@ def test_evidence_correction_does_not_replay_tools_or_handoffs():
                 return final_message(evidence_review("private-secret").model_dump_json())
             assert kwargs["tools"] == [] and kwargs["handoffs"] == []
             assert kwargs["model_settings"].tool_choice == "none"
-            assert "source_blocks" in kwargs["input"]
+            assert "source_references" in kwargs["input"]
             assert "private-secret" not in kwargs.get("system_instructions", "")
             packet = json.loads(kwargs["input"])
             assert packet["accepted"] is False
@@ -749,7 +748,7 @@ def test_numbered_evidence_is_canonicalized_before_sdk_output_and_persistence():
 def test_repeated_forged_evidence_fails_after_one_correction():
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     events = []
-    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+    with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(ReviewModel(invented=True), context, lambda *e: events.append(e)))
     assert sum(kind == "evidence_retry" for kind, _ in events) == 1
     assert sum(kind == "source" for kind, _ in events) == 1
@@ -960,7 +959,7 @@ def test_correction_never_bypasses_source_evidence_checks():
         return await original(*args, **kwargs)
 
     model.get_response = bad_then_invented
-    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+    with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(model, context))
     assert len(attempts) == 3
 
@@ -1303,7 +1302,7 @@ def test_native_source_tools_handoffs_and_evidence_validation():
     assert len(report["handoffs"]) == 3
     assert ("source", "app.py") in events
     assert report["findings"][0]["evidence"][0]["quote"] == "print('ok')"
-    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+    with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(ReviewModel(invented=True), context))
     with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
         asyncio.run(run_analysis(ReviewModel(skip_review=True), context))
