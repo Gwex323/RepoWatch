@@ -407,7 +407,7 @@ class StageModel(Model):
                     )
                     self.event("tool_arguments_invalid", json.dumps(detail))
                     if not retry:
-                        raise AnalysisFailure("analysis_tool_arguments_invalid")
+                        raise AnalysisFailure("analysis_tool_arguments_exhausted")
                     self.retries.tool_arguments_used += 1
                     self.event("tool_arguments_retry", self.role)
                     tool_correction = (
