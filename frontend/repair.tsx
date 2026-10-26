@@ -12,6 +12,7 @@ type Repair = {
   finding_feedback?: { note: string } | null;
   timeout_recovery_available?: boolean;
   source_read_recovery_available?: boolean;
+  submission_recovery_available?: boolean;
   failure_recovery_available?: boolean;
   output_recovery_available?: boolean;
   protocol_recovery_available?: boolean;
@@ -37,6 +38,8 @@ type Repair = {
 };
 const labels: Record<string, string> = {
   submission_required: '探索已结束，要求提交补丁并验证',
+  tool_selection_retry: '工具选择不符合当前阶段，整批未执行，正在纠正',
+  submission_recovery: '已使用新版提交校验策略的一次恢复机会',
   cancelled: '已关闭', false_positive: '误报 · 用户已确认，已关闭',
   queued: '等待修复', waiting_environment: '等待 Docker 环境', running: '修复执行中',
   failed: '修复未完成', interrupted: '修复已中断',
@@ -86,6 +89,8 @@ const errors: Record<string, string> = {
   repair_file_unavailable: '所需文件超出可处理范围或无法读取。',
   repair_model_budget: '模型已达到本轮调用预算。',
   repair_read_budget: '源码读取已达到本轮预算。',
+  repair_submission_not_followed: '模型仍未按要求提交补丁，自动纠正已用完，违规调用未执行。',
+  repair_tool_selection_invalid: '模型选择了当前阶段不允许的工具或多个调用，自动纠正已用完，整批未执行。',
   repair_patch_limit: '补丁超过大小限制。',
   repair_source_limit: '源码超过下载范围限制，请重新下载并分析。',
   repair_handoff_incomplete: '修复与独立审查未完成规定交接。',
@@ -370,6 +375,8 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
         <p>超时策略已更新，此任务可额外重试一次。</p>}
       {task.source_read_recovery_available && task.can_retry &&
         <p>文件读取策略已更新，此任务可额外重试一次。</p>}
+      {task.submission_recovery_available && task.can_retry &&
+        <p>旧版任务在要求提交后仍继续读取，未产出补丁。提交校验已更新，可恢复一次，原尝试记录保留。</p>}
       {task.failure_recovery_available && task.can_retry &&
         <p>错误处理已更新，此任务可额外重试一次。</p>}
       {task.output_recovery_available && task.can_retry &&
@@ -417,7 +424,7 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
           void api(`/repairs/${task.id}/retry`, { version: task.version })
             .then(() => api<Repair[]>(`/environments/${envId}/repairs`)).then(setTasks)
             .catch(e => setError(message(e.message))).finally(() => setBusy(''));
-        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available || task.review_evidence_recovery_available
+        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.submission_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available || task.review_evidence_recovery_available
           ? '使用新策略重试' : task.publication_retry_available ? '仅重试发布' : task.docker_recovery_available ? '继续修复' : task.status === 'waiting_environment' ? '检查并继续' : '重试修复'}</button>}
       {task.diff && <details><summary>代码差异</summary><pre>{task.diff}</pre></details>}
       {task.verification && <details><summary>修复验证记录</summary>

@@ -23,6 +23,8 @@ BLOCKED_PARTS = {
 }
 MAX_FILE_BYTES = 32000
 SOURCE_READ_POLICY = "recoverable_source_reads_v1"
+MAX_SOURCE_READS = 24
+MAX_SOURCE_READ_CHARS = 100000
 MAX_VERIFICATION_REVISIONS = 3
 
 
@@ -173,9 +175,15 @@ class RepairWorkspace:
                 continue
         return {"files": eligible[:600], "truncated": len(eligible) > 600}
 
+    @property
+    def source_read_budget_low(self):
+        """Reserve submission before another maximum-size file can exhaust reads."""
+        return (self.read_count >= MAX_SOURCE_READS - 1
+                or self.read_chars + MAX_FILE_BYTES > MAX_SOURCE_READ_CHARS)
+
     def read(self, name, *, candidate=False):
         self.check()
-        if self.read_count >= 24:
+        if self.read_count >= MAX_SOURCE_READS:
             raise Conflict("repair_read_budget")
         self.read_count += 1
         root = self.candidate if candidate else self.original
@@ -199,7 +207,7 @@ class RepairWorkspace:
             text = raw.decode("utf-8")
         except UnicodeError:
             raise SourceReadUnavailable(name, candidate, "invalid_utf8") from None
-        if self.read_chars + len(text) > 100000:
+        if self.read_chars + len(text) > MAX_SOURCE_READ_CHARS:
             raise Conflict("repair_read_budget")
         self.read_chars += len(text)
         problem = source_problem(text, name)

@@ -17,6 +17,7 @@ from .repair_model import (
     OUTPUT_POLICY,
     PROTOCOL_POLICY,
     REVIEW_EVIDENCE_POLICY,
+    SUBMISSION_POLICY,
     VERIFICATION_POLICY,
     RepairReview,
     repair_failure_code,
@@ -158,6 +159,7 @@ class Repairs(EnvironmentRecovery):
             ).fetchone()[0])
             result["timeout_recovery_available"] = self._timeout_recovery(row)
             result["source_read_recovery_available"] = self._source_read_recovery(row)
+            result["submission_recovery_available"] = self._submission_recovery(db, row)
             result["failure_recovery_available"] = self._failure_recovery(row)
             result["output_recovery_available"] = self._output_recovery(db, row)
             result["protocol_recovery_available"] = self._protocol_recovery(db, row)
@@ -178,6 +180,7 @@ class Repairs(EnvironmentRecovery):
                 and (result["publication_retry_available"] or result["docker_recovery_available"]
                      or row["attempt"] < self._attempt_limit(row) or self._timeout_recovery(row)
                      or self._source_read_recovery(row) or self._failure_recovery(row)
+                     or result["submission_recovery_available"]
                      or result["output_recovery_available"]
                      or result["protocol_recovery_available"]
                      or result["workspace_recovery_available"]
@@ -210,6 +213,7 @@ class Repairs(EnvironmentRecovery):
         context = json.loads(row["context"])
         return (REPAIR_MAX_ATTEMPTS + int(context.get("timeout_recovery_used") is True)
                 + int(context.get("source_read_recovery_used") is True)
+                + int(context.get("submission_recovery_used") is True)
                 + int(context.get("failure_recovery_used") is True)
                 + int(context.get("output_recovery_used") is True)
                 + int(context.get("protocol_recovery_used") is True)
@@ -281,6 +285,30 @@ class Repairs(EnvironmentRecovery):
             and context.get("source_read_policy") != SOURCE_READ_POLICY
             and not context.get("source_read_recovery_used")
         )
+
+    @classmethod
+    def _submission_recovery(cls, db, row):
+        context = json.loads(row["context"])
+        if not (
+            row["status"] == "failed" and row["stage"] == "repair_agent"
+            and row["error"] in {"repair_read_budget", "repair_verification_required"}
+            and row["attempt"] == cls._attempt_limit(row)
+            and context.get("submission_policy") != SUBMISSION_POLICY
+            and not context.get("submission_recovery_used")
+            and not row["patch"] and not row["verification"]
+            and not row["review"] and not row["remote"]
+        ):
+            return False
+        # Only a recorded old-policy submission phase qualifies; an arbitrary
+        # read failure or a newer policy failure cannot acquire another attempt.
+        for event in db.execute(
+            "SELECT kind FROM repair_events WHERE repair_id=? ORDER BY id DESC", (row["id"],),
+        ):
+            if event["kind"] in ("retry", "queued"):
+                return False
+            if event["kind"] == "submission_required":
+                return True
+        return False
 
     @classmethod
     def _failure_recovery(cls, row):
@@ -562,6 +590,7 @@ class Repairs(EnvironmentRecovery):
             workspace_recovery = self._workspace_recovery(db, row)
             verification_recovery = self._verification_recovery(row)
             review_evidence_recovery = self._review_evidence_recovery(db, row)
+            submission_recovery = self._submission_recovery(db, row)
             publication_retry = self._publication_retry_available(row)
             docker_recovery = self._docker_recovery(db, row)
             if (self._publication_failure(row) and not publication_retry):
@@ -571,6 +600,7 @@ class Repairs(EnvironmentRecovery):
                     or (row["attempt"] >= self._attempt_limit(row)
                         and not self._timeout_recovery(row)
                         and not self._source_read_recovery(row)
+                        and not submission_recovery
                         and not self._failure_recovery(row)
                         and not output_recovery and not protocol_recovery
                         and not workspace_recovery and not publication_retry
@@ -594,6 +624,8 @@ class Repairs(EnvironmentRecovery):
                 context.update(
                     source_read_recovery_used=True, source_read_policy=SOURCE_READ_POLICY,
                 )
+            if submission_recovery:
+                context.update(submission_recovery_used=True, submission_policy=SUBMISSION_POLICY)
             if failure_recovery:
                 context.update(failure_recovery_used=True, failure_policy=FAILURE_POLICY)
             if output_recovery:
@@ -655,6 +687,8 @@ class Repairs(EnvironmentRecovery):
             self.event(repair_id, "timeout_recovery", REPAIR_REQUEST_POLICY)
         if read_recovery:
             self.event(repair_id, "source_read_recovery", SOURCE_READ_POLICY)
+        if submission_recovery:
+            self.event(repair_id, "submission_recovery", SUBMISSION_POLICY)
         if failure_recovery:
             self.event(repair_id, "failure_recovery", FAILURE_POLICY)
         if output_recovery:
@@ -718,6 +752,7 @@ class Repairs(EnvironmentRecovery):
                 return None
             context["request_policy"] = REPAIR_REQUEST_POLICY
             context["source_read_policy"] = SOURCE_READ_POLICY
+            context["submission_policy"] = SUBMISSION_POLICY
             context["failure_policy"] = FAILURE_POLICY
             context["output_policy"] = OUTPUT_POLICY
             context["protocol_policy"] = PROTOCOL_POLICY
