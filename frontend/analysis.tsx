@@ -258,6 +258,8 @@ function HistoricalItem({ item, api, refresh }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const canDispose = ['waiting_reproduction', 'confirmed', 'not_reproduced'].includes(item.live_status ?? '');
+  const dispositionLabel = item.live_status && ['false_positive', 'resolved', 'not_reproduced'].includes(item.live_status)
+    ? statuses[item.live_status] : null;
   const submit = (decision: 'not_reproduced' | 'resolved' | 'false_positive') => {
     setBusy(true); setError('');
     void api(`/analyses/${item.analysis_id}/findings/${item.finding_id}/disposition`, {
@@ -266,9 +268,9 @@ function HistoricalItem({ item, api, refresh }: {
   };
   return <article className="analysis-finding">
     <div className="section-heading"><h4>{item.data.title}</h4>
-      <span className="tag neutral">{item.live_status === 'false_positive' ? statuses.false_positive
-        : item.result ? historicalOutcomes[item.result.outcome] : '本轮未覆盖'}</span></div>
-    {item.live_status === 'false_positive' && <p role="status">{item.live_feedback?.note}</p>}
+      <span className="tag neutral">{dispositionLabel ??
+        (item.result ? historicalOutcomes[item.result.outcome] : '本轮未覆盖')}</span></div>
+    {dispositionLabel && <p role="status">{item.live_feedback?.note}</p>}
     <p className="diagnosis-meta">原版本 {item.revision.slice(0, 12)} · 原人工状态：{statuses[item.human_status] ?? item.human_status}
       {' · '}记录 {item.finding_id} / v{item.version}</p>
     {item.live_status && item.live_status !== item.human_status &&

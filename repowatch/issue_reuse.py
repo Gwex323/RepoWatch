@@ -24,6 +24,9 @@ def similar_issue(request, repository, finding):
     topic-only matches are left separate. Exhausted/failed scans never create an Issue.
     """
     title = _title(finding["title"])
+    anchors = set(re.findall(r"[a-z_][a-z_0-9]{2,}", finding["title"].casefold())) - {
+        "the", "and", "for", "with", "from", "into", "when", "error", "issue",
+    }
     paths = {entry["path"].casefold() for entry in finding.get("evidence", [])}
     grams = _grams(title)
     matches = []
@@ -48,11 +51,27 @@ def similar_issue(request, repository, finding):
             shared_paths = sorted(path for path in paths if re.search(
                 r"(?<![\w./-])" + re.escape(path) + r"(?![\w./-])", text,
             ))
+            # The remaining symptom may be documented in a risk/follow-up paragraph
+            # while the title still names the first fixed variant of the defect.
+            description_match = False
+            description_score = 0.0
+            if shared_paths and ratio >= 0.45 and overlap >= 0.35:
+                for line in str(item.get("body") or "")[:65536].splitlines()[:512]:
+                    common = len(grams & _grams(_title(line)))
+                    coverage = common / max(1, len(grams))
+                    line_anchors = set(re.findall(r"[a-z_][a-z_0-9]{2,}", line.casefold()))
+                    anchored = len(anchors & line_anchors) >= 2
+                    if common >= 10 and (coverage >= 0.75 or coverage >= 0.55 and anchored):
+                        description_match = True
+                        description_score = max(description_score, coverage)
             exact = len(title) >= 10 and title == other
-            if exact or (shared_paths and ratio >= 0.45 and overlap >= 0.55
-                         and len(grams & other_grams) >= 8):
-                matches.append((exact, ratio + overlap, item["state"] == "open",
-                                item, shared_paths))
+            title_match = (shared_paths and ratio >= 0.45 and overlap >= 0.55
+                           and len(grams & other_grams) >= 8)
+            if exact or title_match or description_match:
+                reason = ("identical_title" if exact else "source_and_symptom" if title_match
+                          else "source_and_description")
+                matches.append((exact, ratio + max(overlap, description_score),
+                                item["state"] == "open", item, shared_paths, reason))
         if len(items) < 100:
             break
     else:
@@ -61,8 +80,8 @@ def similar_issue(request, repository, finding):
         return None
     matches.sort(key=lambda match: (match[0], match[1], match[2], -match[3]["number"]),
                  reverse=True)
-    exact, score, _, item, shared_paths = matches[0]
-    return {"item": item, "reason": "identical_title" if exact else "source_and_symptom",
+    _, score, _, item, shared_paths, reason = matches[0]
+    return {"item": item, "reason": reason,
             "paths": shared_paths, "score": round(score, 4)}
 
 
