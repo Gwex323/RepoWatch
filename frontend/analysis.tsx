@@ -6,6 +6,7 @@ import { TaskScopePanel, type TaskScope } from './task-scope';
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Finding = {
   id: string; status: string; version: number;
+  feedback?: { note: string; decision: string } | null;
   data: {
     title: string; severity: string; explanation: string; expected: string; suspected_actual: string;
     reproduction: string[]; evidence: { path: string; start_line: number; end_line: number; quote: string }[];
@@ -19,6 +20,7 @@ type HistoricalReview = {
     revision: string; content_clipped: boolean; data: Finding['data'];
     result: { outcome: HistoricalOutcome; rationale: string; evidence: Finding['data']['evidence'] } | null;
     live_status?: string | null; live_version?: number | null;
+    live_feedback?: { note: string; decision: string } | null;
   }[];
 };
 const historicalOutcomes: Record<HistoricalOutcome, string> = {
@@ -45,7 +47,7 @@ const statuses: Record<string, string> = {
   completed: '分析已完成', failed: '分析未完成', interrupted: '分析已中断',
   superseded: '已被新执行结果替代',
   waiting_reproduction: '待人工复现', confirmed: '复现成功', not_reproduced: '未能复现',
-  resolved: '已解决',
+  resolved: '已解决', false_positive: '误报 · 用户已确认，已关闭',
 };
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
@@ -82,6 +84,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   finding_closed: '该旧问题已记录处置结论，无需重复操作。',
   repair_running: '该问题正在修复中，暂不能改判；请等修复结束或停止任务。',
   resolution_note_required: '手动标记解决必须填写处置说明。',
+  false_positive_note_required: '请填写确认误报的原因。',
   resolution_pr_not_merged: '修复 PR 尚未合并，请先在 GitHub 完成合并。',
   resolution_verification_failed: '无法核验修复 PR 的合并状态，请检查 GitHub 账号与网络后重试。',
   analysis_max_turns_exceeded: '分析已达到总调用轮数上限，尚未生成完整报告。',
@@ -213,6 +216,12 @@ function FindingItem({ analysis, finding, api, refresh }: {
       version: finding.version, decision, note, personally_reproduced: decision === 'confirmed',
     }).then(refresh).catch(e => setError(errorMessage(e.message))).finally(() => setBusy(false));
   };
+  const closeFalsePositive = () => {
+    setBusy(true); setError('');
+    void api(`/analyses/${analysis.id}/findings/${finding.id}/disposition`, {
+      version: finding.version, decision: 'false_positive', note,
+    }).then(refresh).catch(e => setError(errorMessage(e.message))).finally(() => setBusy(false));
+  };
   return <article className="analysis-finding">
     <div className="section-heading"><h3>{finding.data.severity} · {finding.data.title}</h3>
       <span className="tag neutral">{statuses[finding.status]}</span></div>
@@ -222,16 +231,21 @@ function FindingItem({ analysis, finding, api, refresh }: {
       <strong>{item.path}:{item.start_line}–{item.end_line}</strong><pre>{item.quote}</pre>
     </div>)}
     <strong>复现步骤</strong><ol>{finding.data.reproduction.map((step, index) => <li key={index}>{step}</li>)}</ol>
-    {finding.status === 'waiting_reproduction' && analysis.current && <div className="analysis-feedback">
-      <label>复现说明（选填）<textarea maxLength={2000} rows={3} value={note}
+    {['waiting_reproduction', 'confirmed', 'not_reproduced'].includes(finding.status) && <div className="analysis-feedback">
+      <label>处置说明（确认误报时必填）<textarea maxLength={2000} rows={3} value={note}
         onChange={e => setNote(e.target.value)} disabled={busy} /></label>
       <div className="execution-actions">
+        {finding.status === 'waiting_reproduction' && analysis.current && <>
         <button className="button secondary" disabled={busy}
           onClick={() => submit('confirmed')}><Check size={15} />复现成功</button>
         <button className="button secondary" disabled={busy} onClick={() => submit('not_reproduced')}>
           <X size={15} />未能复现</button>
+        </>}
+        <button className="button secondary" disabled={busy || !note.trim()} onClick={closeFalsePositive}>
+          确认误报并关闭</button>
       </div>
     </div>}
+    {finding.status === 'false_positive' && <p role="status">{finding.feedback?.note}</p>}
     {error && <p role="alert">{error}</p>}
   </article>;
 }
@@ -243,8 +257,8 @@ function HistoricalItem({ item, api, refresh }: {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const canDispose = item.live_status === 'waiting_reproduction' || item.live_status === 'confirmed';
-  const submit = (decision: 'not_reproduced' | 'resolved') => {
+  const canDispose = ['waiting_reproduction', 'confirmed', 'not_reproduced'].includes(item.live_status ?? '');
+  const submit = (decision: 'not_reproduced' | 'resolved' | 'false_positive') => {
     setBusy(true); setError('');
     void api(`/analyses/${item.analysis_id}/findings/${item.finding_id}/disposition`, {
       version: item.live_version, decision, note,
@@ -252,7 +266,9 @@ function HistoricalItem({ item, api, refresh }: {
   };
   return <article className="analysis-finding">
     <div className="section-heading"><h4>{item.data.title}</h4>
-      <span className="tag neutral">{item.result ? historicalOutcomes[item.result.outcome] : '本轮未覆盖'}</span></div>
+      <span className="tag neutral">{item.live_status === 'false_positive' ? statuses.false_positive
+        : item.result ? historicalOutcomes[item.result.outcome] : '本轮未覆盖'}</span></div>
+    {item.live_status === 'false_positive' && <p role="status">{item.live_feedback?.note}</p>}
     <p className="diagnosis-meta">原版本 {item.revision.slice(0, 12)} · 原人工状态：{statuses[item.human_status] ?? item.human_status}
       {' · '}记录 {item.finding_id} / v{item.version}</p>
     {item.live_status && item.live_status !== item.human_status &&
@@ -264,15 +280,19 @@ function HistoricalItem({ item, api, refresh }: {
       <pre>{evidence.quote}</pre>
     </details>)}
     {canDispose && item.live_version !== null && item.live_version !== undefined && <div className="analysis-feedback">
-      <label>处置说明（选填）<textarea maxLength={2000} rows={3} value={note}
+      <label>处置说明（确认误报或手动标记解决时必填）<textarea maxLength={2000} rows={3} value={note}
         onChange={e => setNote(e.target.value)} disabled={busy} /></label>
       <div className="execution-actions">
+        {item.live_status !== 'not_reproduced' && <>
         <button className="button secondary" disabled={busy} onClick={() => submit('not_reproduced')}>
-          <X size={15} />标记未能复现（含误报）
+          <X size={15} />标记未能复现
         </button>
         <button className="button secondary" disabled={busy} onClick={() => submit('resolved')}>
           <Check size={15} />标记已解决
         </button>
+        </>}
+        <button className="button secondary" disabled={busy || !note.trim()} onClick={() => submit('false_positive')}>
+          确认误报并关闭</button>
       </div>
     </div>}
     {error && <p role="alert">{error}</p>}
@@ -362,7 +382,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       {analysis.coverage && <p className="diagnosis-meta">源码快照：{analysis.coverage.captured} / {analysis.coverage.eligible} 个可分析文件
         {!analysis.coverage.complete && ' · 存在截断或未采集文件'}</p>}
       {analysis.findings.length === 0 && <p>本轮未提出有充分依据的疑似问题；这不代表旧问题已解决或整个项目不存在问题。</p>}
-      {!!analysis.findings.length && <p>{analysis.findings.length} 个疑似问题等待核验。<button className="text-link" onClick={() => onNavigate?.('reproduction')}>前往复现结果</button></p>}
+      {!!analysis.findings.length && <p>{analysis.findings.filter(item => item.status === 'waiting_reproduction').length} 个疑似问题等待核验。<button className="text-link" onClick={() => onNavigate?.('reproduction')}>前往复现结果</button></p>}
     </>}
     {analysis && analysis.events.length > 0 && <details><summary>Agent 分析记录（{analysis.events.length}）</summary>
       <ol className="analysis-events">{analysis.events.map((item, index) => <li key={index}>

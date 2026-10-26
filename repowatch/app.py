@@ -190,7 +190,7 @@ class FindingFeedbackBody(StrictBody):
 
 class FindingDispositionBody(StrictBody):
     version: int = Field(ge=1, strict=True)
-    decision: Literal["not_reproduced", "resolved"]
+    decision: Literal["not_reproduced", "resolved", "false_positive"]
     note: str = Field(default="", max_length=2000)
 
 
@@ -531,7 +531,9 @@ def create_app(
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
                 "AND t.status='running') AS repair_running,"
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
-                "AND t.status IN ('failed','interrupted')) AS repair_failed,"
+                "AND t.status IN ('failed','interrupted') AND EXISTS "
+                "(SELECT 1 FROM analysis_findings f WHERE f.id=t.finding_id "
+                "AND f.status='confirmed')) AS repair_failed,"
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
                 "AND t.status='pr_created') AS repair_published "
                 "FROM repository_analyses a JOIN repositories r ON r.id=a.repo_id "

@@ -8,6 +8,8 @@ type Verification = Record<string, { command?: string; exit_code: number; log: s
 type Repair = {
   id: string; finding_id: string; version: number; status: string; stage: string | null;
   attempt: number; error: string | null; enabled: boolean; can_retry: boolean; revision: string;
+  finding_status?: string | null;
+  finding_feedback?: { note: string } | null;
   timeout_recovery_available?: boolean;
   source_read_recovery_available?: boolean;
   failure_recovery_available?: boolean;
@@ -34,6 +36,7 @@ type Repair = {
     review: { summary: string } | null }[];
 };
 const labels: Record<string, string> = {
+  cancelled: '已关闭', false_positive: '误报 · 用户已确认，已关闭',
   queued: '等待修复', waiting_environment: '等待 Docker 环境', running: '修复执行中',
   failed: '修复未完成', interrupted: '修复已中断',
   pr_created: 'PR 已创建', repair_agent: '修改代码', independent_reviewer: '独立审查',
@@ -61,6 +64,7 @@ const labels: Record<string, string> = {
   review_evidence_recovery: '使用已保存补丁重新验证并恢复独立审查',
 };
 const errors: Record<string, string> = {
+  repair_remote_scan_limit: '相似 Issue 或评论扫描达到数量上限，检查尚未完成，本次停止发布。',
   repair_paused: '自动修复已暂停。请在「设置 → 自动修复」中启用后重试。',
   repair_model_required: '请先配置代码修复与独立审查模型，并启用模型工作流。',
   repair_settings_changed: '修复配置已变化，请刷新后重试。',
@@ -283,7 +287,7 @@ export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?:
           onChange={e => setSettings({ ...settings, enabled: e.target.checked })} />自动修复并提交 Issue / PR</label>
         <button className="button secondary" disabled={busy}><Save size={15} />保存修复配置</button>
       </div>
-      <p className="diagnosis-meta">已有 Issue 只提交关联原编号的修复 PR；系统新发现的问题会创建 Issue 和 PR。</p>
+      <p className="diagnosis-meta">已有 Issue 关联原编号；新发现的问题先查找相似 Issue，匹配时补充评论，否则新建 Issue，再提交修复 PR。</p>
       <dl className="repair-facts">
         <div><dt>模型</dt><dd>{(modelEnabled ?? settings.model_enabled) ? '代码修复与独立审查模型已就绪' : '等待修复角色模型配置或启用'}</dd></div>
         <div><dt>每个问题</dt><dd>最多 {settings.max_attempts} 次尝试</dd></div>
@@ -314,7 +318,8 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
       .then(() => api<Repair[]>(`/environments/${envId}/repairs`)).then(setTasks)
       .catch(e => setError(message(e.message))).finally(() => setBusy(''));
   };
-  const publication = (task: Repair) => !!task.remote || !!task.publication_retry_available || task.stage === 'publishing' || (task.context.publication_retries ?? 0) > 0;
+  const publication = (task: Repair) => !!task.remote || (task.finding_status !== 'false_positive' &&
+    (!!task.publication_retry_available || task.stage === 'publishing' || (task.context.publication_retries ?? 0) > 0));
   if (view === 'pr') return <section aria-label="PR 发布结果">
     <h3>PR 与发布</h3>
     {error && <p role="alert">{error}</p>}
@@ -340,19 +345,20 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
     {error && <p role="alert">{error}</p>}
     {tasks.map(task => <article className="repair-task" key={task.id}>
       <div className="section-heading"><h4>{task.context.finding.title}</h4>
-        <span className="tag neutral">{!task.enabled && task.status === 'queued'
+        <span className="tag neutral">{task.finding_status === 'false_positive' ? labels.false_positive : !task.enabled && task.status === 'queued'
           ? '等待启用自动修复' : labels[task.status] ?? task.status}</span></div>
+      {task.finding_status === 'false_positive' && <p role="status">{task.finding_feedback?.note}。已停止该问题的修复；下方补丁与验证仅保留为历史记录。</p>}
       <p className="diagnosis-meta">版本 {task.revision.slice(0, 12)} · 已尝试 {task.attempt} 次
         {task.stage && ` · ${labels[task.stage] ?? task.stage}`}</p>
       {task.source_kind === 'existing_issue' && task.source_issue && <p className="diagnosis-meta">
         来源：<a href={task.source_issue.url} target="_blank" rel="noopener noreferrer">
           原 Issue #{task.source_issue.number}</a> · 修复 PR 将关联原编号</p>}
       {task.source_error && task.source_error !== task.error && <p role="alert">{message(task.source_error)}</p>}
-      {task.task_scope && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
+      {task.task_scope && task.finding_status !== 'false_positive' && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
         {' · '}{task.task_scope.complete ? '当前范围已核验' : task.task_scope.reviewed
           ? '整体尚未完成，部分修复不关闭原 Issue' : '完整性未核验，不自动关闭原 Issue'}</p>}
       {task.status === 'running' && <p><Loader2 size={14} className="spin" />正在处理修复任务</p>}
-      {task.error && !publication(task) && task.status !== 'waiting_environment' && <p role="alert">
+      {task.error && task.finding_status !== 'false_positive' && !publication(task) && task.status !== 'waiting_environment' && <p role="alert">
         {task.error === 'docker_unavailable' && '上次失败：'}{message(task.output_recovery_available
         ? 'repair_output_truncated' : task.protocol_recovery_available
           ? 'repair_verification_required' : task.review_evidence_recovery_available

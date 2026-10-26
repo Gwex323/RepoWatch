@@ -129,6 +129,11 @@ class Repairs(EnvironmentRecovery):
             )}
             for key in ("context", "patch", "verification", "review", "remote"):
                 result[key] = self._json(row, key)
+            finding = db.execute("SELECT status,feedback FROM analysis_findings WHERE id=?",
+                                 (row["finding_id"],)).fetchone()
+            result["finding_status"] = finding["status"] if finding else None
+            result["finding_feedback"] = (json.loads(finding["feedback"])
+                                          if finding and finding["feedback"] else None)
             result["patch_digest"] = digest(result["patch"]) if result["patch"] else None
             result["task_scope"] = scope_snapshot(db, row["analysis_id"])
             try:
@@ -480,17 +485,30 @@ class Repairs(EnvironmentRecovery):
             except (Conflict, Missing):
                 pass
 
-    def cancel_pending_in(self, db, finding_id):
+    def cancel_pending_in(self, db, finding_id, *, decision=None):
         row = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?", (finding_id,)).fetchone()
-        if not row or row["status"] != "queued":
+        if not row or row["status"] not in (
+            "queued", "failed", "interrupted", "waiting_environment",
+        ):
             return
+        # Preserve the last failed attempt as history before closing its active task.
+        if row["status"] != "queued":
+            snapshot = {key: row[key] for key in ("attempt", "stage", "error", "diff")}
+            snapshot.update({key: self._json(row, key)
+                             for key in ("patch", "verification", "review", "remote")})
+            db.execute(
+                "INSERT OR IGNORE INTO repair_attempts(repair_id,attempt,snapshot,created) "
+                "VALUES(?,?,?,?)", (row["id"], row["attempt"], json.dumps(snapshot), time.time()),
+            )
         db.execute(
-            "UPDATE repair_tasks SET status='cancelled',error=NULL,version=version+1,updated=? "
-            "WHERE id=? AND status='queued'", (time.time(), row["id"]),
+            "UPDATE repair_tasks SET status='cancelled',stage=?,error=NULL,lease=0,"
+            "version=version+1,updated=? WHERE id=?",
+            ("false_positive" if decision == "false_positive" else "cancelled",
+             time.time(), row["id"]),
         )
         db.execute(
             "INSERT INTO repair_events(repair_id,kind,value,created) VALUES(?,?,?,?)",
-            (row["id"], "cancelled", "finding_disposition", time.time()),
+            (row["id"], "cancelled", decision or "finding_disposition", time.time()),
         )
 
     def resolution_verification(self, finding_id):

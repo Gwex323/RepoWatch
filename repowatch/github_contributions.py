@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from urllib.parse import quote, urlencode
 
 from .github_accounts import GitHubError
+from .issue_reuse import issue_comment, similar_issue
 from .repair_origin import repair_origin
 from .store import Conflict, Missing
 from .task_scopes import TaskScopes, publication_body, strip_closing_references
@@ -274,6 +275,7 @@ class GitHubPublisher:
         find_branch()
         current_upstream()
         marker = "<!-- repowatch:" + task["id"] + " -->"
+        reference_mode = decision["mode"]
 
         def find_marked(kind, extra=None):
             found = []
@@ -303,15 +305,51 @@ class GitHubPublisher:
             ):
                 raise Conflict("repair_remote_conflict")
             if kind == "pulls" and (
-                f"\n\n{decision['mode'].title()} #{issue['number']}\n\n" + marker
+                f"\n\n{reference_mode.title()} #{issue['number']}\n\n" + marker
                 not in str(found[0].get("body") or "")
             ):
                 raise Conflict("repair_issue_publication_conflict")
             return remote_link(found[0], name, "issues" if kind == "issues" else "pull")
 
+        reused = False
         if source:
             issue = source_issue()
+        elif "issue_target" in operations or ("issue" not in operations and "pr" not in operations):
+            # Freeze the read-only selection before any Issue/comment POST. Retries
+            # retain this binding even when the remote list or ranking later changes.
+            selection = operations.get("issue_target")
+            target_payload = {"repository": name, "finding_id": task["finding_id"],
+                              "policy": "source_and_symptom_v1"}
+            target_hash = hashlib.sha256(
+                json.dumps(target_payload, sort_keys=True).encode(),
+            ).hexdigest()
+            if selection:
+                if selection["state"] != "complete" or selection["payload_hash"] != target_hash:
+                    raise Conflict("repair_issue_publication_conflict")
+                selected = json.loads(selection["result"])
+            if not selection or (selected["issue"] is None and "issue" not in operations
+                                 and "pr" not in operations):
+                candidate = similar_issue(request, name, json.loads(task["context"])["finding"])
+                selected = ({"issue": remote_link(candidate["item"], name, "issues"),
+                             "reason": candidate["reason"], "paths": candidate["paths"],
+                             "score": candidate["score"]} if candidate else {"issue": None})
+                self._save_operation(task["id"], "issue_target", target_hash, "complete", selected)
+            if selected["issue"]:
+                if "issue" in operations:
+                    raise Conflict("repair_issue_publication_conflict")
+                # Validate the frozen target on every attempt; never trust a stored URL
+                # or a PR returned by the Issues API as an Issue binding.
+                item = request("GET", f"/repos/{name}/issues/{selected['issue']['number']}")
+                if (not isinstance(item, dict) or "pull_request" in item
+                        or item.get("state") not in ("open", "closed")
+                        or remote_link(item, name, "issues") != selected["issue"]):
+                    raise Conflict("repair_issue_reference_invalid")
+                issue, reused = selected["issue"], True
+            else:
+                issue = None
         else:
+            issue = None
+        if not source and not reused:
             issue_payload = {"title": "[RepoWatch] " + finding_title[:100],
                              "body": body + "\n\n" + marker}
             issue = self._mutation(
@@ -320,9 +358,18 @@ class GitHubPublisher:
                                     name, "issues"),
             )
         current_upstream()
+        if reused:
+            reference_mode = "refs"
+            comment_body = ("## RepoWatch 补充发现与修复\n\n" + body
+                            + "\n\n此补充关联相似问题；原 Issue 的状态保持不变。\n\n" + marker)
+            lookup, write = issue_comment(request, name, issue["number"], marker,
+                                          account_id, comment_body)
+            self._mutation(task["id"], "issue_comment",
+                           {"issue": issue, "body": comment_body}, lookup, write)
+            body += "\n\n本次复用相似 Issue，仅引用原编号，不自动关闭原 Issue。"
         self.scopes.validate_publication(stored, patch, decision)
         head = target.split("/")[0] + ":" + branch
-        reference = f"\n\n{decision['mode'].title()} #{issue['number']}\n\n" + marker
+        reference = f"\n\n{reference_mode.title()} #{issue['number']}\n\n" + marker
         pr_payload = {"title": title, "head": head, "base": base, "body": body + reference}
         pr = self._mutation(
             task["id"], "pr", pr_payload,
@@ -331,4 +378,4 @@ class GitHubPublisher:
         )
         return {**branch_result, "issue": issue, "pr": pr,
                 "account_id": account_id, "account_login": identity["login"],
-                "scope_assessment": decision}
+                "scope_assessment": decision, "issue_reused": reused}

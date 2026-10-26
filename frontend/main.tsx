@@ -58,7 +58,7 @@ const roleNames: Record<string, string> = {
 const roleName = (name: string) => roleNames[name] ?? (name === 'owner' ? '你' : name);
 const labels: Record<string, string> = {
   waiting_reproduction: '待人工复现', confirmed: '已确认复现',
-  not_reproduced: '未能复现', resolved: '已解决', queued: '排队中',
+  not_reproduced: '未能复现', false_positive: '误报 · 用户已确认，已关闭', resolved: '已解决', queued: '排队中',
   running: '执行中', failed: '执行失败', interrupted: '已中断', pr_created: '已提交 PR',
 };
 const scheduleStatuses: Record<string, string> = {
@@ -248,7 +248,7 @@ function App() {
   const pageHelp: Record<View, string> = { overview: '先看需要你处理的事项，再继续仓库任务。', repositories: '选择仓库，处理已有 Issue 或启动一次完整检查。', findings: '查看分析发现，按复现步骤确认问题，再跟进修复。', memory: '保存项目约定与修复经验，供后续分析参考。', activity: '查看发生了什么，点击记录回到对应任务。', settings: '先连接账号与模型，再按需要开启自动修复。' };
   const waiting = data.findings.filter(f => f.status === 'waiting_reproduction');
   const needsAttention = (f: Finding) => f.status === 'waiting_reproduction' ||
-    (f.status !== 'resolved' && ['failed', 'interrupted'].includes(f.repair_status ?? ''));
+    (f.status === 'confirmed' && ['failed', 'interrupted'].includes(f.repair_status ?? ''));
   const attention = data.findings.filter(needsAttention);
   const filteredFindings = data.findings.filter(f =>
     `${f.repository} ${f.title} ${f.id}`.toLowerCase().includes(query.toLowerCase()) &&

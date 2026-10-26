@@ -429,7 +429,8 @@ def scope_snapshot(db, analysis_id, *, candidate=None):
         verified_candidates = set()
         no_defect = (conclusion and conclusion["outcome"] == "no_defect"
                      and conclusion["evidence"] and all(
-                         f["status"] == "not_reproduced" for f in current_findings
+                         f["status"] in ("not_reproduced", "false_positive")
+                         for f in current_findings
                      ))
         if accepted and no_defect and required <= base_kinds:
             status = "verified_no_defect"
