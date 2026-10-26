@@ -42,6 +42,15 @@ def test_output_budget_grows_with_scope_and_historical_items_and_stays_bounded()
     assert 240 < scoped["reserve_seconds"] <= large["reserve_seconds"] <= 360
 
 
+@pytest.mark.parametrize("effort", ["high", "xhigh", "max"])
+def test_high_reasoning_report_reserves_reasoning_space_and_time_without_changing_effort(effort):
+    small = output_budget(context(), effort)
+    large = output_budget({"task_scope": {"items": [{}] * 6}}, effort)
+    assert small["max_tokens"] == 10000
+    assert large["max_tokens"] == 12000
+    assert small["reserve_seconds"] == large["reserve_seconds"] == 360
+
+
 def test_compaction_merges_only_read_lines_and_retains_complete_requirements():
     value = context()
     original = "Original request, including Trae Work CN. " * 50
@@ -230,15 +239,9 @@ def test_optional_scope_version_and_current_analysis_are_bound(service):  # noqa
         row = db.execute("SELECT * FROM repository_analyses WHERE id=?",
                          (failed["id"],)).fetchone()
         value = json.loads(row["context"])
-        db.executescript("""
-            CREATE TABLE task_scopes(id TEXT, version INTEGER, analysis_id TEXT,
-                                     revision TEXT, original_digest TEXT);
-            CREATE TABLE analysis_task_scopes(analysis_id TEXT, scope_id TEXT);
-        """)
-        db.execute("INSERT INTO task_scopes VALUES('scope_fixture',1,?,?,?)",
-                   (row["id"], row["revision"], "original_digest"))
-        db.execute("INSERT INTO analysis_task_scopes VALUES(?,'scope_fixture')", (row["id"],))
-        value["task_scope"] = {"id": "scope_fixture", "version": 1, "items": [{"key": "cn"}]}
+        scope = analyses.scope_basis(db, row)
+        value["task_scope"] = {"id": scope["id"], "version": scope["version"],
+                               "items": [{"key": "cn"}]}
         saved = state(value)
         saved["read_ranges"] = {"app.py": [[1, 1]]}
         binding = analyses.review_binding(db, row, value, analyses.model_identity())
@@ -248,10 +251,17 @@ def test_optional_scope_version_and_current_analysis_are_bound(service):  # noqa
                    (binding, json.dumps(saved), digest(saved)))
     assert analyses.get(failed["id"])["report_recovery"]["available"]
     with analyses.store.connection() as db:
-        db.execute("UPDATE task_scopes SET version=2")
+        db.execute("UPDATE task_scopes SET version=version+1 WHERE id=?", (scope["id"],))
     assert not analyses.get(failed["id"])["report_recovery"]["available"]
     with analyses.store.connection() as db:
-        db.execute("UPDATE task_scopes SET version=1,analysis_id='other_analysis'")
+        db.execute(
+            "INSERT INTO repository_analyses(id,env_id,repo_id,revision,fingerprint,trigger_key,"
+            "status,context,created,updated) SELECT 'other_analysis',env_id,repo_id,revision,"
+            "fingerprint,'other_trigger',status,context,created,updated "
+            "FROM repository_analyses WHERE id=?", (failed["id"],),
+        )
+        db.execute("UPDATE task_scopes SET version=?,analysis_id='other_analysis' WHERE id=?",
+                   (scope["version"], scope["id"]))
     assert not analyses.get(failed["id"])["report_recovery"]["available"]
 
 
@@ -342,7 +352,7 @@ def test_reviewer_reads_refresh_checkpoint_before_the_next_request():
 def test_finalization_retry_uses_compact_input_and_bounded_budget(monkeypatch, error, limit):
     monkeypatch.setattr("repowatch.repository_analysis.RETRY_DELAY_SECONDS", 0)
     value, calls, events = context(), [], []
-    value["task_scope"] = {"items": [{"key": f"item_{i}"} for i in range(6)]}
+    value["task_scope"] = {"version": 1, "items": [{"key": f"item_{i}"} for i in range(6)]}
     model = ReviewModel()
     original = model.get_response
 
