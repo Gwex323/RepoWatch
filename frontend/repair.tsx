@@ -40,6 +40,7 @@ const labels: Record<string, string> = {
   submission_required: '探索已结束，要求提交补丁并验证',
   tool_selection_retry: '工具选择不符合当前阶段，整批未执行，正在纠正',
   submission_recovery: '已使用新版提交校验策略的一次恢复机会',
+  owner_model_retry: '用户已授权更换修复模型后额外续跑一次',
   cancelled: '已关闭', false_positive: '误报 · 用户已确认，已关闭',
   queued: '等待修复', waiting_environment: '等待 Docker 环境', running: '修复执行中',
   failed: '修复未完成', interrupted: '修复已中断',
@@ -70,6 +71,8 @@ const labels: Record<string, string> = {
 const errors: Record<string, string> = {
   repair_paused: '自动修复已暂停。请在「设置 → 自动修复」中启用后重试。',
   repair_model_required: '请先配置代码修复与独立审查模型，并启用模型工作流。',
+  repair_model_retry_unavailable: '此次模型变更不满足一次续跑的授权条件。',
+  repair_model_changed: '代码修复模型与此次用户授权的配置不一致，本轮已停止。',
   repair_settings_changed: '修复配置已变化，请刷新后重试。',
   repair_stale: '源码、配置或执行证据已变化，需重新分析并复现。',
   repair_source_changed: '本地源码与修复依据不一致，需重新分析。',

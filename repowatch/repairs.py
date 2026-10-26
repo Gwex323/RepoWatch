@@ -214,6 +214,7 @@ class Repairs(EnvironmentRecovery):
         return (REPAIR_MAX_ATTEMPTS + int(context.get("timeout_recovery_used") is True)
                 + int(context.get("source_read_recovery_used") is True)
                 + int(context.get("submission_recovery_used") is True)
+                + int(context.get("owner_model_retry_used") is True)
                 + int(context.get("failure_recovery_used") is True)
                 + int(context.get("output_recovery_used") is True)
                 + int(context.get("protocol_recovery_used") is True)
@@ -568,7 +569,42 @@ class Repairs(EnvironmentRecovery):
             raise Conflict("resolution_pr_not_merged")
         return {"pr": url}
 
-    def retry(self, repair_id, version):
+    def _model_change_authorization(self, db, row, note):
+        """An explicit owner action can authorize one attempt with a different model."""
+        if note is None:
+            return None
+        context = json.loads(row["context"])
+        status = self.engine.status() if self.engine else {}
+        selected = status.get("role_models", {}).get("repair_agent", {})
+        if (not isinstance(note, str) or not note.strip() or len(note) > 2000
+                or not status.get("enabled") or not selected.get("model")
+                or row["status"] != "failed" or row["stage"] != "repair_agent"
+                or row["error"] not in {
+                    "repair_submission_not_followed", "repair_tool_selection_invalid",
+                }
+                or row["attempt"] != self._attempt_limit(row)
+                or context.get("owner_model_retry_used")
+                or any(row[key] for key in ("patch", "verification", "review", "remote"))):
+            raise Conflict("repair_model_retry_unavailable")
+        previous = None
+        for event in db.execute(
+            "SELECT kind,value FROM repair_events WHERE repair_id=? ORDER BY id DESC",
+            (row["id"],),
+        ):
+            if event["kind"] in ("retry", "queued"):
+                break
+            if event["kind"] == "model_configuration":
+                recorded = json.loads(event["value"])
+                if recorded.get("role") == "repair_agent":
+                    previous = recorded.get("model")
+                    break
+        if not previous or previous == selected["model"]:
+            raise Conflict("repair_model_retry_unavailable")
+        return {"actor": "owner", "note": redact(note.strip()), "created": time.time(),
+                "previous_model": previous, "model": selected["model"],
+                "model_identity": digest(selected), "attempt": row["attempt"] + 1}
+
+    def retry(self, repair_id, version, *, model_change_note=None):
         with self.store.connection() as db:
             previous = db.execute("SELECT * FROM repair_tasks WHERE id=?", (repair_id,)).fetchone()
         if (previous and previous["version"] == version
@@ -593,6 +629,7 @@ class Repairs(EnvironmentRecovery):
             submission_recovery = self._submission_recovery(db, row)
             publication_retry = self._publication_retry_available(row)
             docker_recovery = self._docker_recovery(db, row)
+            model_authorization = self._model_change_authorization(db, row, model_change_note)
             if (self._publication_failure(row) and not publication_retry):
                 raise Conflict("repair_publication_retry_limit")
             if (row["version"] != version
@@ -605,11 +642,15 @@ class Repairs(EnvironmentRecovery):
                         and not output_recovery and not protocol_recovery
                         and not workspace_recovery and not publication_retry
                         and not docker_recovery and not verification_recovery
-                        and not review_evidence_recovery)):
+                        and not review_evidence_recovery
+                        and not model_authorization)):
                 raise Conflict("repair_changed")
             if not self.current(db, row):
                 raise Conflict("repair_stale")
             context = json.loads(row["context"])
+            if model_authorization:
+                context.update(owner_model_retry_used=True,
+                               owner_model_retry=model_authorization)
             context["resume_publication"] = publication_retry
             if docker_recovery:
                 context["environment_recovery_used"] = True
@@ -677,6 +718,8 @@ class Repairs(EnvironmentRecovery):
                 (json.dumps(context, ensure_ascii=False), time.time(), repair_id),
             )
         self.event(repair_id, "retry", str(row["attempt"] + 1))
+        if model_authorization:
+            self.event(repair_id, "owner_model_retry", json.dumps(model_authorization))
         if review_evidence_recovery:
             self.event(repair_id, "review_evidence_recovery", REVIEW_EVIDENCE_POLICY)
         if docker_recovery:
@@ -792,12 +835,18 @@ class Repairs(EnvironmentRecovery):
                 ).fetchone()
                 if not settings[0]:
                     raise Conflict("repair_paused")
-                if not self.engine.status()["enabled"]:
+                model_status = self.engine.status()
+                if not model_status["enabled"]:
                     raise Conflict("repair_model_required")
                 if not latest or latest["owner"] != self.owner or latest["status"] != "running":
                     raise Conflict("repair_changed")
                 if not self.current(db, latest):
                     raise Conflict("repair_stale")
+                authorization = json.loads(latest["context"]).get("owner_model_retry")
+                if (authorization and authorization["attempt"] == latest["attempt"]
+                        and authorization["model_identity"] != digest(
+                            model_status.get("role_models", {}).get("repair_agent", {}))):
+                    raise Conflict("repair_model_changed")
         try:
             check()
             context = json.loads(row["context"])
