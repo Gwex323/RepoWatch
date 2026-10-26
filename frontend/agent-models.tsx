@@ -124,7 +124,7 @@ function AgentModelForm({ value, catalog, disabled, onSave, onSelect }: {
       </p>}
       <button className="button secondary" disabled={disabled}><Save size={15} />保存{value.name}选择</button>
     </form>
-    <details open={!value.configured && !catalog.providers.length}>
+    <details>
       <summary>此角色独立配置（兼容已有手工设置）</summary>
       <form className="execution-config" onSubmit={e => {
         e.preventDefault();
@@ -166,6 +166,7 @@ function AgentModelForm({ value, catalog, disabled, onSave, onSelect }: {
 }
 
 export function AgentModelSettings({ api, onChange }: { api: Api; onChange: () => void }) {
+  const [section, setSection] = useState('roles');
   const [config, setConfig] = useState<AgentModels | null>(null);
   const [catalog, setCatalog] = useState<ProviderCatalog | null>(null);
   const [busy, setBusy] = useState(false);
@@ -216,15 +217,17 @@ export function AgentModelSettings({ api, onChange }: { api: Api; onChange: () =
       setNotice(errors[(e as Error).message] ?? '保存未完成，请检查配置后重试。'); setFailed(true);
     } finally { setBusy(false); }
   };
-  return <><ModelProvidersSettings api={api} catalog={catalog} onChange={catalogChanged} disabled={busy} />
-  <section className="analysis-model-section" aria-labelledby="agent-model-heading">
+  return <><nav className="section-nav secondary-nav" aria-label="模型配置步骤">{[['providers', '1. 连接供应商'], ['roles', '2. 分配模型']].map(([key, label]) => <button key={key} aria-current={section === key ? 'page' : undefined} className={section === key ? 'active' : ''} onClick={() => setSection(key)}>{label}</button>)}</nav>
+  <p className="section-intro">先添加或导入供应商，再选择默认模型。五个角色可共用默认模型，也可单独指定。</p>
+  <div hidden={section !== 'providers'}><ModelProvidersSettings api={api} catalog={catalog} onChange={catalogChanged} disabled={busy} /></div>
+  <section hidden={section !== 'roles'} className="analysis-model-section" aria-labelledby="agent-model-heading">
     <div className="section-heading"><h2 id="agent-model-heading"><Workflow size={18} />智能体模型配置</h2>
       <span className="section-meta">{config?.roles.length ?? 5} 个 Agent 角色 · 分别选择模型</span>
       <button className="button secondary small" disabled={busy} onClick={load}>
         <RefreshCw size={14} />刷新配置
       </button>
     </div>
-    <p className="diagnosis-meta">五个角色分别选择上方已保存的供应商与模型，也可以共用默认模型。同名角色在分析、诊断和修复中共用选择。</p>
+    <p className="diagnosis-meta">五个角色分别选择「连接供应商」中已保存的模型，也可以共用默认模型。同名角色在分析、诊断和修复中共用选择。</p>
     {catalog && <DefaultModelForm key={catalog.version} catalog={catalog} disabled={busy} onSelect={select} />}
     {config && <>
       <div className="agent-model-switch"><label className="checkbox-label">
@@ -235,7 +238,7 @@ export function AgentModelSettings({ api, onChange }: { api: Api; onChange: () =
             .catch(e => { setNotice(errors[e.message] ?? '启用状态保存失败，请重试。'); setFailed(true); })
             .finally(() => setBusy(false));
         }} />启用模型工作流
-      </label><span className="diagnosis-meta">自动修复还需单独启用下方的修复开关。</span></div>
+      </label><span className="diagnosis-meta">自动修复还需单独启用「自动修复」分类中的开关。</span></div>
       <div className="agent-model-readiness">{Object.entries(config.flows).map(([flow, state]) =>
         <span className={`tag ${state.ready && config.enabled ? 'green' : 'neutral'}`} key={flow}>
           {flowNames[flow] ?? flow}：{!state.ready

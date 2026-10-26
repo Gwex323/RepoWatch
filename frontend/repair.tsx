@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { ExternalLink, GitPullRequest, Loader2, RefreshCw, Save, Wrench } from 'lucide-react';
+import { ExternalLink, Loader2, RefreshCw, Save, Wrench } from 'lucide-react';
 import { agentModelEvent } from './agent-models';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
@@ -23,7 +23,7 @@ type Repair = {
   source_issue?: { number: number; url: string } | null;
   source_error?: string | null;
   task_scope?: { total: number; done: number; complete: boolean; reviewed: boolean; combination_pending: boolean };
-  context: { finding: { title: string } };
+  context: { finding: { title: string }; publication_retries?: number };
   patch: { summary: string; edits: { path: string }[] } | null;
   diff: string; verification: Verification | null;
   verification_rounds?: { revision: number; diff: string; verification: Verification }[];
@@ -61,7 +61,7 @@ const labels: Record<string, string> = {
   review_evidence_recovery: '使用已保存补丁重新验证并恢复独立审查',
 };
 const errors: Record<string, string> = {
-  repair_paused: '自动修复已暂停。请在运行配置中启用后重试。',
+  repair_paused: '自动修复已暂停。请在「设置 → 自动修复」中启用后重试。',
   repair_model_required: '请先配置代码修复与独立审查模型，并启用模型工作流。',
   repair_settings_changed: '修复配置已变化，请刷新后重试。',
   repair_stale: '源码、配置或执行证据已变化，需重新分析并复现。',
@@ -294,7 +294,7 @@ export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?:
   </section>;
 }
 
-export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
+export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId: string; api: Api; view?: 'repair' | 'pr'; onNavigate?: (view: string) => void }) {
   const [tasks, setTasks] = useState<Repair[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
@@ -308,7 +308,32 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
     load(); const timer = setInterval(load, 2000);
     return () => { active = false; clearInterval(timer); };
   }, [api, envId]);
-  if (tasks.length === 0 && !error) return null;
+  const retry = (task: Repair) => {
+    setBusy(task.id); setError('');
+    void api(`/repairs/${task.id}/retry`, { version: task.version })
+      .then(() => api<Repair[]>(`/environments/${envId}/repairs`)).then(setTasks)
+      .catch(e => setError(message(e.message))).finally(() => setBusy(''));
+  };
+  const publication = (task: Repair) => !!task.remote || !!task.publication_retry_available || task.stage === 'publishing' || (task.context.publication_retries ?? 0) > 0;
+  if (view === 'pr') return <section aria-label="PR 发布结果">
+    <h3>PR 与发布</h3>
+    {error && <p role="alert">{error}</p>}
+    {!tasks.some(publication) && <p className="action-hint">尚无 PR 或发布任务。修复通过测试和独立审查后，发布结果会显示在这里。</p>}
+    <div className="content-card-grid">{tasks.filter(publication).map(task => <article key={task.id}>
+      <div className="section-heading"><h4>{task.context.finding.title}</h4><span className="tag neutral">{task.remote ? '已创建 PR' : task.status === 'queued' ? '等待发布' : task.status === 'running' ? '正在发布' : '发布未完成'}</span></div>
+      {task.task_scope && <p>任务验收 {task.task_scope.done} / {task.task_scope.total} 项 · {task.task_scope.complete ? '范围已核验' : '仍有待验收项'}</p>}
+      {task.remote ? <><code>{task.remote.branch}</code><div className="execution-actions">
+        <a className="button primary" href={task.remote.pr.url} target="_blank" rel="noopener noreferrer">打开 PR #{task.remote.pr.number}<ExternalLink size={14} /></a>
+        <a className="text-link" href={task.remote.issue.url} target="_blank" rel="noopener noreferrer">关联 Issue #{task.remote.issue.number}</a>
+      </div><p className="diagnosis-meta">请在 GitHub 查看最新审查与合并状态。</p></> : <>
+        {task.error && <p role="alert">{message(task.error)}</p>}
+        {task.source_error && task.source_error !== task.error && <p role="alert">{message(task.source_error)}</p>}
+        {task.can_retry && task.publication_retry_available && <button className="button secondary" disabled={!!busy || !task.enabled} onClick={() => retry(task)}>仅重试发布</button>}
+      </>}
+      <button className="text-link" onClick={() => onNavigate?.('repair')}>查看补丁与验证记录</button>
+    </article>)}</div>
+  </section>;
+  if (tasks.length === 0 && !error) return <p className="action-hint">尚无修复任务。请先在「复现结果」确认问题，并在设置中启用自动修复。</p>;
   return <section className="repository-repairs" aria-label="自动修复任务">
     <div className="section-heading"><h3><Wrench size={17} />自动修复</h3>
       <span className="tag neutral">{tasks.length} 个任务</span></div>
@@ -327,7 +352,7 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
         {' · '}{task.task_scope.complete ? '当前范围已核验' : task.task_scope.reviewed
           ? '整体尚未完成，部分修复不关闭原 Issue' : '完整性未核验，不自动关闭原 Issue'}</p>}
       {task.status === 'running' && <p><Loader2 size={14} className="spin" />正在处理修复任务</p>}
-      {task.error && task.status !== 'waiting_environment' && <p role="alert">
+      {task.error && !publication(task) && task.status !== 'waiting_environment' && <p role="alert">
         {task.error === 'docker_unavailable' && '上次失败：'}{message(task.output_recovery_available
         ? 'repair_output_truncated' : task.protocol_recovery_available
           ? 'repair_verification_required' : task.review_evidence_recovery_available
@@ -354,8 +379,6 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
           : '自动修复已暂停；重新启用后检查 Docker，本次等待不占用修复次数。'}</p>}
       {task.docker_recovery_available && task.can_retry &&
         <p>上次在模型调用前因 Docker 不可用而停止；恢复环境后可手动继续一次，保留原尝试历史。</p>}
-      {task.publication_retry_available && task.can_retry &&
-        <p>补丁已通过测试和独立审查。请先检查 GitHub 权限，再仅重试发布；不会重新调用模型或重跑测试，最多三次。</p>}
       {task.verification_resume_available && task.can_retry &&
         <p>补丁已保留，重试将继续测试验证，通过后进入独立审查。</p>}
       {task.status === 'running' && task.events.at(-1)?.kind === 'request_started' &&
@@ -380,13 +403,8 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
         <ul>{task.patch.edits.map(edit => <li key={edit.path}><code>{edit.path}</code></li>)}</ul></>}
       {task.review && <p className="diagnosis-summary">独立审查：{task.review.summary}</p>}
       {task.review && task.review.risks.length > 0 && <ul>{task.review.risks.map((risk, i) => <li key={i}>{risk}</li>)}</ul>}
-      {task.remote && <div className="execution-actions"><code>{task.remote.branch}</code>
-        <a className="button secondary" href={task.remote.pr.url} target="_blank" rel="noopener noreferrer">
-          <GitPullRequest size={15} />PR #{task.remote.pr.number}<ExternalLink size={13} /></a>
-        <a href={task.remote.issue.url} target="_blank" rel="noopener noreferrer">
-          {task.source_kind === 'existing_issue' && task.source_issue?.number === task.remote.issue.number
-            ? '原 Issue' : 'Issue'} #{task.remote.issue.number}</a></div>}
-      {task.can_retry && <button className="button secondary" disabled={!!busy || !task.enabled}
+      {publication(task) && <button className="button secondary" onClick={() => onNavigate?.('pr')}>查看 PR 与发布状态 →</button>}
+      {task.can_retry && !publication(task) && <button className="button secondary" disabled={!!busy || !task.enabled}
         onClick={() => {
           setBusy(task.id); setError('');
           void api(`/repairs/${task.id}/retry`, { version: task.version })
