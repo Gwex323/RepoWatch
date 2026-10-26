@@ -64,7 +64,6 @@ const labels: Record<string, string> = {
   review_evidence_recovery: '使用已保存补丁重新验证并恢复独立审查',
 };
 const errors: Record<string, string> = {
-  repair_remote_scan_limit: '相似 Issue 或评论扫描达到数量上限，检查尚未完成，本次停止发布。',
   repair_paused: '自动修复已暂停。请在「设置 → 自动修复」中启用后重试。',
   repair_model_required: '请先配置代码修复与独立审查模型，并启用模型工作流。',
   repair_settings_changed: '修复配置已变化，请刷新后重试。',
