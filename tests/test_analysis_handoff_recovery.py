@@ -137,7 +137,7 @@ def test_early_role_recovery_persists_only_after_independent_review(service):  #
     assert len(completed["report"]["handoffs"]) == 3
     assert sum(item["kind"] == "attempt" for item in completed["events"]) == 1
     assert sum(item["kind"] == "handoff_recovery" for item in completed["events"]) == 1
-    assert completed["progress"]["model_calls"] == 7
+    assert completed["progress"]["model_calls"] == 8  # Includes durable scope registration.
     assert completed["progress"]["source_reads"] == 1
     with execution.store.connection() as db:
         assert db.execute("SELECT COUNT(*) FROM repair_tasks").fetchone()[0] == 0
@@ -150,12 +150,13 @@ def test_cancel_after_early_stop_cannot_publish_late_recovered_report(service): 
     class CancellingEngine(Engine):
         async def analyze(self, context, event):
             def record(kind, value):
-                event(kind, value)
+                result = event(kind, value)
                 if kind == "handoff_recovery":
                     with execution.store.connection() as db:
                         db.execute("UPDATE repository_analyses SET status='cancelled',"
                                    "version=version+1 WHERE env_id=? AND status='running'",
                                    (env["id"],))
+                return result
             return await run_analysis(EarlyAnswerModel([ROLES[1]]), context, record)
 
     analyses = Analyses(execution, CancellingEngine())

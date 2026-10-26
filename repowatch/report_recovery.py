@@ -8,6 +8,8 @@ import hashlib
 import json
 from collections import Counter
 
+from .analysis_tools import high_reasoning_reserve
+
 PROTOCOL = 1
 MAX_CHECKPOINT_BYTES = 160_000
 MAX_OUTPUT_TOKENS = 12_000
@@ -24,12 +26,13 @@ def public_context(context):
     return {key: value for key, value in context.items() if not key.startswith("_")}
 
 
-def output_budget(context):
+def output_budget(context, reasoning_effort=None):
     """Reserve space per acceptance item / historical conclusion, with a hard cap."""
     scope = context.get("task_scope") or {}
     historical = context.get("historical_findings") or {}
     items = len(scope.get("items", [])) + len(historical.get("items", []))
-    tokens = min(MAX_OUTPUT_TOKENS, 5000 + max(0, items - 2) * 650)
+    tokens = min(MAX_OUTPUT_TOKENS, 5000 + max(0, items - 2) * 650
+                 + high_reasoning_reserve(reasoning_effort))
     reserve = max(MIN_FINALIZATION_RESERVE_SECONDS, min(360, (tokens + 34) // 35 + 110))
     return {"max_tokens": tokens, "reserve_seconds": reserve, "review_items": items}
 
