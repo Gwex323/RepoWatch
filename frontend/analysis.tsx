@@ -187,6 +187,13 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'format_retry') return `${name} · 报告格式不合格，正在纠正一次`;
   if (item.kind === 'tool_arguments_retry') return `${name} · 保留已有证据，正在纠正原工具批次`;
   if (item.kind === 'tool_arguments_repaired') return `${name} · 参数纠正通过校验，等待工具实际执行`;
+  if (item.kind === 'tool_arguments_preserved') {
+    try {
+      const detail = JSON.parse(item.agent) as { role?: string; calls?: { tool?: string; fields?: string[] }[] };
+      const fields = detail.calls?.flatMap(call => call.fields ?? []).join('、');
+      return `${names[detail.role ?? ''] ?? '当前角色'} · 已保留原合法参数，仅采纳错误字段的修正${fields ? `（${fields}）` : ''}，等待工具实际执行`;
+    } catch { return '已保留原合法参数，仅采纳错误字段的修正，等待工具实际执行'; }
+  }
   if (item.kind === 'scope_registered') return `任务范围已登记：${item.agent} 项`;
   if (item.kind === 'tool_output_budget' || item.kind === 'tool_output_retry') {
     try {

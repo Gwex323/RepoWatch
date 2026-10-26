@@ -1,6 +1,7 @@
 """Shared analysis tool permissions, safe diagnostics and bounded output sizing."""
 
 import json
+from copy import deepcopy
 from dataclasses import replace
 
 from pydantic import ValidationError
@@ -249,3 +250,43 @@ class ToolArgumentRepair:
                 return {"tool": call.name, "reason": "repair_valid_fields_changed",
                         "fields": fields, "issues": []}, schema
         return None
+
+    def preserve_valid_fields(self, response):
+        """Select only corrections to original errors; never adopt unrelated rewrites.
+
+        Called after batch and schema validation. List shape changes remain invalid:
+        restoring a list containing erroneous descendants would discard their repairs.
+        """
+        output, preserved = [], []
+        originals = iter(self.originals)
+        for item in response.output:
+            if item.type != "function_call":
+                output.append(item)
+                continue
+            before, errors = next(originals)
+            after = _argument_object(item.arguments)
+            if before is None or after is None:
+                output.append(item)
+                continue
+            schema = self.schemas[item.name]
+            changed = _changed_valid_fields(before, after, schema, schema, errors)
+            restored = []
+            for path in changed:
+                if any(error[:len(path)] == path for error in errors):
+                    # Keep a changed container visible to fields_issue, which rejects it.
+                    continue
+                if not path:
+                    after = deepcopy(before)
+                else:
+                    source, target = before, after
+                    for part in path[:-1]:
+                        source, target = source[part], target[part]
+                    target[path[-1]] = deepcopy(source[path[-1]])
+                restored.append(_field_contract(path, schema)[0])
+            if restored:
+                item = item.model_copy(update={
+                    "arguments": json.dumps(after, ensure_ascii=False),
+                })
+                preserved.append({"tool": item.name, "fields": sorted(set(restored))[:8]})
+            output.append(item)
+        return (replace(response, output=output) if preserved else response), preserved
