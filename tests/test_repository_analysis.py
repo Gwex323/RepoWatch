@@ -88,6 +88,17 @@ class ReviewModel(Model):
                     self.scope = scope
         self.calls += 1
         identity = f"analysis_call_{self.calls}"
+        schema = kwargs.get("output_schema")
+        if schema is not None and "corrections" in schema.json_schema().get("properties", {}):
+            packet = json.loads(input)
+            return final_message(json.dumps({"summary": None, "corrections": [{
+                "section": target["section"], "item": target["item"], "withdraw": False,
+                "rationale": "Synthetic evidence correction only.",
+                "edits": [{"evidence": issue["evidence"], "value": {
+                    "path": "app.py", "start_line": 1, "end_line": 1,
+                    "quote": "invented quote" if self.invented else "print('ok')",
+                }} for issue in target["issues"]],
+            } for target in packet["targets"]]}))
         if self.calls == 1:
             name, args = "read_execution_records", {}
         elif self.calls == 2:
@@ -701,7 +712,10 @@ def test_evidence_correction_does_not_replay_tools_or_handoffs():
             assert kwargs["tools"] == [] and kwargs["handoffs"] == []
             assert kwargs["model_settings"].tool_choice == "none"
             assert "source_blocks" in kwargs["input"]
-            assert "private-secret" not in str(args) + str(kwargs)
+            assert "private-secret" not in kwargs.get("system_instructions", "")
+            packet = json.loads(kwargs["input"])
+            assert packet["accepted"] is False
+            assert packet["targets"][0]["candidate"]["evidence"][0]["quote"] == "private-secret"
         return await original(*args, **kwargs)
 
     model.get_response = wrong_then_correct
@@ -744,7 +758,7 @@ def test_repeated_forged_evidence_fails_after_one_correction():
 @pytest.mark.parametrize("outcome,code,calls", [
     ("tool", "analysis_finalization_not_followed", 2),
     ("deadline", "analysis_deadline_exceeded", 1),
-    ("silent_empty", "analysis_evidence_unverified", 2),
+    ("silent_empty", "analysis_report_invalid", 3),
     ("disclosed_empty", None, 2),
 ])
 def test_evidence_correction_keeps_deadline_tool_and_disclosure_gates(outcome, code, calls):
@@ -770,10 +784,9 @@ def test_evidence_correction_keeps_deadline_tool_and_disclosure_gates(outcome, c
             )], usage=Usage(requests=1), response_id=None)
         return final_message(json.dumps({
             "summary": "Synthetic correction",
-            "limitations": (
-                ["Unsupported finding excluded."] if outcome == "disclosed_empty" else []
-            ),
-            "findings": [],
+            "corrections": [{"section": "findings", "item": 1, "withdraw": True,
+                             "rationale": "Unsupported finding excluded."
+                             if outcome == "disclosed_empty" else "", "edits": []}],
         }))
 
     model.get_response = respond

@@ -225,6 +225,8 @@ async def observe_response(response, observation, event):
             reasoning = token_details.get("reasoning_tokens")
             if type(reasoning) is int and 0 <= reasoning <= 10000000:
                 details["reasoning_tokens"] = reasoning
+                if type(tokens) is int and reasoning <= tokens <= 10000000:
+                    details["payload_tokens"] = tokens - reasoning
     observation.update(details)
     event("provider_response", json.dumps(details))
 

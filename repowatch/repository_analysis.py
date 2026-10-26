@@ -40,6 +40,7 @@ from .diagnosis import evidence_matches, fingerprint, redact, redact_values
 from .historical_review import MAX_HISTORICAL_FINDINGS, historical_results, historical_snapshot
 from .memory import Memory, capture_repair_fix, compact_experience
 from .observability import TracingHooks, task_binding
+from .report_evidence_correction import CORRECTION_ERRORS, ReportEvidenceCorrection
 from .report_recovery import (
     MAX_CHECKPOINT_BYTES,
     MAX_OUTPUT_TOKENS,
@@ -349,6 +350,7 @@ class StageModel(Model):
         correction = ""
         tool_correction = ""
         tool_repair = None
+        report_correction = None
         handoff_correction = ""
         call_input = input
         if review_schema is not None and closing and self.final_input is not None:
@@ -371,11 +373,17 @@ class StageModel(Model):
                     if self.separate_schema_from_tools and review_schema is not None
                     and request_kwargs["tools"] else request_kwargs
                 )
+                request_instructions = ((system_instructions or "") + remaining + correction
+                                        + tool_correction + handoff_correction)
+                request_input = call_input
+                if report_correction is not None:
+                    model_kwargs = report_correction.request_kwargs(model_kwargs)
+                    request_instructions = report_correction.instructions()
+                    request_input = report_correction.input_for(call_input)
                 # Bound the entire call too, not just the transport's idle-read timeout.
                 response = await asyncio.wait_for(self.delegate.get_response(
-                    system_instructions=(system_instructions or "") + remaining + correction
-                    + tool_correction + handoff_correction,
-                    input=call_input, **model_kwargs,
+                    system_instructions=request_instructions,
+                    input=request_input, **model_kwargs,
                 ), timeout=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds))
                 if correction and any(item.type == "function_call" for item in response.output):
                     raise AnalysisFailure("analysis_finalization_not_followed")
@@ -490,6 +498,36 @@ class StageModel(Model):
                             "role": self.role, "calls": preserved_fields[:8],
                         }))
                     self.event("tool_arguments_repaired", self.role)
+                if report_correction is not None:
+                    if any(item.type == "message" and any(
+                        part.type == "refusal" for part in item.content
+                    ) for item in response.output):
+                        raise ModelRefusalError("Model refused source-evidence correction.")
+                    if any(item.type == "function_call" for item in response.output):
+                        raise AnalysisFailure("analysis_finalization_not_followed")
+                    issue = report_output_issue(response, report_correction.schema)
+                    if issue is None:
+                        text = "".join(part.text for item in response.output
+                                       if item.type == "message" for part in item.content
+                                       if part.type == "output_text")
+                        plan = report_correction.schema.validate_json(text)
+                        try:
+                            merged = report_correction.apply(plan)
+                            response = report_correction.response_for(response, merged)
+                        except ValueError as exc:
+                            issue = (exc.args[0] if exc.args and isinstance(exc.args[0], str)
+                                     and exc.args[0] in CORRECTION_ERRORS
+                                     else "evidence_correction_invalid")
+                    if issue is not None:
+                        self.event("report_validation", issue)
+                        self.event("report_diagnostics", report_diagnostics(response))
+                        if self.retries.format_used >= MAX_FORMAT_RETRIES:
+                            raise AnalysisFailure("analysis_report_invalid")
+                        self.retries.format_used += 1
+                        report_correction.feedback = issue
+                        self.event("format_retry", self.role)
+                        continue
+                    self.event("evidence_correction_applied", self.role)
                 if review_schema is not None:
                     issue = report_output_issue(response, review_schema)
                     if (issue is None and self.review_contract is not None
@@ -565,20 +603,12 @@ class StageModel(Model):
                                 self.final_input(input) if self.final_input is not None
                                 else final_report_input(input)
                             )
-                            correction = (
-                                "\nThe report failed exact source-evidence validation: "
-                                + json.dumps(issues) +
-                                ". Return the COMPLETE corrected JSON report using the supplied "
-                                "source_blocks. Copy exact source text, preserving indentation, "
-                                "without display line numbers, Markdown or ellipses. Every "
-                                "referenced line must have been read. Do not move a quote to an "
-                                "unrelated location to make it pass. Remove unsupported findings "
-                                "and disclose their exclusion in limitations; do not claim that "
-                                "discarding findings proves there are no bugs. For unsupported "
-                                "historical "
-                                "conclusions, use not_covered with a rationale instead of claiming "
-                                "fixed; only use historical IDs supplied in this run. No tools."
-                            )
+                            report_correction = ReportEvidenceCorrection(review, issues)
+                            correction = ""
+                            self.event("evidence_correction", json.dumps({
+                                "role": self.role, "items": len(report_correction.targets),
+                                "issues": len(issues),
+                            }))
                             continue
                         texts[-1].text = review.model_dump_json()
                         for part in texts[:-1]:
@@ -619,6 +649,20 @@ class StageModel(Model):
                 self.event("retry_call", self.role)
             except OutputTruncated:
                 tokens = kwargs["model_settings"].max_tokens
+                observation = getattr(self.delegate, "observation", {})
+                self.event("output_limit", json.dumps({
+                    "role": self.role,
+                    "phase": ("evidence_correction" if report_correction is not None else
+                              "tool_arguments" if tool_repair is not None else
+                              "report" if review_schema is not None else "exploration"),
+                    "max_tokens": tokens,
+                    **{key: observation[key] for key in
+                       ("output_tokens", "reasoning_tokens", "payload_tokens")
+                       if type(observation.get(key)) is int},
+                    "can_expand": not output_retried
+                    and self.retries.output_used < MAX_OUTPUT_RETRIES
+                    and tokens is not None and tokens < MAX_OUTPUT_TOKENS,
+                }))
                 if (output_retried or self.retries.output_used >= MAX_OUTPUT_RETRIES
                         or tokens is None or tokens >= MAX_OUTPUT_TOKENS):
                     raise AnalysisFailure("analysis_output_truncated") from None
@@ -832,15 +876,20 @@ def evidence_issues(review, context, read, ranges):
                 issues.append({
                     "finding": finding_index, "evidence": evidence_index, "reason": reason,
                 })
-    scope_conclusions = ([*review.scope_review.items, *review.scope_review.exclusions]
+    scope_conclusions = ([("items", index, item)
+                          for index, item in enumerate(review.scope_review.items, 1)]
+                         + [("exclusions", index, item)
+                            for index, item in enumerate(review.scope_review.exclusions, 1)]
                          if review.scope_review else [])
-    for index, item in enumerate(scope_conclusions, 1):
+    for section, index, item in scope_conclusions:
         if item.outcome in ("no_defect", "unrelated") and not item.evidence:
-            issues.append({"finding": index, "evidence": 0, "reason": "missing_current_evidence"})
+            issues.append({"finding": index, "evidence": 0, "scope": section,
+                           "reason": "missing_current_evidence"})
         for evidence_index, evidence in enumerate(item.evidence, 1):
             reason = evidence_issue(evidence, context, read, ranges)
             if reason:
-                issues.append({"finding": index, "evidence": evidence_index, "reason": reason})
+                issues.append({"finding": index, "evidence": evidence_index, "scope": section,
+                               "reason": reason})
     origins = {item["finding_id"] for item in
                context.get("historical_findings", {}).get("items", [])}
     seen = set()
@@ -1238,7 +1287,8 @@ class Analyses:
 
     def event(self, analysis_id, kind, agent):
         with self.store.connection() as db:
-            limit = (4096 if kind in {"tool_arguments_invalid", "tool_arguments_preserved"}
+            limit = (4096 if kind in {"tool_arguments_invalid", "tool_arguments_preserved",
+                                     "output_limit"}
                      else 1024 if kind == "failure" else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
