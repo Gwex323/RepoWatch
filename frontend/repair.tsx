@@ -36,6 +36,7 @@ type Repair = {
     review: { summary: string } | null }[];
 };
 const labels: Record<string, string> = {
+  submission_required: '探索已结束，要求提交补丁并验证',
   cancelled: '已关闭', false_positive: '误报 · 用户已确认，已关闭',
   queued: '等待修复', waiting_environment: '等待 Docker 环境', running: '修复执行中',
   failed: '修复未完成', interrupted: '修复已中断',

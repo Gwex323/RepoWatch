@@ -172,7 +172,7 @@ class RepairStageModel(Model):
         if self.output_recovery:
             kwargs["model_settings"] = self._reduced_reasoning(kwargs["model_settings"])
         final = self.role == "independent_reviewer"
-        limit = 3 if final else 6 + 3 * self.budget.get("verification_corrections", 0)
+        limit = 3 if final else 10 + 3 * self.budget.get("verification_corrections", 0)
         verified = bool(self.workspace.verification and self.workspace.verification.get("passed"))
         if self.turns > limit:
             raise Conflict("repair_model_budget")
@@ -208,6 +208,23 @@ class RepairStageModel(Model):
                 "Return your final review as exactly one JSON object matching this schema: "
                 + json.dumps(schema.json_schema()) + ". No Markdown or tool-call text."
             )
+        if not final and not verified and self.turns >= limit - 1:
+            kwargs["tools"] = [tool for tool in kwargs["tools"]
+                               if tool.name == "submit_and_test_repair"]
+            if len(kwargs["tools"]) != 1:
+                raise Conflict("repair_verification_required")
+            kwargs["model_settings"] = replace(
+                kwargs["model_settings"], tool_choice="submit_and_test_repair",
+                parallel_tool_calls=False,
+            )
+            instruction += (
+                " Exploration is finished. Submit a minimal complete patch for the confirmed "
+                "finding using only source files already read, plus new targeted regression "
+                "files. Call submit_and_test_repair now. Other scope items may remain pending; "
+                "do not expand this patch to unrelated requirements. Never fabricate hashes "
+                "or results, modify existing tests, or bypass source protections."
+            )
+            self.event("submission_required", "exploration_budget_reserved")
         if closing:
             kwargs["tools"] = []
             kwargs["model_settings"] = replace(
@@ -607,7 +624,7 @@ async def run_repair(model, context, event, *, workspace, reasoning_effort=None)
     result = await Runner.run(
         repairer, input=json.dumps({**context, "source_index": workspace.index()},
                                   ensure_ascii=False),
-        max_turns=12 + 3 * MAX_VERIFICATION_CORRECTIONS, hooks=Audit(),
+        max_turns=16 + 3 * MAX_VERIFICATION_CORRECTIONS, hooks=Audit(),
         run_config=RunConfig(tracing_disabled=True, trace_include_sensitive_data=False,
                              workflow_name="RepoWatch automatic repair"),
     )
