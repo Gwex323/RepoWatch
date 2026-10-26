@@ -45,7 +45,7 @@ type Analysis = {
 const statuses: Record<string, string> = {
   cancelled: '已取消', waiting_model: '等待模型配置', queued: '等待分析', running: 'Agent 分析中',
   completed: '分析已完成', failed: '分析未完成', interrupted: '分析已中断',
-  superseded: '已被新执行结果替代',
+  superseded: '已由新记录继续处理',
   waiting_reproduction: '待人工复现', confirmed: '复现成功', not_reproduced: '未能复现',
   resolved: '已解决', false_positive: '误报 · 用户已确认，已关闭',
 };
@@ -85,6 +85,10 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   repair_running: '该问题正在修复中，暂不能改判；请等修复结束或停止任务。',
   resolution_note_required: '手动标记解决必须填写处置说明。',
   false_positive_note_required: '请填写确认误报的原因。',
+  finding_continuation_required: '请填写当前版本续办说明。',
+  finding_recheck_required: '需要最新独立复核确认该问题仍存在，并具备当前源码证据。',
+  finding_scope_required: '该问题尚未关联当前已确认的验收项，请先继续范围审查。',
+  repair_confirmation_required: '该问题需要有效的原用户复现确认，不能仅凭模型意见开始修复。',
   resolution_pr_not_merged: '修复 PR 尚未合并，请先在 GitHub 完成合并。',
   resolution_verification_failed: '无法核验修复 PR 的合并状态，请检查 GitHub 账号与网络后重试。',
   analysis_max_turns_exceeded: '分析已达到总调用轮数上限，尚未生成完整报告。',
@@ -112,6 +116,7 @@ const names: Record<string, string> = {
   reproduction_assistant: '复现辅助', independent_reviewer: '独立审查',
 };
 function eventLabel(item: Analysis['events'][number]) {
+  if (item.kind === 'finding_continued') return '历史确认问题已在当前版本继续修复';
   const name = names[item.agent] ?? item.agent;
   if (item.kind === 'model_configuration') return agentModelEvent(item.agent);
   if (item.kind === 'attempt') return '开始新一次分析';
@@ -250,20 +255,28 @@ function FindingItem({ analysis, finding, api, refresh }: {
   </article>;
 }
 
-function HistoricalItem({ item, api, refresh }: {
+function HistoricalItem({ item, analysis, api, refresh }: {
   item: NonNullable<Analysis['historical_review']>['items'][number];
+  analysis: Analysis;
   api: Api; refresh: () => Promise<void>;
 }) {
   const [note, setNote] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const canDispose = ['waiting_reproduction', 'confirmed', 'not_reproduced'].includes(item.live_status ?? '');
-  const dispositionLabel = item.live_status && ['false_positive', 'resolved', 'not_reproduced'].includes(item.live_status)
+  const dispositionLabel = item.live_status && ['false_positive', 'resolved', 'not_reproduced', 'superseded'].includes(item.live_status)
     ? statuses[item.live_status] : null;
   const submit = (decision: 'not_reproduced' | 'resolved' | 'false_positive') => {
     setBusy(true); setError('');
     void api(`/analyses/${item.analysis_id}/findings/${item.finding_id}/disposition`, {
       version: item.live_version, decision, note,
+    }).then(refresh).catch(e => setError(errorMessage(e.message))).finally(() => setBusy(false));
+  };
+  const continueRepair = () => {
+    setBusy(true); setError('');
+    void api(`/analyses/${item.analysis_id}/findings/${item.finding_id}/continue`, {
+      version: item.live_version, target_analysis_id: analysis.id,
+      analysis_version: analysis.version, note,
     }).then(refresh).catch(e => setError(errorMessage(e.message))).finally(() => setBusy(false));
   };
   return <article className="analysis-finding">
@@ -295,6 +308,9 @@ function HistoricalItem({ item, api, refresh }: {
         </>}
         <button className="button secondary" disabled={busy || !note.trim()} onClick={() => submit('false_positive')}>
           确认误报并关闭</button>
+        {item.live_status === 'confirmed' && item.result?.outcome === 'still_present' && analysis.current &&
+          <button className="button primary" disabled={busy || !note.trim()} onClick={continueRepair}>
+            在当前版本继续修复</button>}
       </div>
     </div>}
     {error && <p role="alert">{error}</p>}
@@ -403,7 +419,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
         </p>}
         {analysis.historical_review.total === 0 && <p>没有可带入的历史未解决问题。</p>}
         {analysis.historical_review.items.map(item =>
-          <HistoricalItem key={item.finding_id} item={item} api={api} refresh={refresh} />)}
+          <HistoricalItem key={item.finding_id} item={item} analysis={analysis} api={api} refresh={refresh} />)}
       </section>}
 
       <button className="button secondary" onClick={() => onNavigate?.('repair')}>查看修复进度 →</button>

@@ -1407,6 +1407,11 @@ class Analyses:
                 capture_repair_fix(db, repair)
         return self.get(analysis_id)
 
+    def continue_finding(self, analysis_id, finding_id, **values):
+        from .finding_continuation import continue_finding
+
+        return continue_finding(self, analysis_id, finding_id, **values)
+
     def discover_pending(self):
         with self.store.connection() as db:
             ids = [row["id"] for row in db.execute(

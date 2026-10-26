@@ -194,6 +194,13 @@ class FindingDispositionBody(StrictBody):
     note: str = Field(default="", max_length=2000)
 
 
+class FindingContinuationBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    target_analysis_id: str = Field(min_length=1, max_length=100)
+    analysis_version: int = Field(ge=1, strict=True)
+    note: str = Field(min_length=1, max_length=2000)
+
+
 class RepairSettingsBody(StrictBody):
     version: int = Field(ge=1, strict=True)
     enabled: bool = Field(strict=True)
@@ -705,6 +712,10 @@ def create_app(
     @app.post("/api/analyses/{analysis_id}/findings/{finding_id}/disposition")
     def finding_disposition(analysis_id: str, finding_id: str, body: FindingDispositionBody):
         return analyses.disposition(analysis_id, finding_id, **body.model_dump())
+
+    @app.post("/api/analyses/{analysis_id}/findings/{finding_id}/continue")
+    def continue_finding(analysis_id: str, finding_id: str, body: FindingContinuationBody):
+        return analyses.continue_finding(analysis_id, finding_id, **body.model_dump())
 
     @app.post("/api/environments/{env_id}/{action}", status_code=202)
     def environment_action(

@@ -344,16 +344,17 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
     {error && <p role="alert">{error}</p>}
     {tasks.map(task => <article className="repair-task" key={task.id}>
       <div className="section-heading"><h4>{task.context.finding.title}</h4>
-        <span className="tag neutral">{task.finding_status === 'false_positive' ? labels.false_positive : !task.enabled && task.status === 'queued'
+        <span className="tag neutral">{task.finding_status === 'false_positive' ? labels.false_positive : task.finding_status === 'superseded' ? '已转到新版本' : !task.enabled && task.status === 'queued'
           ? '等待启用自动修复' : labels[task.status] ?? task.status}</span></div>
       {task.finding_status === 'false_positive' && <p role="status">{task.finding_feedback?.note}。已停止该问题的修复；下方补丁与验证仅保留为历史记录。</p>}
+      {task.finding_status === 'superseded' && <p role="status">已转到最新版本的修复记录；本任务保留为历史。</p>}
       <p className="diagnosis-meta">版本 {task.revision.slice(0, 12)} · 已尝试 {task.attempt} 次
         {task.stage && ` · ${labels[task.stage] ?? task.stage}`}</p>
       {task.source_kind === 'existing_issue' && task.source_issue && <p className="diagnosis-meta">
         来源：<a href={task.source_issue.url} target="_blank" rel="noopener noreferrer">
           原 Issue #{task.source_issue.number}</a> · 修复 PR 将关联原编号</p>}
       {task.source_error && task.source_error !== task.error && <p role="alert">{message(task.source_error)}</p>}
-      {task.task_scope && task.finding_status !== 'false_positive' && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
+      {task.task_scope && !['false_positive', 'superseded'].includes(task.finding_status ?? '') && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
         {' · '}{task.task_scope.complete ? '当前范围已核验' : task.task_scope.reviewed
           ? '整体尚未完成，部分修复不关闭原 Issue' : '完整性未核验，不自动关闭原 Issue'}</p>}
       {task.status === 'running' && <p><Loader2 size={14} className="spin" />正在处理修复任务</p>}

@@ -60,6 +60,7 @@ const labels: Record<string, string> = {
   waiting_reproduction: '待人工复现', confirmed: '已确认复现',
   not_reproduced: '未能复现', false_positive: '误报 · 用户已确认，已关闭', resolved: '已解决', queued: '排队中',
   running: '执行中', failed: '执行失败', interrupted: '已中断', pr_created: '已提交 PR',
+  superseded: '已转到新版本继续修复',
 };
 const scheduleStatuses: Record<string, string> = {
   idle: '待调度', paused: '已暂停', scheduled: '已调度',
