@@ -12,7 +12,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
-from agents import Agent, Model, ModelSettings, RunConfig, RunHooks, Runner, function_tool
+from agents import Agent, Model, ModelSettings, RunConfig, Runner, function_tool
 from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError, ModelRefusalError
 from openai import (
     APIConnectionError,
@@ -29,6 +29,7 @@ from .analysis_model import REQUEST_TIMEOUT_SECONDS, OutputTruncated
 from .diagnosis import evidence_matches, fingerprint, redact, redact_values
 from .historical_review import MAX_HISTORICAL_FINDINGS, historical_results, historical_snapshot
 from .memory import Memory, capture_repair_fix, compact_experience
+from .observability import TracingHooks, task_binding
 from .report_recovery import (
     MAX_CHECKPOINT_BYTES,
     MAX_OUTPUT_TOKENS,
@@ -800,15 +801,17 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
         context["task_scope"] = result
         return result
 
-    class Audit(RunHooks):
+    class Audit(TracingHooks):
         async def on_agent_start(self, context, agent):
             nonlocal active_role
             active_role = agent.name
             event("agent", agent.name)
+            await super().on_agent_start(context, agent)
 
         async def on_handoff(self, context, from_agent, to_agent):
             handoffs.append(f"{from_agent.name} -> {to_agent.name}")
             event("handoff", handoffs[-1])
+            await super().on_handoff(context, from_agent, to_agent)
 
     boundary = (
         "Maintain task_scope for the ORIGINAL request, not just findings you choose to fix. "
@@ -1574,7 +1577,9 @@ class Analyses:
             if resume:
                 context["_review_resume"] = resume
             context["_review_model_identity"] = model_identity
-            task = asyncio.create_task(self.engine.analyze(context, record))
+            with task_binding(task_id=row["id"], repo_id=row["repo_id"], env_id=row["env_id"],
+                              revision=row["revision"], attempt=run_version):
+                task = asyncio.create_task(self.engine.analyze(context, record))
             try:
                 deadline = started + ANALYSIS_TIMEOUT_SECONDS
                 while not task.done():

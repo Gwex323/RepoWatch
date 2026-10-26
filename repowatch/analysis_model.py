@@ -12,6 +12,7 @@ from cryptography.fernet import InvalidToken
 from openai import AsyncOpenAI
 
 from .model_providers import ModelProviders, validate_model_config
+from .observability import Telemetry, model_observation, record_event, record_usage
 from .report_recovery import digest
 from .roles import FLOW_ROLES, ROLE_DETAILS, ROLES
 from .store import Conflict
@@ -144,22 +145,25 @@ class ObservedModel(Model):
     """Observe safe completion metadata before accepting SDK-decoded output."""
 
     def __init__(self, delegate, observation, *, separate_schema_from_tools=False,
-                 retry_handoff_mismatch=False):
+                 retry_handoff_mismatch=False, trace_config=None):
         self.delegate, self.observation = delegate, observation
         self.separate_schema_from_tools = separate_schema_from_tools
         self.retry_handoff_mismatch = retry_handoff_mismatch
+        self.trace_config = trace_config or {}
 
     async def get_response(self, *args, **kwargs):
-        self.observation.clear()
-        try:
-            result = await self.delegate.get_response(*args, **kwargs)
-        except ModelBehaviorError:
+        with model_observation(self.trace_config, kwargs.get("model_settings")) as span:
+            self.observation.clear()
+            try:
+                result = await self.delegate.get_response(*args, **kwargs)
+            except ModelBehaviorError:
+                if self.observation.get("truncated"):
+                    raise OutputTruncated("analysis_output_truncated") from None
+                raise
+            record_usage(span, result)
             if self.observation.get("truncated"):
-                raise OutputTruncated("analysis_output_truncated") from None
-            raise
-        if self.observation.get("truncated"):
-            raise OutputTruncated("analysis_output_truncated")
-        return result
+                raise OutputTruncated("analysis_output_truncated")
+            return result
 
     async def stream_response(self, *args, **kwargs):
         raise NotImplementedError("Repository analysis uses non-streaming calls.")
@@ -285,8 +289,9 @@ class ModelFlow:
 
 
 class AnalysisModel:
-    def __init__(self, store, credentials):
+    def __init__(self, store, credentials, *, telemetry=None):
         self.store, self.credentials = store, credentials
+        self.telemetry = telemetry or Telemetry()
 
     def _snapshot(self):
         with self.store.connection() as db:
@@ -451,6 +456,14 @@ class AnalysisModel:
 
     async def _run(self, runner, context, event, *, flow,
                    request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
+        with self.telemetry.workflow(flow, context, event):
+            return await self._run_models(
+                runner, context, event, flow=flow,
+                request_timeout_seconds=request_timeout_seconds, **options,
+            )
+
+    async def _run_models(self, runner, context, event, *, flow,
+                          request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
         required = FLOW_ROLES[flow]
         with self.store.connection() as db:
             db.execute("BEGIN")
@@ -475,6 +488,7 @@ class AnalysisModel:
         original_event = event
 
         def event(kind, value):
+            record_event(kind, value)
             if kind == "review_checkpoint":
                 for secret in sorted(set(secrets.values()), key=len, reverse=True):
                     value = value.replace(json.dumps(secret, ensure_ascii=False)[1:-1],
@@ -534,6 +548,8 @@ class AnalysisModel:
                     delegate = adapter(config["model"], client)
                 models[role] = ObservedModel(
                     delegate, observation,
+                    trace_config={"model": config["model"], "api": config["api"],
+                                  "provider_id": rows[role]["provider_id"]},
                     separate_schema_from_tools=separate_review_schema_from_tools(config),
                     retry_handoff_mismatch=deepseek_chat_compatibility(config),
                 )

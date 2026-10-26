@@ -18,6 +18,7 @@
 
 - Python + OpenAI Agents SDK 0.23.1，使用五个真实流程角色。
 - FastAPI + SQLite 后台，React + TypeScript WebUI。
+- 可选接入 Langfuse，追踪真实任务、五角色、模型请求与工具调用；默认关闭且仅记录运行元数据。
 - 本地管理密码、会话校验、同源限制与 CSRF 校验。
 - 任务状态保存在数据库中；重启后可以继续等待确认或恢复已确认任务。
 - 共享仓库记忆：按仓库和代码版本隔离，包含手工知识及已合并的真实修复经验。
@@ -94,6 +95,33 @@ PR 合并仍由项目拥有者在 GitHub 中完成。
 后端 `Repairs.publish()` 将问题说明、复现步骤、修改摘要、验证结果和审查意见
 按模板整理为发布正文；`GitHubPublisher.publish()` 创建远程提交、分支、Issue 和 PR。
 Agent 不持有 GitHub 发布工具，发布前仍需满足本人复现确认、测试及独立审查等条件。
+
+## Langfuse 监控接入
+
+1. 在启动工作台的 Python 虚拟环境安装可选依赖：`python -m pip install -e ".[observability]"`。
+2. 在 Langfuse 云端或自部署实例创建项目及项目 API 密钥，然后在启动工作台的 PowerShell 中设置：
+
+   ```powershell
+   $env:REPOWATCH_LANGFUSE_ENABLED = "1"
+   $env:LANGFUSE_BASE_URL = Read-Host "Langfuse 服务地址，例如 http://localhost:3000"
+   $env:LANGFUSE_PUBLIC_KEY = Read-Host "Langfuse 项目 Public Key"
+   $langfuseSecret = Read-Host "Langfuse 项目 Secret Key" -AsSecureString
+   $env:LANGFUSE_SECRET_KEY = [System.Net.NetworkCredential]::new("", $langfuseSecret).Password
+   Remove-Variable langfuseSecret
+   .\scripts\start.ps1 -Background
+   ```
+
+   如果已有后台工作台，需要先停止原进程，再从设置好变量的终端启动；否则启动脚本可能选择其他端口。
+   云端地址应使用该项目所在区域的服务地址。`.env.example` 仅为配置参考，启动脚本不会自动读取 `.env`。
+3. 在「设置 → 系统信息」查看 Langfuse 状态和服务入口；“已初始化”仅表示 SDK 就绪，不代表已核验远程连通性。
+4. 发起一次真实分析或修复，在 Langfuse 中查看 `repowatch.analysis`、`repowatch.diagnosis` 或
+   `repowatch.repair`，并按 `task_id`、`env_id`、`repo_id` 等元数据对应任务。每次重试或恢复是新 trace。
+
+追踪包含 Agent、每次模型请求（含自动重试）、工具执行、交接、Token 用量及失败/取消状态。
+本次仅发送运行元数据，不发送源码、提示词、模型正文、工具参数/结果、凭据或异常原文。
+费用依赖 Langfuse 中的模型价格配置；兼容供应商的自定义收费不保证自动识别，失败请求的未知用量不会估算。
+未启用、缺少配置/依赖或追踪故障时，仓库任务继续运行。接入不改变现有超时、重试与发布策略。
+详细数据结构、配置与验收步骤见 [Langfuse 接入说明](docs/adr/0069-langfuse.md)。
 
 ## GitHub 账号连接
 
