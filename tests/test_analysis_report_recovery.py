@@ -76,8 +76,9 @@ def test_checkpoint_observations_are_bounded_and_clipping_is_explicit():
 
 
 class RecoveryEngine:
-    def __init__(self, fail=True, invented=False):
+    def __init__(self, fail=True, invented=False, fail_code="analysis_authentication_failed"):
         self.fail, self.invented, self.version = fail, invented, 1
+        self.fail_code = fail_code
         self.requests = []
 
     def status(self):
@@ -94,7 +95,7 @@ class RecoveryEngine:
         async def respond(system_instructions, input, **kwargs):
             self.requests.append((input, kwargs))
             if kwargs.get("output_schema") is not None and self.fail:
-                raise AnalysisFailure("analysis_provider_timeout_exhausted")
+                raise AnalysisFailure(self.fail_code)
             return await original(system_instructions, input, **kwargs)
 
         model.get_response = respond
@@ -204,7 +205,8 @@ def test_resume_still_rejects_fabricated_evidence_and_persists_no_findings(servi
     analyses.retry(failed["id"], failed["version"])
     asyncio.run(analyses.tick())
     result = analyses.get(failed["id"])
-    assert result["status"] == "failed" and result["error"] == "analysis_evidence_unverified"
+    assert result["status"] == "queued"
+    assert result["automatic_recovery"]["state"] == "waiting"
     assert result["report"] is None and not result["findings"]
     assert len(engine.requests) == 2
 
@@ -230,15 +232,9 @@ def test_optional_scope_version_and_current_analysis_are_bound(service):  # noqa
         row = db.execute("SELECT * FROM repository_analyses WHERE id=?",
                          (failed["id"],)).fetchone()
         value = json.loads(row["context"])
-        db.executescript("""
-            CREATE TABLE task_scopes(id TEXT, version INTEGER, analysis_id TEXT,
-                                     revision TEXT, original_digest TEXT);
-            CREATE TABLE analysis_task_scopes(analysis_id TEXT, scope_id TEXT);
-        """)
-        db.execute("INSERT INTO task_scopes VALUES('scope_fixture',1,?,?,?)",
-                   (row["id"], row["revision"], "original_digest"))
-        db.execute("INSERT INTO analysis_task_scopes VALUES(?,'scope_fixture')", (row["id"],))
-        value["task_scope"] = {"id": "scope_fixture", "version": 1, "items": [{"key": "cn"}]}
+        scope = analyses.scope_basis(db, row)
+        value["task_scope"] = {"id": scope["id"], "version": scope["version"],
+                               "items": [{"key": "cn"}]}
         saved = state(value)
         saved["read_ranges"] = {"app.py": [[1, 1]]}
         binding = analyses.review_binding(db, row, value, analyses.model_identity())
@@ -248,10 +244,17 @@ def test_optional_scope_version_and_current_analysis_are_bound(service):  # noqa
                    (binding, json.dumps(saved), digest(saved)))
     assert analyses.get(failed["id"])["report_recovery"]["available"]
     with analyses.store.connection() as db:
-        db.execute("UPDATE task_scopes SET version=2")
+        db.execute("UPDATE task_scopes SET version=version+1 WHERE id=?", (scope["id"],))
     assert not analyses.get(failed["id"])["report_recovery"]["available"]
     with analyses.store.connection() as db:
-        db.execute("UPDATE task_scopes SET version=1,analysis_id='other_analysis'")
+        db.execute(
+            "INSERT INTO repository_analyses(id,env_id,repo_id,revision,fingerprint,trigger_key,"
+            "status,context,created,updated) SELECT 'other_analysis',env_id,repo_id,revision,"
+            "fingerprint,'other_trigger',status,context,created,updated "
+            "FROM repository_analyses WHERE id=?", (failed["id"],),
+        )
+        db.execute("UPDATE task_scopes SET version=?,analysis_id='other_analysis' WHERE id=?",
+                   (scope["version"], scope["id"]))
     assert not analyses.get(failed["id"])["report_recovery"]["available"]
 
 
