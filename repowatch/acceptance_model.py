@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import Literal
 
 from agents import Agent, Model, ModelSettings, RunConfig, Runner
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 
+from .analysis_model import OutputTruncated
 from .repository_analysis import report_output_issue
 from .roles import model_for_role, reasoning_for_role
 from .scope_models import RepairScopeCoverage, ScopeReview
@@ -72,14 +74,31 @@ class AcceptanceModel(Model):
         )
         for attempt in range(2):
             self.event("request_started", "independent_reviewer")
-            response = await asyncio.wait_for(
-                self.delegate.get_response(
-                    system_instructions=instruction,
-                    input=input,
-                    **kwargs,
-                ),
-                timeout=450,
-            )
+            try:
+                response = await asyncio.wait_for(
+                    self.delegate.get_response(
+                        system_instructions=instruction, input=input, **kwargs,
+                    ),
+                    timeout=450,
+                )
+            except OutputTruncated:
+                if attempt:
+                    raise Conflict("acceptance_output_truncated") from None
+                settings = kwargs["model_settings"]
+                reasoning = settings.reasoning
+                if reasoning and reasoning.effort in {"medium", "high", "xhigh", "max"}:
+                    reasoning = Reasoning(effort="low")
+                kwargs["model_settings"] = replace(
+                    settings, max_tokens=16000, reasoning=reasoning,
+                )
+                instruction += (
+                    " Previous output was truncated and discarded. Keep reasoning and rationale "
+                    "brief. Return the complete schema with all original requirements and exact "
+                    "evidence; do not repeat supplied logs or source outside evidence quotes. "
+                    "Use minimal test files. Never omit a requirement or invent an observation."
+                )
+                self.event("output_retry", "independent_reviewer")
+                continue
             if any(item.type == "function_call" for item in response.output):
                 raise Conflict("acceptance_output_invalid")
             if report_output_issue(response, schema) is None:

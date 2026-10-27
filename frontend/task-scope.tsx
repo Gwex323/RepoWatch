@@ -29,6 +29,9 @@ export type TaskScope = {
 };
 export type AcceptanceProgress = {
   state: string; stage: string; attempt: number; error: string | null;
+  retry_after?: number; model_calls?: number;
+  failure?: { code: string; details: { exceptions?: string[]; http_statuses?: number[];
+    locations?: { file: string; line: number }[] }; retryable: boolean; created: number } | null;
   checks: { item_key: string; kind: EvidenceKind; state: string; reason: string; note: string }[];
 };
 const automaticStates: Record<string, string> = {
@@ -36,6 +39,7 @@ const automaticStates: Record<string, string> = {
   waiting_environment: '等待 Docker 恢复后自动继续', completed: '自动验收已完成',
   partial: '本轮自动验收结束，仍有未满足的要求', blocked: '自动验收遇到执行限制',
   stale: '验证依据已变化，当前结果不计入新版本', failed: '本轮自动验收未完成',
+  retry_wait: '模型服务暂时不可用，系统将自动重试',
 };
 const automaticReasons: Record<string, string> = {
   external_service_required: '需要可用的外部服务、凭据或网络',
@@ -55,6 +59,20 @@ const automaticReasons: Record<string, string> = {
   acceptance_model_budget: '本轮自动验收的模型请求额度已用完',
   acceptance_deadline_exceeded: '本轮自动验收已达到时限',
   acceptance_interrupted: '上次自动验收中断，记录已保留',
+  acceptance_output_truncated: '模型输出仍被截断，本次输出恢复已用完',
+  acceptance_provider_timeout: '模型请求超时',
+  acceptance_provider_unreachable: '无法连接模型服务',
+  acceptance_rate_limited: '模型服务限流',
+  acceptance_provider_unavailable: '模型服务暂时不可用',
+  acceptance_authentication_failed: '模型密钥未通过验证，请检查供应商配置',
+  acceptance_provider_forbidden: '模型服务拒绝访问，请检查账号权限',
+  acceptance_provider_not_found: '模型或接口地址不存在，请检查供应商配置',
+  acceptance_provider_request_rejected: '模型服务拒绝请求参数，请查看供应商配置和错误记录',
+  acceptance_provider_error: '模型服务返回错误，请查看错误记录',
+  acceptance_configuration_error: '模型调用配置不符合要求',
+  acceptance_model_refused: '模型拒绝完成本次审查',
+  acceptance_execution_failed: '验收执行异常，请查看错误详情；旧记录可能未保存具体原因',
+  acceptance_retry_unavailable: '当前任务不处于可重新发起验收的状态，请刷新',
 };
 export function AutomaticAcceptance({ progress }: { progress?: AcceptanceProgress | null }) {
   if (!progress) return null;
@@ -64,6 +82,17 @@ export function AutomaticAcceptance({ progress }: { progress?: AcceptanceProgres
     <p>{automaticStates[progress.state] ?? '自动验收处理中'}
       {progress.state === 'running' && stage ? ` · ${stage}` : ''}</p>
     {progress.error && <p>{automaticReasons[progress.error] ?? '处理未完成，执行记录已保留。'}</p>}
+    {progress.state === 'retry_wait' && !!progress.retry_after && <p>
+      预计 {new Date(progress.retry_after * 1000).toLocaleTimeString('zh-CN')} 自动继续，已保存结果将保留。
+    </p>}
+    {progress.failure && <details><summary>最近一次验收错误</summary>
+      <p>{automaticReasons[progress.failure.code] ?? '执行未完成'} · 第 {progress.attempt} 次运行
+        {progress.model_calls !== undefined && ` · 已请求模型 ${progress.model_calls} 次`}</p>
+      {!!progress.failure.details.exceptions?.length && <p>
+        错误类型：{progress.failure.details.exceptions.join('、')}</p>}
+      {!!progress.failure.details.http_statuses?.length && <p>
+        服务状态：{progress.failure.details.http_statuses.join('、')}</p>}
+    </details>}
   </div>;
 }
 type RepairChoice = {
@@ -91,7 +120,8 @@ const errors: Record<string, string> = {
   analysis_stale: '源码或执行配置已变化，请从当前环境开始新的分析。',
 };
 const errorText = (error: unknown) => error instanceof Error
-  ? errors[error.message] ?? '操作未完成，请刷新并检查任务状态。' : '操作未完成。';
+  ? errors[error.message] ?? automaticReasons[error.message]
+    ?? '操作未完成，请刷新并检查任务状态。' : '操作未完成。';
 
 function ObservationForm({ item, scope, repairs, api, refresh }: {
   item: ScopeItem; scope: TaskScope; repairs: RepairChoice[]; api: Api; refresh: () => Promise<void>;
@@ -176,6 +206,16 @@ export function TaskScopePanel({ scope, analysisId, analysisVersion, analysisSta
         : scope.reviewed ? '整体任务尚未完成；部分修复可以提交，未完成项继续保留。'
           : '完整性未核验：原始任务范围尚未通过当前版本的独立审查。'}</p>
     <AutomaticAcceptance progress={scope.automation} />
+    {canReview && !scope.stale && scope.automation?.state === 'failed' && <>
+      <button className="button secondary" disabled={busy || scope.automation.attempt >= 2
+        || (scope.automation.model_calls ?? 0) >= 12} onClick={() => {
+        setBusy(true); setNotice('');
+        void api(`/analyses/${analysisId}/acceptance/retry`, { version: analysisVersion })
+          .then(refresh).catch(error => setNotice(errorText(error))).finally(() => setBusy(false));
+      }}><RefreshCw size={15} />继续当前验收</button>
+      <p className="diagnosis-meta">保留原要求、证据和已用次数；剩余额度内继续处理。
+        原时限已到时，此次操作会开启新的 30 分钟处理窗口。</p>
+    </>}
     {scope.stale && <p role="status">原问题或执行依据已变化，请继续范围审查；执行依据过期时需开始新分析。</p>}
     {scope.original.clipped && <p role="status">原始问题内容存在截断，不能自动判定整体完成。</p>}
     {!!scope.pending_limits.length && <p role="status">尚有 {scope.pending_limits.length} 项跳过或排除的验证未核清关联，不能自动判定整体完成。</p>}

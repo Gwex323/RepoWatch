@@ -36,7 +36,17 @@ def initialize(db):
             root_finding_id TEXT NOT NULL, finding_id TEXT NOT NULL, repair_id TEXT NOT NULL,
             created REAL NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS scope_acceptance_failures (
+            id TEXT PRIMARY KEY, run_id TEXT NOT NULL REFERENCES scope_acceptance_runs(id),
+            code TEXT NOT NULL, details TEXT NOT NULL, retryable INTEGER NOT NULL,
+            created REAL NOT NULL
+        );
     """)
+    columns = {row[1] for row in db.execute("PRAGMA table_info(scope_acceptance_runs)")}
+    if "retry_after" not in columns:
+        db.execute(
+            "ALTER TABLE scope_acceptance_runs ADD COLUMN retry_after REAL NOT NULL DEFAULT 0"
+        )
 
 
 def repair_basis(task):
@@ -144,7 +154,16 @@ def progress(db, scope):
     ).fetchone()
     if not run:
         return None
-    return {key: run[key] for key in ("id", "state", "stage", "attempt", "error", "updated")} | {
+    failure = db.execute(
+        "SELECT code,details,retryable,created FROM scope_acceptance_failures "
+        "WHERE run_id=? ORDER BY created DESC,rowid DESC LIMIT 1", (run["id"],),
+    ).fetchone()
+    return {key: run[key] for key in (
+        "id", "state", "stage", "attempt", "error", "updated", "retry_after", "model_calls",
+    )} | {
+        "failure": ({"code": failure["code"], "details": json.loads(failure["details"]),
+                     "retryable": bool(failure["retryable"]), "created": failure["created"]}
+                    if failure else None),
         "checks": [
             {
                 key: row[key]

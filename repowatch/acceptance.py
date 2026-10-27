@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 
+from .acceptance_failures import TRANSIENT_CODES, failure_code, failure_details
 from .acceptance_model import AcceptanceCheck, AcceptancePlan, AcceptanceVerdict
 from .acceptance_store import repair_basis
 from .analysis_basis import analysis_current
@@ -34,6 +35,7 @@ MAX_SECONDS = 1800
 MAX_RESUMES = 2
 MAX_FOLLOWUPS = 2
 MAX_MODEL_REQUESTS = 12
+RETRY_DELAY_SECONDS = 10
 
 
 def pytest_runner(config):
@@ -215,7 +217,7 @@ class Acceptance:
             )
             for run in db.execute(
                 "SELECT * FROM scope_acceptance_runs WHERE state IN "
-                "('queued','paused','waiting_environment') ORDER BY created"
+                "('queued','paused','waiting_environment','retry_wait') ORDER BY created"
             ).fetchall():
                 analysis = db.execute(
                     "SELECT * FROM repository_analyses WHERE id=?", (run["analysis_id"],)
@@ -253,14 +255,17 @@ class Acceptance:
                     continue
                 if run["state"] == "waiting_environment" and not docker_ready:
                     continue
+                if run["state"] == "retry_wait" and run["retry_after"] > now:
+                    continue
                 # Waiting for Docker does not spend a model/attempt recovery allowance.
-                attempt = run["attempt"] + (run["state"] == "queued")
+                attempt = run["attempt"] + (run["state"] in ("queued", "retry_wait"))
                 if attempt > MAX_RESUMES:
                     continue
                 db.execute(
                     "UPDATE scope_acceptance_runs SET state='running',owner=?,lease=?,"
                     "attempt=?,deadline=COALESCE(deadline,?),"
-                    "model_identity=COALESCE(model_identity,?),error=NULL,updated=? WHERE id=?",
+                    "model_identity=COALESCE(model_identity,?),error=NULL,retry_after=0,"
+                    "updated=? WHERE id=?",
                     (
                         self.owner,
                         now + MAX_SECONDS + 30,
@@ -277,6 +282,53 @@ class Acceptance:
                     ).fetchone()
                 )
         return None
+
+    def retry(self, analysis_id, version):
+        """Explicit continuation preserves calls, attempts, evidence and failure history."""
+        status = self.engine.status()
+        if not status["enabled"]:
+            raise Conflict("acceptance_paused")
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            analysis = db.execute(
+                "SELECT * FROM repository_analyses WHERE id=?", (analysis_id,),
+            ).fetchone()
+            if not analysis or analysis["version"] != version:
+                raise Conflict("analysis_changed")
+            if not self._authorized(db, analysis):
+                raise Conflict("acceptance_basis_changed")
+            if self._busy(db, analysis):
+                raise Conflict("analysis_busy")
+            scope = _bound(db, analysis_id)
+            run = db.execute(
+                "SELECT * FROM scope_acceptance_runs WHERE scope_id=? AND version=? "
+                "ORDER BY created DESC LIMIT 1", (scope["id"], scope["version"]),
+            ).fetchone()
+            if not run or run["state"] != "failed":
+                raise Conflict("acceptance_retry_unavailable")
+            if run["analysis_id"] != analysis_id:
+                raise Conflict("acceptance_basis_changed")
+            if run["attempt"] >= MAX_RESUMES or run["model_calls"] >= MAX_MODEL_REQUESTS:
+                raise Conflict("acceptance_model_budget")
+            if self._basis(db, analysis, self._repairs(db, analysis)) != json.loads(run["basis"]):
+                raise Conflict("acceptance_basis_changed")
+            if run["model_identity"] != digest(status.get("role_models", {})):
+                raise Conflict("acceptance_model_changed")
+            now = time.time()
+            deadline = run["deadline"]
+            if not deadline or deadline <= now:
+                # Only this explicit user action can open a fresh time window. Counts persist.
+                deadline = now + MAX_SECONDS
+            db.execute(
+                "UPDATE scope_acceptance_runs SET state='queued',owner=NULL,lease=0,"
+                "retry_after=0,deadline=?,updated=? WHERE id=?", (deadline, now, run["id"]),
+            )
+            _event(db, scope, "acceptance_retry_requested", "owner", {
+                "run_id": run["id"], "previous_error": run["error"],
+                "previous_deadline": run["deadline"], "deadline": deadline,
+                "attempt": run["attempt"], "model_calls": run["model_calls"],
+            })
+            return {"id": run["id"], "state": "queued"}
 
     def _guard(self, run, model_identity, deadline):
         if self.closing.is_set() or self.execution.closing.is_set():
@@ -322,9 +374,30 @@ class Acceptance:
         return analysis
 
     def _event(self, run, kind, value):
-        # Provider data is not copied into the general event stream.
-        if kind not in ("agent", "request_started", "request_completed", "format_retry"):
+        # Keep only bounded protocol metadata, never provider text or request bodies.
+        if kind not in ("agent", "request_started", "request_completed", "format_retry",
+                        "output_retry", "provider_response", "provider_rejection"):
             return
+        metadata = {}
+        if kind in ("provider_response", "provider_rejection"):
+            try:
+                value = json.loads(value)
+            except (TypeError, ValueError):
+                return
+            if not isinstance(value, dict):
+                return
+            for key in ("output_tokens", "reasoning_tokens"):
+                number = value.get(key)
+                if type(number) is int and 0 <= number <= 10000000:
+                    metadata[key] = number
+            if type(value.get("http_status")) is int and 100 <= value["http_status"] <= 599:
+                metadata["http_status"] = value["http_status"]
+            if type(value.get("truncated")) is bool:
+                metadata["truncated"] = value["truncated"]
+            if isinstance(value.get("finish_reason"), str) and value["finish_reason"] in {
+                "stop", "length", "tool_calls", "function_call", "content_filter", "unknown",
+            }:
+                metadata["finish_reason"] = value["finish_reason"]
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             if kind == "request_started":
@@ -340,7 +413,7 @@ class Acceptance:
                 _bound(db, run["analysis_id"]),
                 "acceptance_" + kind,
                 "system",
-                {"run_id": run["id"], "role": "independent_reviewer"},
+                {"run_id": run["id"], "role": "independent_reviewer", **metadata},
             )
 
     async def _model(self, run, packet, guard):
@@ -1008,36 +1081,48 @@ class Acceptance:
                     ("stale" if continued else state, time.time(), run["id"], self.owner),
                 )
         except Exception as exc:
-            code = (
-                str(exc)
-                if isinstance(exc, (Conflict, ExecutionError))
-                else "acceptance_execution_failed"
-            )
-            if not code.startswith(("acceptance_", "docker_")):
-                code = "acceptance_execution_failed"
-            state = (
-                "waiting_environment"
-                if code == "docker_unavailable"
-                else "paused"
-                if code == "acceptance_paused"
-                else "stale"
-                if code in ("acceptance_basis_changed", "acceptance_source_changed")
-                else "failed"
-            )
-            with self.store.connection() as db:
-                db.execute(
-                    "UPDATE scope_acceptance_runs SET state=?,error=?,lease=0,updated=? "
-                    "WHERE id=? AND owner=?",
-                    (state, code, time.time(), run["id"], self.owner),
-                )
-                _event(
-                    db,
-                    _bound(db, run["analysis_id"]),
-                    "acceptance_stopped",
-                    "system",
-                    {"run_id": run["id"], "reason": code},
-                )
+            self._stop(run, exc)
         return True
+
+    def _stop(self, run, exc):
+        code, details = failure_code(exc), failure_details(exc)
+        with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            live = db.execute(
+                "SELECT * FROM scope_acceptance_runs WHERE id=? AND owner=? AND state='running'",
+                (run["id"], self.owner),
+            ).fetchone()
+            if not live:
+                return
+            now = time.time()
+            retryable = bool(
+                code in TRANSIENT_CODES and live["attempt"] < MAX_RESUMES
+                and live["model_calls"] < MAX_MODEL_REQUESTS
+                and live["deadline"] and live["deadline"] > now + RETRY_DELAY_SECONDS
+            )
+            state = (
+                "waiting_environment" if code == "docker_unavailable"
+                else "paused" if code == "acceptance_paused"
+                else "stale" if code in ("acceptance_basis_changed", "acceptance_source_changed")
+                else "retry_wait" if retryable else "failed"
+            )
+            retry_after = now + RETRY_DELAY_SECONDS if retryable else 0
+            db.execute(
+                "INSERT INTO scope_acceptance_failures VALUES(?,?,?,?,?,?)",
+                (uid("acceptance_failure"), run["id"], code, json.dumps(details), retryable, now),
+            )
+            db.execute(
+                "UPDATE scope_acceptance_runs SET state=?,error=?,lease=0,retry_after=?,"
+                "updated=? WHERE id=? AND owner=?",
+                (state, code, retry_after, now, run["id"], self.owner),
+            )
+            _event(db, _bound(db, run["analysis_id"]), "acceptance_stopped", "system", {
+                "run_id": run["id"], "reason": code, "stage": live["stage"],
+                "retry_after": retry_after, "retryable": retryable, **details,
+            })
+        logging.getLogger(__name__).warning(
+            "Automatic acceptance %s stopped: %s (state=%s)", run["id"], code, state,
+        )
 
     async def run(self):
         while not self.closing.is_set():

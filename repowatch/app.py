@@ -691,6 +691,10 @@ def create_app(
     def reassess_task_scope(analysis_id: str, body: GitHubVersionBody):
         return analyses.reassess_scope(analysis_id, body.version)
 
+    @app.post("/api/analyses/{analysis_id}/acceptance/retry", status_code=202)
+    def retry_automatic_acceptance(analysis_id: str, body: GitHubVersionBody):
+        return acceptance.retry(analysis_id, body.version)
+
     @app.post("/api/task-scopes/{scope_id}/items/{key}/observations")
     def scope_observation(scope_id: str, key: str, body: ScopeObservationBody):
         return task_scopes.observe(scope_id, key, **body.model_dump())
