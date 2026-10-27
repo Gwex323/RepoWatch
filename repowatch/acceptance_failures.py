@@ -7,6 +7,7 @@ from agents.exceptions import MaxTurnsExceeded, ModelBehaviorError, ModelRefusal
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 from pydantic import ValidationError
 
+from .acceptance_evidence import AcceptanceEvidenceError
 from .acceptance_output import AcceptanceOutputError
 from .analysis_model import OutputTruncated
 from .repository_source import ExecutionError
@@ -71,10 +72,12 @@ def failure_details(exc):
     known = (OutputTruncated, Conflict, ExecutionError, APIStatusError, APITimeoutError,
              APIConnectionError, TimeoutError, ValidationError, ModelBehaviorError, UserError,
              OSError, ValueError, TypeError, KeyError, RuntimeError)
-    kinds, locations, statuses, validation = set(), [], set(), None
+    kinds, locations, statuses, validation, evidence_validation = set(), [], set(), None, None
     for error in exception_chain(exc):
         if isinstance(error, AcceptanceOutputError):
             validation = error.validation
+        if isinstance(error, AcceptanceEvidenceError):
+            evidence_validation = error.validation
         kinds.add(next((kind.__name__ for kind in known if isinstance(error, kind)),
                        "unexpected_exception"))
         if isinstance(error, APIStatusError) and type(error.status_code) is int:
@@ -92,4 +95,6 @@ def failure_details(exc):
     }
     if validation is not None:
         result["output_validation"] = validation
+    if evidence_validation is not None:
+        result["evidence_validation"] = evidence_validation
     return result

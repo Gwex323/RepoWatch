@@ -34,6 +34,7 @@ export type AcceptanceProgress = {
     locations?: { file: string; line: number }[];
     output_validation?: { category: string; line?: number; column?: number;
       errors?: { path: (string | number)[]; type: string }[] };
+    evidence_validation?: { errors: { path: (string | number)[]; reason: string }[] };
   }; retryable: boolean; created: number } | null;
   checks: { item_key: string; kind: EvidenceKind; state: string; reason: string; note: string }[];
 };
@@ -105,6 +106,20 @@ export function AutomaticAcceptance({ progress }: { progress?: AcceptanceProgres
             bool_type: '必须为布尔值', int_type: '必须为整数', string_type: '必须为文本',
             list_type: '必须为列表', too_long: '内容超过长度上限',
           } as Record<string, string>)[error.type] ?? '字段格式或类型不符合要求'}</p>)}
+      </>}
+      {progress.failure.details.evidence_validation && <>
+        <p>源码证据校验未通过，以下条目尚未作为有效证据保存：</p>
+        {progress.failure.details.evidence_validation.errors.map((error, index) => {
+          const section = error.path[1] === 'exclusions' ? '排除项' : '验收项';
+          const item = typeof error.path[2] === 'number' ? error.path[2] + 1 : '?';
+          const evidence = typeof error.path[4] === 'number' ? ` · 第 ${error.path[4] + 1} 条证据` : '';
+          return <p key={index}>{section} {item}{evidence} · {({
+            unknown_file: '文件不在本次提供的源码中', unread_file: '文件未读取',
+            invalid_range: '源码行号越界、顺序错误或范围超过上限',
+            unread_range: '引用范围未读取', quote_mismatch: '引用原文与所标行号内的源码不匹配',
+            missing_current_evidence: '判定无缺陷或无关时缺少当前源码证据',
+          } as Record<string, string>)[error.reason] ?? '证据未通过校验'}</p>;
+        })}
       </>}
     </details>}
   </div>;
