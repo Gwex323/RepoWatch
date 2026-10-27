@@ -233,10 +233,9 @@ class ObservedModel(Model):
     """Observe safe completion metadata before accepting SDK-decoded output."""
 
     def __init__(self, delegate, observation, *, separate_schema_from_tools=False,
-                 retry_handoff_mismatch=False, trace_config=None):
+                 trace_config=None):
         self.delegate, self.observation = delegate, observation
         self.separate_schema_from_tools = separate_schema_from_tools
-        self.retry_handoff_mismatch = retry_handoff_mismatch
         self.trace_config = trace_config or {}
 
     async def get_response(self, *args, **kwargs):
@@ -749,7 +748,6 @@ class AnalysisModel:
                     trace_config={"model": config["model"], "api": config["api"],
                                   "provider_id": rows[role]["provider_id"]},
                     separate_schema_from_tools=separate_review_schema_from_tools(config),
-                    retry_handoff_mismatch=deepseek_chat_compatibility(config),
                 )
             result = await runner(
                 models[first] if uniform else models, context, event,

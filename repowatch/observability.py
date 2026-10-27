@@ -27,7 +27,8 @@ _EVENTS = {
     "scope_mapping_validation", "scope_mapping_correction", "scope_mapping_correction_applied",
     "tool_output_budget", "tool_output_retry", "tool_access_rejected", "scope_registered",
     "timeout_retry", "retry_call", "output_retry", "format_retry", "evidence_retry",
-    "handoff_retry", "report_finalization", "report_validation", "verification_resume",
+    "handoff_retry", "handoff_validation", "handoff_recovered", "handoff_recovery_stopped",
+    "report_finalization", "report_validation", "verification_resume",
     "required_read_validation", "required_read_retry", "required_read_recovered",
     "provider_structure", "provider_tool_call_compatibility",
 }

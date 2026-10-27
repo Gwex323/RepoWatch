@@ -86,7 +86,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   resolution_verification_failed: '无法核验修复 PR 的合并状态，请检查 GitHub 账号与网络后重试。',
   analysis_max_turns_exceeded: '分析已达到总调用轮数上限，尚未生成完整报告。',
   analysis_stage_budget_exceeded: '当前阶段已耗尽预算，尚未完成交接或报告。',
-  analysis_handoff_not_followed: '已要求交接，但模型未返回有效的交接调用。请检查模型服务是否支持指定工具调用。',
+  analysis_handoff_not_followed: '指定角色交接未通过，本轮分析停止。请查看交接调用检查中的原因与纠正记录。',
   analysis_finalization_not_followed: '已要求提交报告，但模型仍尝试调用工具。请检查模型服务的工具选择支持。',
   analysis_model_output_invalid: '模型返回了无效的工具调用或输出格式，本次未保存问题。',
   analysis_tool_call_protocol_invalid: '模型工具调用的协议字段不符合要求，无法安全兼容，本批调用未执行。请查看协议兼容检查记录。',
@@ -149,7 +149,17 @@ function analysisFailureMessage(analysis: Analysis) {
     for (let index = analysis.events.length - 1; index >= 0; index--) {
       const event = analysis.events[index];
       if (event.kind === 'attempt') break;
-      if (event.kind === 'required_read_validation') return `${message} ${eventLabel(event)}。`;
+      if (event.kind === 'required_read_validation' || event.kind === 'handoff_validation') return `${message} ${eventLabel(event)}。`;
+    }
+    return message;
+  }
+  if (analysis.error === 'analysis_handoff_not_followed') {
+    for (let index = analysis.events.length - 1; index >= 0; index--) {
+      const event = analysis.events[index];
+      if (event.kind === 'attempt') break;
+      if (event.kind === 'handoff_validation' || event.kind === 'handoff_recovery_stopped') {
+        return `${message} ${eventLabel(event)}。`;
+      }
     }
     return message;
   }
@@ -197,14 +207,24 @@ function eventLabel(item: Analysis['events'][number]) {
   }
   if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
   if (item.kind === 'handoff_retry') return `${name} · 指定交接未通过，使用同一轮证据重试一次`;
+  if (item.kind === 'handoff_recovered') return `${name} · 交接纠正已通过校验，等待实际交接`;
+  if (item.kind === 'handoff_recovery_stopped') return '交接纠正已停止：阶段时限已到，本批未执行';
   if (item.kind === 'handoff_validation') {
     try {
       const detail = JSON.parse(item.agent) as {
-        expected?: string; calls?: number; matching?: number; names?: string[]; accepted?: boolean;
+        expected?: string; calls?: number; matching?: number; accepted?: boolean;
+        reason?: string; recovery?: string; corrections_remaining?: number;
       };
-      const actual = detail.names?.length ? detail.names.join('、') : '无工具调用';
-      return `交接调用检查：期望 ${detail.expected ?? '指定工具'} · 收到 ${actual} · ${
-        detail.accepted ? '通过' : `未通过（${detail.matching ?? 0}/${detail.calls ?? 0} 匹配）`}`;
+      const target = names[(detail.expected ?? '').replace(/^transfer_to_/, '')] ?? '指定角色';
+      const reasons: Record<string, string> = { missing_call: '没有返回交接调用', wrong_tool: '调用不符合指定交接',
+        too_many_calls: '返回了多条调用', refusal: '模型明确拒绝' };
+      const recovery: Record<string, string> = { retry: '准备有限纠正', retry_exhausted: '本阶段交接纠正机会已用完',
+        shared_budget_exhausted: '共享工具纠正额度已用完', stage_deadline: '阶段时限已到',
+        argument_correction_active: '不能改变原参数纠正批次', refusal: '已停止，不重试拒绝' };
+      return `交接调用检查：交给${target} · 匹配 ${detail.matching ?? 0}/${detail.calls ?? 0} · ${
+        detail.accepted ? '通过' : reasons[detail.reason ?? ''] ?? '未通过'}${
+          recovery[detail.recovery ?? ''] ? ` · ${recovery[detail.recovery ?? '']}` : ''}${
+          detail.corrections_remaining !== undefined ? ` · 共享纠正剩余 ${detail.corrections_remaining} 次` : ''}`;
     } catch { return '交接调用检查已记录'; }
   }
   if (item.kind === 'model_call') return `${name} · 请求模型`;

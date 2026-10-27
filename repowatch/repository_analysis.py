@@ -5,7 +5,6 @@ import hashlib
 import json
 import logging
 import os
-import re
 import time
 from contextlib import suppress
 from dataclasses import dataclass, replace
@@ -213,7 +212,7 @@ class StageModel(Model):
 
     def __init__(self, delegate, role, budget, event, retries=None, deadline=None,
                  final_input=None, review_evidence=None, required_read=None,
-                 separate_schema_from_tools=False, retry_handoff_mismatch=False,
+                 separate_schema_from_tools=False,
                  prepare_review=None, finalization_reserve=FINALIZATION_RESERVE_SECONDS,
                  tool_parameter_models=None, review_contract=None, evidence_sources=None,
                  scope_context=None):
@@ -224,7 +223,6 @@ class StageModel(Model):
         self.review_evidence = review_evidence
         self.required_read = required_read
         self.separate_schema_from_tools = separate_schema_from_tools
-        self.retry_handoff_mismatch = retry_handoff_mismatch
         self.force_closing = False
         self.prepare_review = prepare_review
         self.finalization_reserve = finalization_reserve
@@ -236,19 +234,24 @@ class StageModel(Model):
 
     def handoff_validation(self, response, expected):
         calls = [item for item in response.output if item.type == "function_call"]
-        names = [
-            item.name if isinstance(item.name, str)
-            and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", item.name) else "<invalid>"
-            for item in calls
-        ]
         matching = sum(item.name == expected for item in calls)
-        detail = {
+        refused = any(item.type == "message" and any(
+            part.type == "refusal" for part in item.content
+        ) for item in response.output)
+        accepted = len(calls) == 1 and matching == 1 and not refused
+        return {
+            "role": self.role,
             "expected": expected, "calls": len(calls), "matching": matching,
-            "names": names, "messages": sum(item.type == "message" for item in response.output),
-            "accepted": len(calls) == 1 and matching == 1,
+            "messages": sum(item.type == "message" for item in response.output),
+            "accepted": accepted,
+            "reason": ("refusal" if refused else "accepted" if accepted
+                       else "missing_call" if not calls else "too_many_calls" if len(calls) > 1
+                       else "wrong_tool"),
         }
-        self.event("handoff_validation", json.dumps(detail))
-        return calls, detail["accepted"]
+
+    def stop_handoff_recovery(self, reason):
+        self.event("handoff_recovery_stopped", json.dumps({"role": self.role, "reason": reason}))
+        raise AnalysisFailure("analysis_handoff_not_followed")
 
     def required_read_validation(self, response, required, reads):
         structure = sdk_response_structure(response)
@@ -314,6 +317,8 @@ class StageModel(Model):
             if time_closing:
                 self.event("time_budget", self.role)
             kwargs["tools"] = []
+            kwargs["handoffs"] = [item for item in kwargs["handoffs"]
+                                  if item.tool_name == handoff_name]
             kwargs["model_settings"] = replace(
                 kwargs["model_settings"], tool_choice=handoff_name or "none",
                 parallel_tool_calls=False,
@@ -405,6 +410,14 @@ class StageModel(Model):
                 )
                 if remaining_seconds <= 0:
                     raise AnalysisFailure("analysis_deadline_exceeded")
+                request_timeout = min(REQUEST_TIMEOUT_SECONDS, remaining_seconds)
+                if handoff_retried:
+                    stage_remaining = STAGE_SECONDS[self.role] - (
+                        time.monotonic() - budget.started
+                    )
+                    if stage_remaining <= 0:
+                        self.stop_handoff_recovery("stage_deadline")
+                    request_timeout = min(request_timeout, stage_remaining)
                 if (required and required_retried
                         and time.monotonic() - budget.started >= STAGE_SECONDS[self.role]):
                     raise AnalysisFailure("analysis_scope_unregistered" if read_kind == "scope"
@@ -431,10 +444,10 @@ class StageModel(Model):
                 response = await asyncio.wait_for(self.delegate.get_response(
                     system_instructions=request_instructions,
                     input=request_input, **model_kwargs,
-                ), timeout=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds))
+                ), timeout=request_timeout)
                 if correction and any(item.type == "function_call" for item in response.output):
                     raise AnalysisFailure("analysis_finalization_not_followed")
-                if (tool_repair is not None or required) and any(
+                if (tool_repair is not None or required or closing and handoff_name) and any(
                     item.type == "message" and any(part.type == "refusal" for part in item.content)
                     for item in response.output
                 ):
@@ -442,6 +455,10 @@ class StageModel(Model):
                         check = self.required_read_validation(response, required, reads)
                         check.update(recoverable=False, recovery="refusal", corrections_remaining=0)
                         self.event("required_read_validation", json.dumps(check))
+                    if closing and handoff_name:
+                        check = self.handoff_validation(response, handoff_name)
+                        check.update(recoverable=False, recovery="refusal", corrections_remaining=0)
+                        self.event("handoff_validation", json.dumps(check))
                     raise ModelRefusalError("Model refused the required tool request.")
                 for call in response.output:
                     if (call.type == "function_call" and call.name in TOOL_ROLES
@@ -450,6 +467,40 @@ class StageModel(Model):
                             "role": self.role, "tool": call.name,
                         }))
                         raise AnalysisFailure("analysis_tool_not_allowed")
+                if closing and handoff_name:
+                    check = self.handoff_validation(response, handoff_name)
+                    recovery = (
+                        "not_needed" if check["accepted"] else
+                        "argument_correction_active" if tool_repair is not None else
+                        "retry_exhausted" if handoff_retried else
+                        "shared_budget_exhausted"
+                        if self.retries.tool_arguments_used >= MAX_TOOL_ARGUMENT_RETRIES else
+                        "stage_deadline"
+                        if time.monotonic() - budget.started >= STAGE_SECONDS[self.role] else
+                        "retry"
+                    )
+                    retry = recovery == "retry"
+                    check.update(recoverable=retry, recovery=recovery, corrections_remaining=max(
+                        0, MAX_TOOL_ARGUMENT_RETRIES
+                        - self.retries.tool_arguments_used - int(retry),
+                    ))
+                    self.event("handoff_validation", json.dumps(check))
+                    if not check["accepted"]:
+                        if not retry:
+                            raise AnalysisFailure("analysis_handoff_not_followed")
+                        handoff_retried = True
+                        self.retries.tool_arguments_used += 1
+                        self.event("handoff_retry", self.role)
+                        handoff_correction = (
+                            "\nThe previous response failed the assigned handoff contract "
+                            f"({check['reason']}). NONE of that response's calls executed. "
+                            "Continue from the SAME original task and real observations; "
+                            "exploration remains closed. Return exactly ONE native function "
+                            f"call to {handoff_name} using its supplied schema. No other tool, "
+                            "extra calls, prose or report. Do not replay reads or registration, "
+                            "invent evidence, or treat this instruction as a completed handoff."
+                        )
+                        continue
                 invalid_arguments = (tool_repair.batch_issue(response) if tool_repair else None)
                 invalid_arguments = invalid_arguments or tool_argument_issue(
                     response, kwargs["tools"], kwargs["handoffs"], self.tool_parameter_models,
@@ -727,22 +778,15 @@ class StageModel(Model):
                             part.text = ""
                 if closing:
                     if handoff_name:
-                        _, accepted = self.handoff_validation(response, handoff_name)
-                        if not accepted and self.retry_handoff_mismatch and not handoff_retried:
-                            handoff_retried = True
-                            self.event("handoff_retry", self.role)
-                            handoff_correction = (
-                                "\nThe previous response did not contain exactly one valid call "
-                                f"to {handoff_name}. Exploration is closed. Call only "
-                                f"{handoff_name} now; do not return prose or another tool call."
-                            )
-                            continue
-                        if not accepted:
-                            raise AnalysisFailure("analysis_handoff_not_followed")
+                        if handoff_retried:
+                            self.event("handoff_recovered", self.role)
                     elif any(item.type == "function_call" for item in response.output):
                         raise AnalysisFailure("analysis_finalization_not_followed")
                 break
             except (APITimeoutError, TimeoutError):
+                if (handoff_retried
+                        and time.monotonic() - budget.started >= STAGE_SECONDS[self.role]):
+                    self.stop_handoff_recovery("stage_deadline")
                 if timeout_retried or self.retries.used >= MAX_TIMEOUT_RETRIES:
                     raise AnalysisFailure("analysis_provider_timeout_exhausted") from None
                 timeout_retried = True
@@ -1293,9 +1337,6 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             separate_schema_from_tools=getattr(
                 model_for_role(model, role), "separate_schema_from_tools", False,
             ),
-            retry_handoff_mismatch=getattr(
-                model_for_role(model, role), "retry_handoff_mismatch", False,
-            ),
             prepare_review=prepare_review if role == ROLES[-1] else None,
             finalization_reserve=lambda: review_budget()["reserve_seconds"],
             tool_parameter_models=tool_parameter_models,
@@ -1410,7 +1451,8 @@ class Analyses:
         with self.store.connection() as db:
             limit = (4096 if kind in {"tool_arguments_invalid", "tool_arguments_preserved",
                                      "output_limit", "scope_mapping_validation",
-                                     "required_read_validation", "provider_structure"}
+                                     "required_read_validation", "provider_structure",
+                                     "handoff_validation"}
                      else 1024 if kind == "failure" else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
