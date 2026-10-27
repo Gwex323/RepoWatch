@@ -75,6 +75,9 @@ class Store:
             from .repairs import initialize as initialize_repair
 
             initialize_repair(db)
+            from .task_scopes import initialize as initialize_scopes
+
+            initialize_scopes(db)
 
     @contextmanager
     def connection(self):

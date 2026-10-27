@@ -479,7 +479,7 @@ class AnalysisModel:
                 for secret in sorted(set(secrets.values()), key=len, reverse=True):
                     value = value.replace(json.dumps(secret, ensure_ascii=False)[1:-1],
                                           "[REDACTED]")
-            original_event(kind, value)
+            return original_event(kind, value)
 
         models, efforts = {}, {}
         first = required[0]

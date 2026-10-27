@@ -154,9 +154,9 @@ function Login({ session, onLogin }: { session: Session; onLogin: (s: Session) =
         {busy ? <Loader2 size={16} className="spin" /> : <ArrowRight size={16} />}
         {session.setup_required ? '创建并进入' : '进入工作空间'}
       </button>
-      <div className="login-meta"><span className="live-dot" />本地实例<span>阶段 03</span></div>
+      <div className="login-meta"><span className="live-dot" />本地实例<span>仅本机访问</span></div>
     </form>
-    <div className="login-footer">RepoWatch · Agents SDK workbench</div>
+    <div className="login-footer">RepoWatch · 仓库问题处理工作台</div>
   </div>;
 }
 
@@ -185,6 +185,7 @@ function App() {
   const [scheduleHistoryErrors, setScheduleHistoryErrors] = useState<Record<string, string>>({});
   const [scheduleHistoryLoading, setScheduleHistoryLoading] = useState<string | null>(null);
   const [openScheduleHistory, setOpenScheduleHistory] = useState<string | null>(null);
+  const [settingsSection, setSettingsSection] = useState('models');
   const [view, setView] = useState<View>('overview');
   const [executionRepo, setExecutionRepo] = useState<string | null>(null);
   const [executionEnv, setExecutionEnv] = useState('');
@@ -243,7 +244,8 @@ function App() {
   const openRepository = (id: string, envId = '') => {
     setExecutionEnv(envId); setExecutionRepo(id); setView('repositories'); setMenuOpen(false);
   };
-  const navigate = (next: View) => { setView(next); setMenuOpen(false); };
+  const navigate = (next: View) => { setView(next); setQuery(''); setMenuOpen(false); };
+  const pageHelp: Record<View, string> = { overview: '先看需要你处理的事项，再继续仓库任务。', repositories: '选择仓库，处理已有 Issue 或启动一次完整检查。', findings: '查看分析发现，按复现步骤确认问题，再跟进修复。', memory: '保存项目约定与修复经验，供后续分析参考。', activity: '查看发生了什么，点击记录回到对应任务。', settings: '先连接账号与模型，再按需要开启自动修复。' };
   const waiting = data.findings.filter(f => f.status === 'waiting_reproduction');
   const needsAttention = (f: Finding) => f.status === 'waiting_reproduction' ||
     (f.status !== 'resolved' && ['failed', 'interrupted'].includes(f.repair_status ?? ''));
@@ -255,10 +257,10 @@ function App() {
   const nav = [
     ['overview', '工作台', LayoutDashboard],
     ['repositories', '仓库', FolderGit2],
-    ['findings', '问题与复现', CircleHelp],
-    ['memory', '仓库记忆', BookOpen],
+    ['findings', '待办与问题', CircleHelp],
+    ['memory', '项目知识', BookOpen],
     ['activity', '运行记录', Activity],
-    ['settings', '运行配置', Settings2],
+    ['settings', '设置', Settings2],
   ] as const;
   if (!session) return <div className="boot"><Workflow size={30} /><span>{error || '连接本地工作空间…'}</span>
     {error && <button className="button secondary" onClick={() => location.reload()}>重新连接</button>}</div>;
@@ -275,7 +277,7 @@ function App() {
         {key === 'findings' && attention.length > 0 && <b>{attention.length}</b>}</button>)}</nav>
       <div className="sidebar-bottom">
         <div className="environment-state"><span className="live-dot" /><span>本地服务在线</span></div>
-        <div className="sidebar-version">阶段 03 <span>SDK {system?.sdk_version ?? '—'}</span></div>
+        <div className="sidebar-version">仓库问题处理工作台</div>
         <div className="owner"><span className="owner-avatar">你</span><div><strong>本地所有者</strong><small>单用户工作空间</small></div>
           <button className="icon-button" title="退出登录" onClick={async () => {
             try {
@@ -290,7 +292,7 @@ function App() {
         <button className="icon-button menu-toggle" title="打开导航" onClick={() => setMenuOpen(true)}><Menu size={19} /></button>
         <div className="breadcrumb">工作空间<ChevronRight size={13} /><strong>{nav.find(n => n[0] === view)?.[1]}</strong></div>
         <label className="global-search"><Search size={16} /><input aria-label="搜索仓库或问题" placeholder="搜索仓库或问题"
-          value={query} onChange={e => setQuery(e.target.value)} /></label>
+          value={query} onChange={e => { setQuery(e.target.value); if (view === 'repositories') setExecutionRepo(null); if (!['repositories', 'findings', 'activity'].includes(view)) setView('findings'); }} /></label>
         <button className="icon-button notifications" title={`${attention.length} 个问题待处理`} onClick={() => {
           setFilter('attention'); navigate('findings');
         }}><Bell size={18} />{attention.length > 0 && <i />}</button>
@@ -300,16 +302,16 @@ function App() {
         <button className="icon-button" title="关闭错误提示" onClick={() => setError('')}><X size={16} /></button></div>}
       <main className={`main-content ${view === 'findings' ? 'findings-page' : ''}`}>
         <div className="page-heading">
-          <div><div className="eyebrow">{view === 'overview' ? 'OVERVIEW' : view.toUpperCase()}</div>
-            <h1>{nav.find(n => n[0] === view)?.[1]}{view === 'findings' && <span className="heading-count">{data.findings.length}</span>}</h1>
+          <div>
+            <h1>{nav.find(n => n[0] === view)?.[1]}{view === 'findings' && <span className="heading-count">{data.findings.length}</span>}</h1><p className="page-description">{pageHelp[view]}</p>
           </div>
           <div className="heading-actions">
             <span className="mode-label"><span />{system?.repository_analysis?.enabled ? '仓库自动分析已启用' : '仓库分析待配置'}</span>
-            <button className="button secondary" onClick={() => setAdding(true)}><Plus size={16} />添加仓库</button>
+            {(view === 'overview' || view === 'repositories') && <button className="button primary" onClick={() => setAdding(true)}><Plus size={16} />添加仓库</button>}
           </div>
         </div>
         {!loaded ? <div className="loading"><Loader2 className="spin" size={22} />正在载入工作空间</div> : <>
-          {view !== 'settings' && analysisNotices.map(notice => <div className="analysis-notice" key={notice.repo_id}>
+          {view === 'overview' && analysisNotices.filter(n => n.status === 'waiting_model' || n.status === 'failed' || n.repair_failed).slice(0, 3).map(notice => <div className="analysis-notice" key={notice.repo_id}>
             <FileCode2 size={17} /><span><strong>{notice.repository}</strong> · {
               notice.status === 'waiting_model' ? '分析已排队，等待模型配置' :
               notice.status === 'running' ? 'Agent 正在自动分析' :
@@ -328,7 +330,11 @@ function App() {
                 ? '查看修复' : '查看分析'}<ArrowRight size={14} /></button>
           </div>)}
           {view === 'overview' && <>
-            <div className="metrics">
+            <section className="next-action" aria-label="下一步">
+              <div><span className="eyebrow">下一步</span><h2>{!data.repositories.length ? '添加你的第一个仓库' : !system?.repository_analysis?.enabled ? '配置模型，让分析开始工作' : attention.length ? `${attention.length} 个问题需要你处理` : '选择仓库，开始检查'}</h2>
+              <p>连接仓库 → 分析问题 → 你确认复现 → 修复与审查 → 查看 PR</p></div>
+              <button className="button primary" onClick={() => { if (!data.repositories.length) setAdding(true); else if (!system?.repository_analysis?.enabled) navigate('settings'); else if (attention.length) { setFilter('attention'); navigate('findings'); } else navigate('repositories'); }}>继续处理<ArrowRight size={16} /></button>
+            </section><div className="metrics">
               {[
                 ['待人工复现', data.counts.waiting, 'waiting', Clock3],
                 ['运行中', data.counts.active, 'running', Workflow],
@@ -344,11 +350,6 @@ function App() {
                 </div>;
               })}
             </div>
-            <section className="pipeline-section">
-              <div className="section-heading"><h2><Workflow size={18} />Agent 角色</h2>
-                <span className="section-meta">{registeredRoles.length} 个角色<span className="divider-dot">·</span>按流程复用</span></div>
-              <AgentRoleCards models={system?.agent_models} onConfigure={() => navigate('settings')} />
-            </section>
             <div className="overview-columns">
               <div>
                 <section>
@@ -367,8 +368,8 @@ function App() {
                       <span><i className={`language-dot ${repo.language}`} />{repo.language === 'Unknown' ? '待识别' : repo.language}
                         <i>·</i>GitHub</span></div>
                     <span className="tag neutral">项目环境</span>
-                    <button className="icon-button" title="管理运行环境"
-                      disabled={busy} onClick={() => openRepository(repo.id)}><Play size={15} /></button>
+                    <button className="button secondary" title="管理运行环境"
+                      disabled={busy} onClick={() => openRepository(repo.id)}><Play size={15} />进入仓库</button>
                   </div>)}</div>
                 </section>
               </div>
@@ -387,7 +388,9 @@ function App() {
             </div>
           </>}
           {view === 'repositories' && <section className="repo-page">
-            <section className="schedule-overview">
+            {executionRepo && <button className="button secondary back-link" onClick={() => { setExecutionRepo(null); setExecutionEnv(''); }}>← 返回仓库列表</button>}
+            <div className="repository-catalog" hidden={!!executionRepo}>
+            <details className="schedule-overview disclosure"><summary>每日巡检与历史记录</summary>
               <div className="section-heading">
                 <h2><Clock3 size={18} />每日巡检</h2>
                 <span className="section-meta">
@@ -442,16 +445,19 @@ function App() {
                   )}
                 </div>
               ))}
-            </section>
+            </details>
             <div className="list-topline"><span>{data.repositories.length} 个仓库</span><span>登记状态</span></div>
             {data.repositories.filter(r => r.name.toLowerCase().includes(query.toLowerCase())).map(repo =>
               <div className="repository-row large" key={repo.id}><span className={`repo-icon ${repo.kind}`}><FolderGit2 size={23} /></span>
                 <div><strong>{repo.name}</strong><span>{repo.url}<i>·</i>{repo.language}</span></div>
                 <span className="tag neutral">GitHub</span>
                 {repo.url && <a className="icon-button" title="在 GitHub 打开" href={repo.url} target="_blank" rel="noreferrer"><ExternalLink size={16} /></a>}
-                <button className="icon-button" title="管理运行环境"
-                  disabled={busy} onClick={() => openRepository(repo.id)}><Play size={17} /></button>
+                <button className="button secondary" title="管理运行环境"
+                  disabled={busy} onClick={() => openRepository(repo.id)}><Play size={17} />进入仓库</button>
               </div>)}
+            {!data.repositories.length && <Empty title="还没有仓库，点击右上角添加仓库开始" />}
+            {!!data.repositories.length && !data.repositories.some(r => r.name.toLowerCase().includes(query.toLowerCase())) && <Empty title="没有匹配的仓库，试试其他关键词" />}
+            </div>
             {data.repositories.filter(repo => repo.id === executionRepo && repo.kind === 'github').map(repo =>
               <ExecutionPanel key={`${repo.id}:${executionEnv}`} repo={repo} api={api} initialEnvId={executionEnv} />)}
           </section>}
@@ -474,11 +480,20 @@ function App() {
             <EventFeed events={data.events.filter(e => !query || `${e.repository} ${e.detail} ${e.task_id}`.includes(query))} onSelect={openRepository} /></section>}
           {view === 'memory' && <MemoryView repositories={data.repositories} api={api} />}
           {view === 'settings' && <section className="settings-page">
+            <nav className="section-nav" aria-label="设置分类">{[['models', '模型与供应商'], ['accounts', 'GitHub 账号'], ['automation', '自动修复'], ['about', '系统信息']].map(([key, label]) => <button key={key} aria-current={settingsSection === key ? 'page' : undefined} className={settingsSection === key ? 'active' : ''} onClick={() => setSettingsSection(key)}>{label}</button>)}</nav>
+            <div hidden={settingsSection !== 'models'}>
             <AgentModelSettings api={api} onChange={() => { void refresh().catch(e => setError(e.message)); }} />
+            </div><div hidden={settingsSection !== 'automation'}><p className="section-intro">确认问题后，自动修复会生成补丁并进行审查。请先完成模型与 GitHub 账号配置。</p>
             <RepairSettings api={api} modelEnabled={system?.automatic_repair?.model_enabled} />
+            </div><div hidden={settingsSection !== 'accounts'}><p className="section-intro">连接用于读取仓库和提交修复的账号，并检查仓库访问权限。</p>
             <GitHubAccounts api={api} repositories={data.repositories}
               publicationEnabled={system?.automatic_repair?.enabled} />
-            <div className="section-heading"><h2>运行环境</h2><span className="tag neutral">阶段 03 / 04 · 修复与发布</span></div>
+                        </div><div hidden={settingsSection !== 'about'}><details className="disclosure"><summary>了解五个智能体的分工</summary>
+              <div className="section-heading"><h2><Workflow size={18} />Agent 角色</h2>
+                <span className="section-meta">{registeredRoles.length} 个角色<span className="divider-dot">·</span>按流程复用</span></div>
+              <AgentRoleCards models={system?.agent_models} onConfigure={() => setSettingsSection('models')} />
+            </details>
+<div className="section-heading"><h2>系统信息</h2></div>
             <dl className="settings-list">
               {[['Agent 框架', `OpenAI Agents SDK ${system?.sdk_version}`], ['后端', 'Python · FastAPI'],
                 ['状态存储', 'SQLite'], ['仓库记忆', '共享 · 仓库与版本隔离'],
@@ -495,7 +510,7 @@ function App() {
                 ['外部 Trace 上传', '关闭'], ['访问范围', '本机 · 所有者登录'],
               ]
                 .map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
-            </dl>
+            </dl></div>
           </section>}
         </>}
         <footer className="page-footer"><span><ShieldCheck size={13} />所有合并由项目拥有者执行</span><span>RepoWatch / 0.1.0</span></footer>
@@ -512,7 +527,7 @@ function App() {
         if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last?.focus(); }
         if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first?.focus(); }
       }} onSubmit={e => {
-        e.preventDefault(); void action(async () => { await api('/repositories', { url }); setAdding(false); setUrl(''); setView('repositories'); });
+        e.preventDefault(); void action(async () => { await api('/repositories', { url }); setAdding(false); setUrl(''); setExecutionRepo(null); setQuery(''); setView('repositories'); });
       }}>
         <div className="modal-heading"><h2 id="add-title">添加仓库</h2><button type="button" className="icon-button" title="关闭"
           onClick={() => setAdding(false)}><X size={18} /></button></div>

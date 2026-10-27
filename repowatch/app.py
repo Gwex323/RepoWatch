@@ -33,7 +33,9 @@ from .repository_analysis import MAX_TURNS, Analyses
 from .repository_source import ExecutionError
 from .roles import ROLES
 from .schedules import RepositorySchedules
+from .scope_models import ScopeRequirement
 from .store import SDK_VERSION, Conflict, Missing, Store
+from .task_scopes import TaskScopes
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -197,6 +199,22 @@ class RepairSettingsBody(StrictBody):
     enabled: bool = Field(strict=True)
 
 
+class ScopeRequirementsBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    items: list[ScopeRequirement] = Field(min_length=1, max_length=32)
+
+
+class ScopeObservationBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    kind: Literal["regression", "integration", "client"]
+    passed: bool = Field(strict=True)
+    personally_verified: bool = Field(strict=True)
+    note: str = Field(min_length=1, max_length=2000)
+    observation: str = Field(min_length=1, max_length=6000)
+    repair_id: str | None = Field(default=None, max_length=100)
+    repair_patch_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+
 class ScheduleBody(StrictBody):
     version: int = Field(ge=1, strict=True)
     enabled: bool = Field(strict=True)
@@ -215,6 +233,7 @@ def create_app(
     memory = Memory(store)
     github = GitHubAccounts(store, client=github_client, vault=credential_vault)
     issues = GitHubIssues(store, github)
+    task_scopes = TaskScopes(store)
     analysis_model = AnalysisModel(store, github)
     model_providers = ModelProviders(store, github)
     provider_probe = ProviderProbe(model_providers, transport=provider_probe_transport)
@@ -650,6 +669,24 @@ def create_app(
     @app.post("/api/analyses/{analysis_id}/retry")
     def retry_analysis(analysis_id: str, body: GitHubVersionBody):
         return analyses.retry(analysis_id, body.version)
+
+    @app.get("/api/analyses/{analysis_id}/scope")
+    def analysis_scope(analysis_id: str):
+        return task_scopes.get(analysis_id)
+
+    @app.post("/api/analyses/{analysis_id}/scope/requirements")
+    def add_scope_requirements(analysis_id: str, body: ScopeRequirementsBody):
+        return task_scopes.add_owner_requirements(
+            analysis_id, body.version, [item.model_dump() for item in body.items],
+        )
+
+    @app.post("/api/analyses/{analysis_id}/scope-review", status_code=202)
+    def reassess_task_scope(analysis_id: str, body: GitHubVersionBody):
+        return analyses.reassess_scope(analysis_id, body.version)
+
+    @app.post("/api/task-scopes/{scope_id}/items/{key}/observations")
+    def scope_observation(scope_id: str, key: str, body: ScopeObservationBody):
+        return task_scopes.observe(scope_id, key, **body.model_dump())
 
     @app.post("/api/analyses/{analysis_id}/memory-evaluation", status_code=202)
     def create_memory_evaluation(analysis_id: str):
