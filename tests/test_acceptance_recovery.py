@@ -177,15 +177,17 @@ def test_owner_continuation_reopens_expired_time_window_without_resetting_counts
         worker.retry('analysis', 7)
 
 
+@pytest.mark.parametrize('additional', [False, True])
 @pytest.mark.parametrize('gate,code', [
     ('version', 'analysis_changed'), ('authorization', 'acceptance_basis_changed'),
     ('basis', 'acceptance_basis_changed'), ('busy', 'analysis_busy'),
     ('model', 'acceptance_model_changed'),
 ])
-def test_continuation_checks_current_authorization(controller, monkeypatch, gate, code):
+def test_continuation_checks_current_authorization(controller, monkeypatch, gate, code, additional):
     worker, connection = controller
     with connection() as db:
-        db.execute("UPDATE scope_acceptance_runs SET state='failed'")
+        db.execute("UPDATE scope_acceptance_runs SET state='failed',attempt=?",
+                   (2 if additional else 1,))
     if gate == 'authorization':
         monkeypatch.setattr(worker, '_authorized', lambda *_: False)
     elif gate == 'basis':
@@ -197,9 +199,72 @@ def test_continuation_checks_current_authorization(controller, monkeypatch, gate
             'enabled': True, 'role_models': {'x': 1},
         })
     with pytest.raises(Conflict, match=code):
-        worker.retry('analysis', 6 if gate == 'version' else 7)
+        worker.retry('analysis', 6 if gate == 'version' else 7,
+                     additional_attempt=additional, run_id='run')
     with connection() as db:
         assert db.execute('SELECT state FROM scope_acceptance_runs').fetchone()[0] == 'failed'
+        assert db.execute(
+            'SELECT additional_attempts FROM scope_acceptance_runs'
+        ).fetchone()[0] == 0
+
+
+def test_owner_grants_one_extra_attempt_only_and_preserves_all_history(controller):
+    worker, connection = controller
+    worker._stop({'id': 'run', 'analysis_id': 'analysis'}, OutputTruncated('not persisted'))
+    with connection() as db:
+        db.execute("UPDATE scope_acceptance_runs SET attempt=2,model_calls=3,deadline=1050")
+        db.execute("INSERT INTO scope_acceptance_checks "
+                   "(id,run_id,item_key,kind,state,attempt,specification,result,created,updated) "
+                   "VALUES('check','run','item','integration','running',1,'{}','saved',1000,1000)")
+    with pytest.raises(Conflict, match='acceptance_model_budget'):
+        worker.retry('analysis', 7)
+    for wrong_id in (None, 'another-run'):
+        with pytest.raises(Conflict, match='acceptance_retry_unavailable'):
+            worker.retry('analysis', 7, additional_attempt=True, run_id=wrong_id)
+    worker.retry('analysis', 7, additional_attempt=True, run_id='run')
+    with connection() as db:
+        initialize(db)  # A restart cannot discard the grant or its spent budget.
+        row = db.execute('SELECT * FROM scope_acceptance_runs').fetchone()
+        assert row['additional_attempts'] == 1 and row['attempt'] == 2 and row['model_calls'] == 3
+        assert row['deadline'] == 2900
+        event = json.loads(db.execute("SELECT value FROM task_scope_events "
+                                      "WHERE kind='acceptance_retry_requested'").fetchone()[0])
+        assert event['additional_attempt_granted'] is True and event['attempt_limit'] == 3
+        assert progress(db, {'id': 'scope', 'version': 3})['additional_attempts'] == 1
+    assert worker.claim()['attempt'] == 3
+    worker._stop({'id': 'run', 'analysis_id': 'analysis'}, TimeoutError('not persisted'))
+    with connection() as db:
+        assert db.execute('SELECT state FROM scope_acceptance_runs').fetchone()[0] == 'failed'
+        assert db.execute('SELECT result FROM scope_acceptance_checks').fetchone()[0] == 'saved'
+        assert db.execute('SELECT COUNT(*) FROM scope_acceptance_failures').fetchone()[0] == 2
+    assert worker.claim() is None
+    for extra in (False, True):
+        with pytest.raises(Conflict):
+            worker.retry('analysis', 7, additional_attempt=extra, run_id='run')
+
+
+@pytest.mark.parametrize('attempt,calls', [(1, 3), (2, 12), (3, 3)])
+def test_extra_grant_does_not_bypass_attempt_or_request_limits(controller, attempt, calls):
+    worker, connection = controller
+    with connection() as db:
+        db.execute("UPDATE scope_acceptance_runs SET state='failed',attempt=?,model_calls=?",
+                   (attempt, calls))
+    with pytest.raises(Conflict):
+        worker.retry('analysis', 7, additional_attempt=True, run_id='run')
+    with connection() as db:
+        assert db.execute(
+            'SELECT additional_attempts FROM scope_acceptance_runs'
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('attempt,expected', [(2, 3), (3, None)])
+def test_interrupted_lease_uses_persisted_extra_allowance(controller, attempt, expected):
+    worker, connection = controller
+    with connection() as db:
+        db.execute('UPDATE scope_acceptance_runs SET attempt=?,additional_attempts=1,lease=1000',
+                   (attempt,))
+    claimed = worker.claim()
+    assert (claimed['attempt'] if claimed else None) == expected
 
 
 def test_failure_history_excludes_messages_urls_and_unknown_exception_class_names(controller):
@@ -229,9 +294,13 @@ def test_migration_keeps_historical_run_and_does_not_requeue_unknown_failure(con
         )
         db.execute('DROP TABLE scope_acceptance_failures')
         db.execute('ALTER TABLE scope_acceptance_runs DROP COLUMN retry_after')
+        db.execute('ALTER TABLE scope_acceptance_runs DROP COLUMN additional_attempts')
         initialize(db)
         initialize(db)
         assert db.execute('SELECT COUNT(*) FROM scope_acceptance_runs').fetchone()[0] == 1
+        assert db.execute(
+            'SELECT additional_attempts FROM scope_acceptance_runs'
+        ).fetchone()[0] == 0
     assert worker.claim() is None
 
 
@@ -242,7 +311,8 @@ def test_acceptance_retry_api_requires_owner_session_and_csrf(tmp_path, monkeypa
 
     app = create_app(tmp_path / 'api.db', start_worker=False)
     called = []
-    monkeypatch.setattr(app.state.acceptance, 'retry', lambda *args: called.append(args) or {
+    monkeypatch.setattr(app.state.acceptance, 'retry', lambda *args, **kwargs:
+                        called.append((args, kwargs)) or {
         'id': 'run', 'state': 'queued',
     })
     with TestClient(app, base_url='http://127.0.0.1') as client:
@@ -254,7 +324,14 @@ def test_acceptance_retry_api_requires_owner_session_and_csrf(tmp_path, monkeypa
             'X-CSRF-Token': login.json()['csrf'],
         })
         assert response.status_code == 202 and response.json()['state'] == 'queued'
-        assert called == [('analysis', 7)]
+        assert called == [(('analysis', 7), {'additional_attempt': False, 'run_id': None})]
+        grant = {'version': 7, 'additional_attempt': True, 'run_id': 'run'}
+        assert client.post(path, json=grant).status_code == 403
+        headers = {'X-CSRF-Token': login.json()['csrf']}
+        assert client.post(path, json=grant, headers=headers).status_code == 202
+        assert called[-1] == (('analysis', 7), {'additional_attempt': True, 'run_id': 'run'})
+        assert client.post(path, json={**grant, 'additional_attempt': 'true'},
+                           headers=headers).status_code == 422
 
 
 def test_every_retry_spends_the_same_request_budget_and_metadata_is_allowlisted(controller):

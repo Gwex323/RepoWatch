@@ -29,7 +29,7 @@ export type TaskScope = {
 };
 export type AcceptanceProgress = {
   state: string; stage: string; attempt: number; error: string | null;
-  retry_after?: number; model_calls?: number;
+  retry_after?: number; model_calls?: number; additional_attempts?: number;
   failure?: { code: string; details: { exceptions?: string[]; http_statuses?: number[];
     locations?: { file: string; line: number }[];
     output_validation?: { category: string; line?: number; column?: number;
@@ -221,7 +221,8 @@ export function TaskScopePanel({ scope, analysisId, analysisVersion, analysisSta
           : '完整性未核验：原始任务范围尚未通过当前版本的独立审查。'}</p>
     <AutomaticAcceptance progress={scope.automation} />
     {canReview && !scope.stale && scope.automation?.state === 'failed' && <>
-      <button className="button secondary" disabled={busy || scope.automation.attempt >= 2
+      <button className="button secondary" disabled={busy
+        || scope.automation.attempt >= 2 + (scope.automation.additional_attempts ?? 0)
         || (scope.automation.model_calls ?? 0) >= 12} onClick={() => {
         setBusy(true); setNotice('');
         void api(`/analyses/${analysisId}/acceptance/retry`, { version: analysisVersion })

@@ -47,6 +47,11 @@ def initialize(db):
         db.execute(
             "ALTER TABLE scope_acceptance_runs ADD COLUMN retry_after REAL NOT NULL DEFAULT 0"
         )
+    if "additional_attempts" not in columns:
+        db.execute(
+            "ALTER TABLE scope_acceptance_runs ADD COLUMN additional_attempts "
+            "INTEGER NOT NULL DEFAULT 0 CHECK(additional_attempts IN (0,1))"
+        )
 
 
 def repair_basis(task):
@@ -160,6 +165,7 @@ def progress(db, scope):
     ).fetchone()
     return {key: run[key] for key in (
         "id", "state", "stage", "attempt", "error", "updated", "retry_after", "model_calls",
+        "additional_attempts",
     )} | {
         "failure": ({"code": failure["code"], "details": json.loads(failure["details"]),
                      "retryable": bool(failure["retryable"]), "created": failure["created"]}

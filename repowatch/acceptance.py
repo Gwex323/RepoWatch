@@ -210,7 +210,8 @@ class Acceptance:
             db.execute("BEGIN IMMEDIATE")
             now = time.time()
             db.execute(
-                "UPDATE scope_acceptance_runs SET state=CASE WHEN attempt>=? THEN 'failed' "
+                "UPDATE scope_acceptance_runs SET state=CASE WHEN attempt>=?+additional_attempts "
+                "THEN 'failed' "
                 "ELSE 'queued' END,error='acceptance_interrupted',owner=NULL,updated=? "
                 "WHERE state='running' AND lease<?",
                 (MAX_RESUMES, now, now),
@@ -259,7 +260,7 @@ class Acceptance:
                     continue
                 # Waiting for Docker does not spend a model/attempt recovery allowance.
                 attempt = run["attempt"] + (run["state"] in ("queued", "retry_wait"))
-                if attempt > MAX_RESUMES:
+                if attempt > MAX_RESUMES + run["additional_attempts"]:
                     continue
                 db.execute(
                     "UPDATE scope_acceptance_runs SET state='running',owner=?,lease=?,"
@@ -283,7 +284,7 @@ class Acceptance:
                 )
         return None
 
-    def retry(self, analysis_id, version):
+    def retry(self, analysis_id, version, additional_attempt=False, run_id=None):
         """Explicit continuation preserves calls, attempts, evidence and failure history."""
         status = self.engine.status()
         if not status["enabled"]:
@@ -308,7 +309,14 @@ class Acceptance:
                 raise Conflict("acceptance_retry_unavailable")
             if run["analysis_id"] != analysis_id:
                 raise Conflict("acceptance_basis_changed")
-            if run["attempt"] >= MAX_RESUMES or run["model_calls"] >= MAX_MODEL_REQUESTS:
+            additional = run["additional_attempts"]
+            if additional_attempt:
+                # An explicit owner grant targets this exact exhausted run, once only.
+                if run_id != run["id"] or additional or run["attempt"] != MAX_RESUMES:
+                    raise Conflict("acceptance_retry_unavailable")
+                additional = 1
+            if (run["attempt"] >= MAX_RESUMES + additional
+                    or run["model_calls"] >= MAX_MODEL_REQUESTS):
                 raise Conflict("acceptance_model_budget")
             if self._basis(db, analysis, self._repairs(db, analysis)) != json.loads(run["basis"]):
                 raise Conflict("acceptance_basis_changed")
@@ -321,12 +329,15 @@ class Acceptance:
                 deadline = now + MAX_SECONDS
             db.execute(
                 "UPDATE scope_acceptance_runs SET state='queued',owner=NULL,lease=0,"
-                "retry_after=0,deadline=?,updated=? WHERE id=?", (deadline, now, run["id"]),
+                "retry_after=0,deadline=?,additional_attempts=?,updated=? WHERE id=?",
+                (deadline, additional, now, run["id"]),
             )
             _event(db, scope, "acceptance_retry_requested", "owner", {
                 "run_id": run["id"], "previous_error": run["error"],
                 "previous_deadline": run["deadline"], "deadline": deadline,
                 "attempt": run["attempt"], "model_calls": run["model_calls"],
+                "additional_attempt_granted": additional_attempt,
+                "attempt_limit": MAX_RESUMES + additional,
             })
             return {"id": run["id"], "state": "queued"}
 
@@ -1096,7 +1107,8 @@ class Acceptance:
                 return
             now = time.time()
             retryable = bool(
-                code in TRANSIENT_CODES and live["attempt"] < MAX_RESUMES
+                code in TRANSIENT_CODES
+                and live["attempt"] < MAX_RESUMES + live["additional_attempts"]
                 and live["model_calls"] < MAX_MODEL_REQUESTS
                 and live["deadline"] and live["deadline"] > now + RETRY_DELAY_SECONDS
             )

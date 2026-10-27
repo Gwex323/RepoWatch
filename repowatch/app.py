@@ -77,6 +77,11 @@ class GitHubVersionBody(StrictBody):
     version: int = Field(ge=1, le=2**63 - 1, strict=True)
 
 
+class AcceptanceRetryBody(GitHubVersionBody):
+    additional_attempt: bool = Field(default=False, strict=True)
+    run_id: str | None = Field(default=None, min_length=1, max_length=80)
+
+
 class GitHubRepositoryBody(GitHubVersionBody):
     repo_id: str = Field(min_length=1, max_length=100)
 
@@ -692,8 +697,11 @@ def create_app(
         return analyses.reassess_scope(analysis_id, body.version)
 
     @app.post("/api/analyses/{analysis_id}/acceptance/retry", status_code=202)
-    def retry_automatic_acceptance(analysis_id: str, body: GitHubVersionBody):
-        return acceptance.retry(analysis_id, body.version)
+    def retry_automatic_acceptance(analysis_id: str, body: AcceptanceRetryBody):
+        return acceptance.retry(
+            analysis_id, body.version, additional_attempt=body.additional_attempt,
+            run_id=body.run_id,
+        )
 
     @app.post("/api/task-scopes/{scope_id}/items/{key}/observations")
     def scope_observation(scope_id: str, key: str, body: ScopeObservationBody):
