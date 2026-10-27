@@ -14,6 +14,7 @@ from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 from repowatch.acceptance import Acceptance
 from repowatch.acceptance_failures import failure_code, failure_details
 from repowatch.acceptance_model import run_acceptance
+from repowatch.acceptance_output import AcceptanceOutputError
 from repowatch.acceptance_store import initialize, progress
 from repowatch.analysis_model import ObservedModel, OutputTruncated, observe_response
 from repowatch.store import Conflict
@@ -271,3 +272,54 @@ def test_every_retry_spends_the_same_request_budget_and_metadata_is_allowlisted(
         worker._event({'id': 'run', 'analysis_id': 'analysis'}, 'request_started', 'role')
     with connection() as db:
         assert db.execute('SELECT model_calls FROM scope_acceptance_runs').fetchone()[0] == 12
+
+
+@pytest.mark.parametrize('category', ['invalid_json', 'schema_mismatch'])
+@pytest.mark.parametrize('corrected', [True, False])
+def test_format_retry_supplies_precise_feedback_and_saves_no_rejected_values(category, corrected):
+    requests = []
+    secret = 'sk-test-dynamic-field-and-value'
+    candidate = ('{"met":false,' if category == 'invalid_json' else json.dumps({
+        'met': 'not-a-boolean', 'behavioral_failure': False, 'corrected_files': [], secret: secret,
+    }))
+    valid = {'met': False, 'behavioral_failure': False, 'rationale': 'Missing environment.',
+             'corrected_files': []}
+
+    async def transport(request):
+        payload = json.loads(request.content)
+        requests.append(payload)
+        text = candidate
+        if len(requests) == 2:
+            feedback = json.loads(payload['messages'][-1]['content'])['validation_feedback']
+            assert feedback['category'] == category and secret not in json.dumps(feedback)
+            if category == 'schema_mismatch':
+                assert {'path': ['rationale'], 'type': 'missing'} in feedback['errors']
+                assert {'path': ['met'], 'type': 'bool_type'} in feedback['errors']
+            if corrected:
+                text = json.dumps(valid)
+        return httpx.Response(200, json={
+            'id': 'fixture', 'object': 'chat.completion', 'created': 1, 'model': 'fixture',
+            'choices': [{'index': 0, 'finish_reason': 'stop', 'message': {
+                'role': 'assistant', 'content': text,
+            }}], 'usage': {'prompt_tokens': 20, 'completion_tokens': 30, 'total_tokens': 50},
+        })
+
+    async def run():
+        async with AsyncOpenAI(
+            api_key='fixture', base_url='https://fixture.example/v1', max_retries=0,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(transport)),
+        ) as client:
+            return await run_acceptance(OpenAIChatCompletionsModel('fixture', client), {
+                'phase': 'judge', 'requirement': 'immutable requirement',
+            }, lambda *_: None)
+
+    if corrected:
+        assert asyncio.run(run()) == valid
+    else:
+        with pytest.raises(AcceptanceOutputError) as failure:
+            asyncio.run(run())
+        details = failure_details(failure.value)
+        assert details['output_validation']['category'] == category
+        assert secret not in json.dumps(details)
+    assert len(requests) == 2
+    assert requests[0]['messages'][-1] == requests[1]['messages'][1]

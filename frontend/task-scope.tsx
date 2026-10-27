@@ -31,7 +31,10 @@ export type AcceptanceProgress = {
   state: string; stage: string; attempt: number; error: string | null;
   retry_after?: number; model_calls?: number;
   failure?: { code: string; details: { exceptions?: string[]; http_statuses?: number[];
-    locations?: { file: string; line: number }[] }; retryable: boolean; created: number } | null;
+    locations?: { file: string; line: number }[];
+    output_validation?: { category: string; line?: number; column?: number;
+      errors?: { path: (string | number)[]; type: string }[] };
+  }; retryable: boolean; created: number } | null;
   checks: { item_key: string; kind: EvidenceKind; state: string; reason: string; note: string }[];
 };
 const automaticStates: Record<string, string> = {
@@ -92,6 +95,17 @@ export function AutomaticAcceptance({ progress }: { progress?: AcceptanceProgres
         错误类型：{progress.failure.details.exceptions.join('、')}</p>}
       {!!progress.failure.details.http_statuses?.length && <p>
         服务状态：{progress.failure.details.http_statuses.join('、')}</p>}
+      {progress.failure.details.output_validation && <>
+        <p>输出校验：{progress.failure.details.output_validation.category === 'invalid_json'
+          ? `JSON 格式错误（第 ${progress.failure.details.output_validation.line} 行，第 ${progress.failure.details.output_validation.column} 列）`
+          : '字段不符合审查要求'}</p>
+        {progress.failure.details.output_validation.errors?.map((error, index) =>
+          <p key={index}>{error.path.join('.') || '根对象'} · {({ missing: '缺少必填字段',
+            extra_forbidden: '存在未允许的字段', literal_error: '字段取值不在允许范围',
+            bool_type: '必须为布尔值', int_type: '必须为整数', string_type: '必须为文本',
+            list_type: '必须为列表', too_long: '内容超过长度上限',
+          } as Record<string, string>)[error.type] ?? '字段格式或类型不符合要求'}</p>)}
+      </>}
     </details>}
   </div>;
 }
