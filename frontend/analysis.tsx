@@ -143,6 +143,15 @@ function toolArgumentReason(detail: ToolArgumentDetail) {
 }
 function analysisFailureMessage(analysis: Analysis) {
   const message = errorMessage(analysis.error ?? '');
+  if (['analysis_execution_read_not_followed', 'analysis_source_read_not_followed',
+    'analysis_scope_read_not_followed', 'analysis_model_refused'].includes(analysis.error ?? '')) {
+    for (let index = analysis.events.length - 1; index >= 0; index--) {
+      const event = analysis.events[index];
+      if (event.kind === 'attempt') break;
+      if (event.kind === 'required_read_validation') return `${message} ${eventLabel(event)}。`;
+    }
+    return message;
+  }
   if (['analysis_evidence_unverified', 'analysis_report_invalid', 'scope_mapping_invalid'].includes(analysis.error ?? '')) {
     const kind = analysis.error === 'scope_mapping_invalid' ? 'scope_mapping_validation'
       : analysis.error === 'analysis_evidence_unverified' ? 'evidence_validation' : 'report_validation';
@@ -204,6 +213,8 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'format_retry') return `${name} · 报告格式不合格，正在纠正一次`;
   if (item.kind === 'tool_arguments_retry') return `${name} · 保留已有证据，正在纠正原工具批次`;
   if (item.kind === 'tool_arguments_repaired') return `${name} · 参数纠正通过校验，等待工具实际执行`;
+  if (item.kind === 'required_read_retry') return '必读工具调用缺失，正在有限纠正；此前没有执行读取';
+  if (item.kind === 'required_read_recovered') return '必读调用已通过检查，等待工具实际执行';
   if (item.kind === 'tool_arguments_preserved') {
     try {
       const detail = JSON.parse(item.agent) as { role?: string; calls?: { tool?: string; fields?: string[] }[] };
@@ -314,6 +325,17 @@ function eventLabel(item: Analysis['events'][number]) {
       return `${metadata.truncated ? '模型输出被截断' : '收到模型响应'}${metadata.output_tokens !== undefined ? ` · 输出 ${metadata.output_tokens} tokens` : ''}`;
     } catch { return '收到模型响应'; }
   }
+  if (item.kind === 'provider_structure') {
+    try {
+      const detail = JSON.parse(item.agent) as { protocol?: string; tool_calls?: number;
+        content_chars?: number; content_parts?: number; legacy_call?: boolean; content_state?: string };
+      const content = ({ missing: '缺少正文字段', null: '正文为空', empty: '正文为空文本',
+        text: `正文 ${detail.content_chars ?? 0} 字符`, parts: `正文 ${detail.content_parts ?? 0} 段`,
+        invalid_type: '正文字段类型不符合协议' } as Record<string, string>)[detail.content_state ?? ''];
+      return `供应商响应结构：${detail.tool_calls === undefined ? '未提供工具调用计数' : `工具调用 ${detail.tool_calls} 条`}${
+        content ? ` · ${content}` : ''}${detail.legacy_call ? ' · 含旧式函数调用字段' : ''}`;
+    } catch { return '供应商响应结构已记录'; }
+  }
   if (item.kind === 'budget') return `${name} · 当前阶段收束，进入交接或报告`;
   if (item.kind === 'time_budget') return `${name} · 收束当前阶段，为报告预留时间`;
   if (item.kind === 'reasoning_setting') return `请求推理强度：${({ default: '服务默认', low: '低', medium: '中', high: '高', max: '最高' } as Record<string, string>)[item.agent] ?? item.agent}`;
@@ -327,9 +349,19 @@ function eventLabel(item: Analysis['events'][number]) {
     try {
       const check = JSON.parse(item.agent) as {
         required?: string; calls?: number; matching?: number; other?: number; allowed?: number; messages?: number;
+        reason?: string; recovery?: string; wire_tool_calls?: number;
       };
+      const reason = ({ missing_call: '没有返回必读工具调用', wrong_tool: '返回了其他工具或交接',
+        too_many_calls: '调用数量超过允许上限', refusal: '模型明确拒绝',
+      } as Record<string, string>)[check.reason ?? ''];
+      const recovery = ({ retry: '准备有限纠正', request_mismatch: '调用不匹配，已停止',
+        retry_exhausted: '必读调用纠正机会已用完', shared_budget_exhausted: '共享工具纠正额度已用完',
+        stage_deadline: '阶段时限已到', argument_correction_active: '原参数纠正不能跳过绑定批次',
+        refusal: '已停止，不自动重试拒绝',
+      } as Record<string, string>)[check.recovery ?? ''];
       return `前置请求检查（${check.required === 'execution' ? '运行记录' : check.required === 'scope' ? '任务范围' : '源码'}）：${
-        check.calls ?? 0} 条调用 · 匹配 ${check.matching ?? 0} · 其他 ${check.other ?? 0} · 上限 ${check.allowed ?? 0} · 正文 ${check.messages ?? 0}`;
+        check.calls ?? 0} 条调用 · 匹配 ${check.matching ?? 0} · 其他 ${check.other ?? 0} · 上限 ${check.allowed ?? 0} · 正文 ${check.messages ?? 0}`
+        + `${check.wire_tool_calls !== undefined ? ` · 供应商工具调用 ${check.wire_tool_calls} 条` : ''}${reason ? ` · ${reason}` : ''}${recovery ? ` · ${recovery}` : ''}`;
     } catch { return '必读请求检查已记录'; }
   }
   if (item.kind === 'required_read') return item.agent === 'read_execution_records'

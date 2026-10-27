@@ -26,7 +26,7 @@ from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .analysis_basis import analysis_current, execution_trigger
-from .analysis_model import REQUEST_TIMEOUT_SECONDS, OutputTruncated
+from .analysis_model import REQUEST_TIMEOUT_SECONDS, OutputTruncated, sdk_response_structure
 from .analysis_tools import (
     SCOPE_BATCH_SIZE,
     TOOL_ROLES,
@@ -81,6 +81,7 @@ MAX_TIMEOUT_RETRIES = 2
 MAX_OUTPUT_RETRIES = 2
 MAX_FORMAT_RETRIES = 1
 MAX_EVIDENCE_RETRIES = 1
+MAX_REQUIRED_READ_RETRIES = 1
 MAX_TOOL_ARGUMENT_RETRIES = 2
 EXCLUDED = {".git", ".venv", "venv", "node_modules", "dist", "build", "data", "__pycache__"}
 SUFFIXES = {".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".md", ".toml", ".yaml",
@@ -105,6 +106,7 @@ class RetryBudget:
     output_used: int = 0
     format_used: int = 0
     evidence_used: int = 0
+    required_read_used: int = 0
     tool_arguments_used: int = 0
 
 
@@ -243,6 +245,30 @@ class StageModel(Model):
         self.event("handoff_validation", json.dumps(detail))
         return calls, detail["accepted"]
 
+    def required_read_validation(self, response, required, reads):
+        structure = sdk_response_structure(response)
+        calls = [item for item in response.output if item.type == "function_call"]
+        matching = sum(call.name == required for call in calls)
+        limit = max(0, reads - self.budget.reads) if required == "read_source_file" else 1
+        accepted = (bool(calls) and len(calls) <= limit and matching == len(calls)
+                    and not structure["refusals"])
+        reason = ("refusal" if structure["refusals"] else "accepted" if accepted
+                  else "missing_call" if not calls else "wrong_tool" if matching != len(calls)
+                  else "too_many_calls")
+        detail = {
+            "required": {"read_execution_records": "execution", "read_source_file": "source",
+                         "register_task_scope": "scope"}[required],
+            **structure, "matching": matching, "other": len(calls) - matching,
+            "allowed": limit, "accepted": accepted, "reason": reason,
+        }
+        observation = getattr(self.delegate, "observation", {})
+        for key in ("wire_tool_calls", "wire_content_chars", "wire_content_parts",
+                    "wire_legacy_call", "wire_message_present"):
+            value = observation.get(key)
+            if type(value) is bool or type(value) is int and 0 <= value <= 10000000:
+                detail[key] = value
+        return detail
+
     async def get_response(self, system_instructions, input, **kwargs):
         turns, reads, chars = STAGE_LIMITS[self.role]
         budget = self.budget
@@ -352,12 +378,13 @@ class StageModel(Model):
             )
         budget.turns += 1
         self.event("model_call", self.role)
-        timeout_retried = output_retried = handoff_retried = False
+        timeout_retried = output_retried = handoff_retried = required_retried = False
         correction = ""
         tool_correction = ""
         tool_repair = None
         report_correction = None
         handoff_correction = ""
+        required_correction = ""
         call_input = input
         if review_schema is not None and closing and self.final_input is not None:
             call_input = self.final_input(input)
@@ -370,6 +397,10 @@ class StageModel(Model):
                 )
                 if remaining_seconds <= 0:
                     raise AnalysisFailure("analysis_deadline_exceeded")
+                if (required and required_retried
+                        and time.monotonic() - budget.started >= STAGE_SECONDS[self.role]):
+                    raise AnalysisFailure("analysis_scope_unregistered" if read_kind == "scope"
+                                          else f"analysis_{read_kind}_unread")
                 # Some compatible providers reject a response_format constraint
                 # alongside callable tools. Validate exploration answers locally;
                 # keep provider schema enforcement for calls with tools closed.
@@ -379,8 +410,10 @@ class StageModel(Model):
                     if self.separate_schema_from_tools and review_schema is not None
                     and request_kwargs["tools"] else request_kwargs
                 )
-                request_instructions = ((system_instructions or "") + remaining + correction
-                                        + tool_correction + handoff_correction)
+                request_instructions = (
+                    (system_instructions or "") + remaining + correction
+                    + tool_correction + handoff_correction + required_correction
+                )
                 request_input = call_input
                 if report_correction is not None:
                     model_kwargs = report_correction.request_kwargs(model_kwargs)
@@ -393,11 +426,15 @@ class StageModel(Model):
                 ), timeout=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds))
                 if correction and any(item.type == "function_call" for item in response.output):
                     raise AnalysisFailure("analysis_finalization_not_followed")
-                if tool_repair is not None and any(
+                if (tool_repair is not None or required) and any(
                     item.type == "message" and any(part.type == "refusal" for part in item.content)
                     for item in response.output
                 ):
-                    raise ModelRefusalError("Model refused tool argument correction.")
+                    if required:
+                        check = self.required_read_validation(response, required, reads)
+                        check.update(recoverable=False, recovery="refusal", corrections_remaining=0)
+                        self.event("required_read_validation", json.dumps(check))
+                    raise ModelRefusalError("Model refused the required tool request.")
                 for call in response.output:
                     if (call.type == "function_call" and call.name in TOOL_ROLES
                             and not tool_allowed(self.role, call.name)):
@@ -504,6 +541,47 @@ class StageModel(Model):
                             "role": self.role, "calls": preserved_fields[:8],
                         }))
                     self.event("tool_arguments_repaired", self.role)
+                if required:
+                    check = self.required_read_validation(response, required, reads)
+                    retry = (
+                        check["reason"] == "missing_call" and tool_repair is None
+                        and not required_retried
+                        and self.retries.required_read_used < MAX_REQUIRED_READ_RETRIES
+                        and self.retries.tool_arguments_used < MAX_TOOL_ARGUMENT_RETRIES
+                        and time.monotonic() - budget.started < STAGE_SECONDS[self.role]
+                    )
+                    recovery = (
+                        "not_needed" if check["accepted"] else "retry" if retry
+                        else "request_mismatch" if check["reason"] != "missing_call"
+                        else "argument_correction_active" if tool_repair is not None
+                        else "retry_exhausted" if required_retried or (
+                            self.retries.required_read_used >= MAX_REQUIRED_READ_RETRIES
+                        ) else "shared_budget_exhausted" if (
+                            self.retries.tool_arguments_used >= MAX_TOOL_ARGUMENT_RETRIES
+                        ) else "stage_deadline"
+                    )
+                    check.update(recoverable=retry, recovery=recovery, corrections_remaining=(
+                        max(0, MAX_REQUIRED_READ_RETRIES - self.retries.required_read_used - 1)
+                        if retry else 0
+                    ))
+                    self.event("required_read_validation", json.dumps(check))
+                    if not check["accepted"]:
+                        if not retry:
+                            raise AnalysisFailure(f"analysis_{read_kind}_read_not_followed")
+                        required_retried = True
+                        self.retries.required_read_used += 1
+                        self.retries.tool_arguments_used += 1
+                        self.event("required_read_retry", read_kind)
+                        required_correction = (
+                            f"\nThe previous response contained no callable {required} request. "
+                            "No tool ran and no prerequisite was satisfied. Return only a real "
+                            f"function call to {required}, using its supplied tool schema. "
+                            "Do not return an empty response, tool-call prose, a report, another "
+                            "tool or a handoff. Preserve the original task and collected evidence."
+                        )
+                        continue
+                    if required_retried:
+                        self.event("required_read_recovered", read_kind)
                 if report_correction is not None:
                     if any(item.type == "message" and any(
                         part.type == "refusal" for part in item.content
@@ -707,19 +785,6 @@ class StageModel(Model):
                     call_input = self.final_input(input)
                     self.event("report_finalization", self.role)
                 self.event("output_retry", self.role)
-        if required:
-            calls = [item for item in response.output if item.type == "function_call"]
-            # Some compatible providers batch pure source reads even when parallel
-            # calls are disabled. Actual handlers still enforce per-stage budgets.
-            limit = max(0, reads - budget.reads) if required == "read_source_file" else 1
-            matching = sum(call.name == required for call in calls)
-            self.event("required_read_validation", json.dumps({
-                "required": read_kind, "calls": len(calls), "matching": matching,
-                "other": len(calls) - matching, "allowed": limit,
-                "messages": sum(item.type == "message" for item in response.output),
-            }))
-            if not calls or len(calls) > limit or matching != len(calls):
-                raise AnalysisFailure(f"analysis_{read_kind}_read_not_followed")
         return response
 
     async def stream_response(self, *args, **kwargs):
@@ -1335,7 +1400,8 @@ class Analyses:
     def event(self, analysis_id, kind, agent):
         with self.store.connection() as db:
             limit = (4096 if kind in {"tool_arguments_invalid", "tool_arguments_preserved",
-                                     "output_limit", "scope_mapping_validation"}
+                                     "output_limit", "scope_mapping_validation",
+                                     "required_read_validation", "provider_structure"}
                      else 1024 if kind == "failure" else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",

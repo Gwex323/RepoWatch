@@ -161,6 +161,8 @@ class ObservedModel(Model):
                     raise OutputTruncated("analysis_output_truncated") from None
                 raise
             record_usage(span, result)
+            self.observation.update({"sdk_" + key: value
+                                     for key, value in sdk_response_structure(result).items()})
             if self.observation.get("truncated"):
                 raise OutputTruncated("analysis_output_truncated")
             return result
@@ -168,6 +170,49 @@ class ObservedModel(Model):
     async def stream_response(self, *args, **kwargs):
         raise NotImplementedError("Repository analysis uses non-streaming calls.")
         yield
+
+
+def sdk_response_structure(response):
+    """Counts only: no tool names, arguments, response text or dynamic type labels."""
+    parts = [part for item in response.output if item.type == "message" for part in item.content]
+    return {
+        "calls": sum(item.type == "function_call" for item in response.output),
+        "messages": sum(item.type == "message" for item in response.output),
+        "refusals": sum(part.type == "refusal" for part in parts),
+        "text_chars": sum(len(part.text) for part in parts if part.type == "output_text"),
+    }
+
+
+def provider_response_structure(body):
+    """Describe the wire envelope without retaining any generated content."""
+    choices, output = body.get("choices"), body.get("output")
+    detail = {"protocol": "unknown"}
+    if isinstance(choices, list):
+        first = choices[0] if choices and isinstance(choices[0], dict) else {}
+        message = first.get("message")
+        detail.update(protocol="chat_completions", choices=len(choices),
+                      message_present=isinstance(message, dict))
+        if not isinstance(message, dict):
+            return detail
+        calls, content = message.get("tool_calls"), message.get("content")
+        detail.update(tool_calls=len(calls) if isinstance(calls, list) else 0,
+                      tool_calls_state=("missing" if "tool_calls" not in message else "null"
+                                        if calls is None else "list" if isinstance(calls, list)
+                                        else "invalid_type"),
+                      content_state=("missing" if "content" not in message else "null"
+                                     if content is None else "empty" if content == "" else "text"
+                                     if isinstance(content, str) else "parts"
+                                     if isinstance(content, list) else "invalid_type"),
+                      legacy_call=isinstance(message.get("function_call"), dict),
+                      refusal=bool(message.get("refusal")),
+                      content_chars=len(content) if isinstance(content, str) else 0,
+                      content_parts=len(content) if isinstance(content, list) else 0)
+    elif isinstance(output, list):
+        detail.update(protocol="responses", items=len(output), tool_calls=sum(
+            isinstance(item, dict) and item.get("type") == "function_call" for item in output
+        ), messages=sum(isinstance(item, dict) and item.get("type") == "message"
+                        for item in output))
+    return detail
 
 
 async def observe_response(response, observation, event):
@@ -201,6 +246,9 @@ async def observe_response(response, observation, event):
     if not isinstance(body, dict):
         event("provider_response", json.dumps({"reason": "invalid_envelope"}))
         return
+    structure = provider_response_structure(body)
+    observation.update({"wire_" + key: value for key, value in structure.items()})
+    event("provider_structure", json.dumps(structure))
     choices = body.get("choices")
     first = choices[0] if isinstance(choices, list) and choices else {}
     if not isinstance(first, dict):
