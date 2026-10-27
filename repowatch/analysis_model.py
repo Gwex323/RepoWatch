@@ -190,11 +190,71 @@ def provider_response_structure(body):
     if isinstance(choices, list):
         first = choices[0] if choices and isinstance(choices[0], dict) else {}
         message = first.get("message")
+        finish_reason = first.get("finish_reason")
         detail.update(protocol="chat_completions", choices=len(choices),
-                      message_present=isinstance(message, dict))
+                      message_present=isinstance(message, dict),
+                      finish_reason=(finish_reason if isinstance(finish_reason, str) and
+                                     finish_reason in {"stop", "length", "tool_calls",
+                                                       "function_call", "content_filter"}
+                                     else "unknown"))
         if not isinstance(message, dict):
             return detail
         calls, content = message.get("tool_calls"), message.get("content")
+        raw_call = calls[0] if isinstance(calls, list) and calls else None
+        call = raw_call if isinstance(raw_call, dict) else None
+        function = call.get("function") if call else None
+        function = function if isinstance(function, dict) else None
+        call_type = call.get("type") if call else None
+        if call is None:
+            call_item_state = ("empty" if isinstance(calls, list) and not calls else
+                               "invalid_type" if isinstance(calls, list) and calls else
+                               "unavailable")
+            call_type_state = "unavailable"
+            call_id_state = "unavailable"
+            function_state = "unavailable"
+            function_name_state = "unavailable"
+            arguments_state = "unavailable"
+            arguments_json_state = "unavailable"
+        else:
+            call_item_state = "object"
+            call_type_state = (call_type if call_type in ("function", "custom") else
+                               "missing" if "type" not in call else
+                               "null" if call_type is None else
+                               "other" if isinstance(call_type, str) else "invalid_type")
+            call_id = call.get("id")
+            call_id_state = ("missing" if "id" not in call else "null" if call_id is None
+                             else "string" if isinstance(call_id, str) and call_id
+                             else "empty" if call_id == "" else "invalid_type")
+            function_state = ("object" if function is not None else
+                              "missing" if "function" not in call else
+                              "null" if call.get("function") is None else "invalid_type")
+            if function is None:
+                function_name_state = arguments_state = arguments_json_state = "unavailable"
+            else:
+                name = function.get("name")
+                function_name_state = ("missing" if "name" not in function else
+                                       "null" if name is None else "string" if isinstance(name, str)
+                                       and name else "empty" if name == "" else "invalid_type")
+                arguments = function.get("arguments")
+                arguments_state = ("missing" if "arguments" not in function else
+                                   "null" if arguments is None else
+                                   "string" if isinstance(arguments, str) and arguments else
+                                   "empty" if arguments == "" else "invalid_type")
+                if not isinstance(arguments, str) or not arguments:
+                    arguments_json_state = "unavailable"
+                else:
+                    try:
+                        parsed_arguments = json.loads(arguments)
+                    except (ValueError, TypeError, RecursionError):
+                        arguments_json_state = "invalid_json"
+                    else:
+                        arguments_json_state = ("object" if isinstance(parsed_arguments, dict)
+                                                else "non_object")
+        detail.update(call_item_state=call_item_state, call_type_state=call_type_state,
+                      call_id_state=call_id_state, function_state=function_state,
+                      function_name_state=function_name_state,
+                      arguments_state=arguments_state,
+                      arguments_json_state=arguments_json_state)
         detail.update(tool_calls=len(calls) if isinstance(calls, list) else 0,
                       tool_calls_state=("missing" if "tool_calls" not in message else "null"
                                         if calls is None else "list" if isinstance(calls, list)

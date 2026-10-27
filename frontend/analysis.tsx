@@ -328,12 +328,26 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'provider_structure') {
     try {
       const detail = JSON.parse(item.agent) as { protocol?: string; tool_calls?: number;
-        content_chars?: number; content_parts?: number; legacy_call?: boolean; content_state?: string };
+        content_chars?: number; content_parts?: number; legacy_call?: boolean; content_state?: string;
+        call_item_state?: string; call_type_state?: string; call_id_state?: string;
+        function_state?: string; function_name_state?: string; arguments_state?: string;
+        arguments_json_state?: string; finish_reason?: string };
       const content = ({ missing: '缺少正文字段', null: '正文为空', empty: '正文为空文本',
         text: `正文 ${detail.content_chars ?? 0} 字符`, parts: `正文 ${detail.content_parts ?? 0} 段`,
         invalid_type: '正文字段类型不符合协议' } as Record<string, string>)[detail.content_state ?? ''];
+      const shapes = [
+        detail.call_item_state && `调用项 ${detail.call_item_state}`,
+        detail.call_type_state && `type ${detail.call_type_state}`,
+        detail.call_id_state && `id ${detail.call_id_state}`,
+        detail.function_state && `function ${detail.function_state}`,
+        detail.function_name_state && `name ${detail.function_name_state}`,
+        detail.arguments_state && `arguments ${detail.arguments_state}`,
+        detail.arguments_json_state && `参数 JSON ${detail.arguments_json_state}`,
+        detail.finish_reason && `finish_reason ${detail.finish_reason}`,
+      ].filter(Boolean).join(' · ');
       return `供应商响应结构：${detail.tool_calls === undefined ? '未提供工具调用计数' : `工具调用 ${detail.tool_calls} 条`}${
-        content ? ` · ${content}` : ''}${detail.legacy_call ? ' · 含旧式函数调用字段' : ''}`;
+        content ? ` · ${content}` : ''}${shapes ? ` · ${shapes}` : ''}${
+          detail.legacy_call ? ' · 含旧式函数调用字段' : ''}`;
     } catch { return '供应商响应结构已记录'; }
   }
   if (item.kind === 'budget') return `${name} · 当前阶段收束，进入交接或报告`;

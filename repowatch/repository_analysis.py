@@ -263,7 +263,10 @@ class StageModel(Model):
         }
         observation = getattr(self.delegate, "observation", {})
         for key in ("wire_tool_calls", "wire_content_chars", "wire_content_parts",
-                    "wire_legacy_call", "wire_message_present"):
+                    "wire_legacy_call", "wire_message_present", "wire_finish_reason",
+                    "wire_call_item_state", "wire_call_type_state", "wire_call_id_state",
+                    "wire_function_state", "wire_function_name_state", "wire_arguments_state",
+                    "wire_arguments_json_state"):
             value = observation.get(key)
             if type(value) is bool or type(value) is int and 0 <= value <= 10000000:
                 detail[key] = value
