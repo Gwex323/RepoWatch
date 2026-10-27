@@ -4,11 +4,11 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+from test_analysis_report_recovery import RecoveryEngine
 from test_execution import service  # noqa: F401
 from test_repository_analysis import prepare_tested
 
-from repowatch.repository_analysis import Analyses, AnalysisFailure, report_diagnostics
-from test_analysis_report_recovery import RecoveryEngine
+from repowatch.repository_analysis import Analyses, report_diagnostics
 
 
 def failed_review(execution_fixture):
@@ -53,7 +53,7 @@ def test_schema_diagnostics_use_only_known_field_labels():
     assert "do-not-repeat" not in json.dumps(details)
 
 
-def test_valid_checkpoint_is_automatically_resumed_without_manual_retry(service):
+def test_valid_checkpoint_is_automatically_resumed_without_manual_retry(service):  # noqa: F811
     analyses, engine, queued = failed_review(service)
     before = queued["automatic_recovery"]["requests"]
     engine.fail = False
@@ -73,7 +73,7 @@ def test_valid_checkpoint_is_automatically_resumed_without_manual_retry(service)
     assert any(item["kind"] == "report_resumed" for item in completed["events"])
 
 
-def test_automatic_retries_keep_the_same_persistent_budget_and_stop_at_limit(service):
+def test_automatic_retries_keep_the_same_persistent_budget_and_stop_at_limit(service):  # noqa: F811
     analyses, engine, queued = failed_review(service)
     analysis_id = queued["id"]
     initial_requests = queued["automatic_recovery"]["requests"]
