@@ -164,6 +164,9 @@ def initialize(db):
         "ON s.analysis_id=a.id WHERE s.analysis_id IS NULL ORDER BY a.created"
     ).fetchall():
         ensure_scope(db, analysis)
+    from .acceptance_store import initialize as initialize_acceptance
+
+    initialize_acceptance(db)
 
 
 def _bound(db, analysis_id):
@@ -183,7 +186,13 @@ def _requirements(db, scope):
     )]
 
 
-def request_scope_review(db, analysis):
+def current_scope_findings(db, analysis_id):
+    return [{"id": row["id"], "status": row["status"], "data": json.loads(row["data"])}
+            for row in db.execute("SELECT * FROM analysis_findings WHERE analysis_id=?",
+                                  (analysis_id,))]
+
+
+def request_scope_review(db, analysis, *, actor="owner"):
     scope = _bound(db, analysis["id"])
     if scope["analysis_id"] != analysis["id"]:
         raise Conflict("scope_changed")
@@ -197,18 +206,14 @@ def request_scope_review(db, analysis):
         context["issue"] = {key: cached[key] for key in (
             "id", "repo_id", "number", "title", "body", "state", "author", "url", "updated_at",
         )}
-    context["current_scope_findings"] = [
-        {"id": row["id"], "status": row["status"], "data": json.loads(row["data"])}
-        for row in db.execute("SELECT * FROM analysis_findings WHERE analysis_id=?",
-                              (analysis["id"],))
-    ]
+    context["current_scope_findings"] = current_scope_findings(db, analysis["id"])
     _, original = original_request({**dict(analysis), "context": json.dumps(context)})
     db.execute(
         "UPDATE task_scopes SET original=?,original_digest=?,status='draft',"
         "version=version+1,updated=? WHERE id=?",
         (json.dumps(original, ensure_ascii=False), digest(original), time.time(), scope["id"]),
     )
-    _event(db, _bound(db, analysis["id"]), "reassessment_requested", "owner", {})
+    _event(db, _bound(db, analysis["id"]), "reassessment_requested", actor, {})
     return context
 
 
@@ -321,10 +326,15 @@ def _repair_proof(db, scope, evidence):
     verification = json.loads(task["verification"] or "{}")
     review = json.loads(task["review"] or "{}")
     details = json.loads(evidence["details"])
-    return (context.get("task_scope", {}).get("version") == scope["version"]
+    current_review = (context.get("task_scope", {}).get("version") == scope["version"]
+                      and review.get("scope_version") == scope["version"])
+    if details.get("revalidation_id"):
+        from .acceptance_store import revalidation_valid
+
+        current_review = revalidation_valid(db, scope, task, details)
+    return (current_review
             and evidence["patch_digest"] == digest(json.loads(task["patch"]))
             and review.get("approved") is True and verification.get("passed") is True
-            and review.get("scope_version") == scope["version"]
             and details.get("review_digest") == digest(review)
             and details.get("verification_digest") == digest(verification)
             and task["status"] in ("running", "pr_created", "failed", "interrupted"))
@@ -407,11 +417,20 @@ def scope_snapshot(db, analysis_id, *, candidate=None):
                              and digest(json.loads(ref["patch"])) == entry["patch_digest"])
                     if candidate is not None:
                         valid = valid and details.get("repair_id") == candidate
+            elif entry["source"] == "acceptance":
+                from .acceptance_store import check_proof
+
+                valid = valid and check_proof(db, scope, entry)
+                if candidate is not None and entry["patch_digest"]:
+                    valid = valid and json.loads(entry["details"]).get("repair_id") == candidate
+            else:
+                valid = False
             value.update(valid=bool(valid), details=json.loads(value["details"]))
             value["effective_failure"] = bool(
-                accepted and entry["source"] == "owner" and not entry["passed"]
+                accepted and entry["source"] in ("owner", "acceptance") and not entry["passed"]
                 and entry["version"] == scope["version"] and entry["revision"] == scope["revision"]
                 and latest.get(identity) == entry["id"]
+                and (entry["source"] == "owner" or check_proof(db, scope, entry))
             )
             evidence.append(value)
         failed = {(item["patch_digest"], item["kind"]) for item in evidence
@@ -442,7 +461,7 @@ def scope_snapshot(db, analysis_id, *, candidate=None):
             for repair_id in repairs:
                 kinds = {item["kind"] for item in valid if (
                     item["source"] == "repair" and item["reference"] == repair_id
-                    or item["source"] == "owner"
+                    or item["source"] in ("owner", "acceptance")
                     and item["details"].get("repair_id") == repair_id
                 )}
                 if required <= kinds:
@@ -467,6 +486,8 @@ def scope_snapshot(db, analysis_id, *, candidate=None):
         for repair_id in common
     )
     complete = accepted and bool(items) and done == len(items) and combined and not pending_limits
+    from .acceptance_store import progress
+
     return {"id": scope["id"], "version": scope["version"], "revision": scope["revision"],
             "analysis_id": scope["analysis_id"], "origin": scope["origin"],
             "original": original, "reviewed": accepted,
@@ -475,13 +496,14 @@ def scope_snapshot(db, analysis_id, *, candidate=None):
             "complete": complete, "total": len(items), "done": done, "counts": counts,
             "combination_pending": bool(items) and done == len(items) and not combined,
             "execution_limits": limits, "pending_limits": pending_limits,
-            "items": items, "review": review}
+            "items": items, "review": review, "automation": progress(db, scope)}
 
 
 def scope_packet(db, analysis_id):
     """Keep observation bodies and historical proofs out of model prompt/context growth."""
     snapshot = scope_snapshot(db, analysis_id)
-    return {key: value for key, value in snapshot.items() if key not in ("items", "review")} | {
+    return {key: value for key, value in snapshot.items()
+            if key not in ("items", "review", "automation")} | {
         "items": [{key: value for key, value in item.items()
                    if key not in ("evidence", "findings", "conclusion")}
                   for item in snapshot["items"]],
@@ -551,15 +573,27 @@ class TaskScopes:
             _event(db, _bound(db, analysis_id), "owner_scope_extension", "owner", {})
         return self.get(analysis_id)
 
-    def record_repair(self, db, task):
+    def record_repair(self, db, task, *, revalidation_id=None):
         scope = _bound(db, task["analysis_id"])
         review = json.loads(task["review"] or "{}")
         context = json.loads(task["context"])
         verification = json.loads(task["verification"] or "{}")
         patch = json.loads(task["patch"] or "null")
+        revalidation = None
+        if revalidation_id:
+            from .acceptance_store import repair_basis
+
+            revalidation = db.execute("SELECT * FROM scope_repair_revalidations WHERE id=?",
+                                      (revalidation_id,)).fetchone()
+            if (not revalidation or revalidation["scope_id"] != scope["id"]
+                    or revalidation["version"] != scope["version"]
+                    or revalidation["repair_id"] != task["id"]
+                    or revalidation["repair_basis"] != repair_basis(task)):
+                raise Conflict("repair_scope_evidence_invalid")
         if (scope["status"] != "reviewed" or scope["analysis_id"] != task["analysis_id"]
-                or context.get("task_scope", {}).get("version") != scope["version"]
-                or review.get("scope_version") != scope["version"]
+                or (not revalidation and (
+                    context.get("task_scope", {}).get("version") != scope["version"]
+                    or review.get("scope_version") != scope["version"]))
                 or review.get("approved") is not True or verification.get("passed") is not True
                 or not patch):
             return
@@ -578,7 +612,8 @@ class TaskScopes:
                 > skipped_tests(verification["original_suite"].get("log"))):
             return
         requirements = {item["key"]: item for item in _requirements(db, scope)}
-        coverage = review.get("scope_coverage", [])
+        coverage = (json.loads(revalidation["coverage"]) if revalidation
+                    else review.get("scope_coverage", []))
         keys = [item["key"] for item in coverage]
         if len(keys) != len(set(keys)) or any(key not in requirements for key in keys):
             raise Conflict("repair_scope_evidence_invalid")
@@ -586,9 +621,12 @@ class TaskScopes:
             if not set(entry["regression_paths"]) <= set(patch["regression_paths"]):
                 raise Conflict("repair_scope_evidence_invalid")
             # Verification is real; relevance to a requirement is the independent review's job.
-            ref = digest({"repair": task["id"], "patch": patch, "key": entry["key"],
-                          "scope_version": scope["version"], "review": review,
-                          "verification": verification})
+            identity = {"repair": task["id"], "patch": patch, "key": entry["key"],
+                        "scope_version": scope["version"], "review": review,
+                        "verification": verification}
+            if revalidation:
+                identity["revalidation_id"] = revalidation_id
+            ref = digest(identity)
             if db.execute("SELECT 1 FROM task_scope_evidence WHERE id=?", (ref,)).fetchone():
                 continue
             db.execute("INSERT INTO task_scope_evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
@@ -598,7 +636,9 @@ class TaskScopes:
                             "regression_paths": entry["regression_paths"],
                             "review_digest": digest(review),
                             "verification_digest": digest(verification),
-                            "reviewer": "independent_reviewer", "stages": list(stages)},
+                            "reviewer": "independent_reviewer", "stages": list(stages),
+                            **({"revalidation_id": revalidation_id,
+                                "coverage_digest": digest(coverage)} if revalidation else {})},
                            ensure_ascii=False), time.time(),
             ))
 

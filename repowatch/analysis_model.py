@@ -282,6 +282,9 @@ class ModelFlow:
     async def repair(self, *args, **kwargs):
         return await self.parent.repair(*args, **kwargs)
 
+    async def acceptance(self, *args, **kwargs):
+        return await self.parent.acceptance(*args, **kwargs)
+
 
 class AnalysisModel:
     def __init__(self, store, credentials):
@@ -425,6 +428,14 @@ class AnalysisModel:
 
         return await self._run(
             run_repair, context, event, workspace=workspace, flow="repair",
+            request_timeout_seconds=REPAIR_REQUEST_TIMEOUT_SECONDS,
+        )
+
+    async def acceptance(self, context, event):
+        from .acceptance_model import run_acceptance
+
+        return await self._run(
+            run_acceptance, context, event, flow="acceptance",
             request_timeout_seconds=REPAIR_REQUEST_TIMEOUT_SECONDS,
         )
 

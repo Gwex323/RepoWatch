@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .acceptance import Acceptance
 from .analysis_model import AnalysisModel
 from .diagnosis import AnalysisModelDiagnoser
 from .execution import Execution
@@ -247,6 +248,7 @@ def create_app(
     memory_evaluations = MemoryEvaluations(analyses, analysis_engine or analysis_model)
     schedules = RepositorySchedules(store, execution)
     repairs.analyses = analyses
+    acceptance = Acceptance(analyses, repairs, analysis_model.for_flow("acceptance"))
     login_attempts: dict[str, deque] = defaultdict(deque)
 
     @asynccontextmanager
@@ -258,10 +260,14 @@ def create_app(
             memory_evaluations.run(),
         ) if start_worker else None
         repair_worker = asyncio.create_task(repairs.run()) if start_worker else None
+        acceptance_worker = asyncio.create_task(acceptance.run()) if start_worker else None
         issue_worker = asyncio.create_task(issues.run()) if start_worker else None
         schedule_worker = asyncio.create_task(schedules.run()) if start_worker else None
         yield
         execution.closing.set()
+        acceptance.closing.set()
+        if acceptance_worker:
+            await acceptance_worker
         if analyst:
             await analyst
         if evaluation_worker:
@@ -294,6 +300,7 @@ def create_app(
     app.state.model_providers = model_providers
     app.state.memory_evaluations = memory_evaluations
     app.state.repairs = repairs
+    app.state.acceptance = acceptance
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
     @app.middleware("http")

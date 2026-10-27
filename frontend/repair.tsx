@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, GitPullRequest, Loader2, RefreshCw, Save, Wrench } from 'lucide-react';
 import { agentModelEvent } from './agent-models';
+import { AutomaticAcceptance, type AcceptanceProgress } from './task-scope';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Settings = { enabled: boolean; model_enabled: boolean; version: number; max_attempts: number };
@@ -23,7 +24,8 @@ type Repair = {
   source_kind?: 'discovered' | 'existing_issue' | null;
   source_issue?: { number: number; url: string } | null;
   source_error?: string | null;
-  task_scope?: { total: number; done: number; complete: boolean; reviewed: boolean; combination_pending: boolean };
+  task_scope?: { total: number; done: number; complete: boolean; reviewed: boolean;
+    combination_pending: boolean; automation?: AcceptanceProgress | null };
   context: { finding: { title: string } };
   patch: { summary: string; edits: { path: string }[] } | null;
   diff: string; verification: Verification | null;
@@ -337,6 +339,7 @@ export function RepairPanel({ envId, api }: { envId: string; api: Api }) {
       {task.task_scope && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
         {' · '}{task.task_scope.complete ? '当前范围已核验' : task.task_scope.reviewed
           ? '整体尚未完成，部分修复不关闭原 Issue' : '完整性未核验，不自动关闭原 Issue'}</p>}
+      <AutomaticAcceptance progress={task.task_scope?.automation} />
       {task.status === 'running' && <p><Loader2 size={14} className="spin" />正在处理修复任务</p>}
       {task.error && task.status !== 'waiting_environment' && <p role="alert">
         {task.error === 'docker_unavailable' && '上次失败：'}{message(task.output_recovery_available

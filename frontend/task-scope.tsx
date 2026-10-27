@@ -4,7 +4,7 @@ import { Check, ListChecks, Plus, RefreshCw } from 'lucide-react';
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type EvidenceKind = 'regression' | 'integration' | 'client';
 type ScopeEvidence = {
-  id: string; kind: EvidenceKind; source: 'repair' | 'owner'; reference: string;
+  id: string; kind: EvidenceKind; source: 'repair' | 'owner' | 'acceptance'; reference: string;
   passed: number; valid: boolean; created: number; patch_digest: string | null;
   details: { note?: string; observation?: string; rationale?: string; regression_paths?: string[] };
 };
@@ -18,6 +18,7 @@ export type TaskScope = {
   id: string; version: number; analysis_id: string; revision: string;
   reviewed: boolean; stale: boolean; complete: boolean; combination_pending: boolean;
   total: number; done: number; counts: Record<string, number>; items: ScopeItem[];
+  automation?: AcceptanceProgress | null;
   execution_limits: { key: string; path: string | null; reasons: string[]; count?: number }[];
   pending_limits: { key: string; path: string | null; reasons: string[] }[];
   original: { title?: string; body?: string; request?: string; clipped: boolean };
@@ -26,6 +27,45 @@ export type TaskScope = {
     required_keys: string[];
   }[] } | null;
 };
+export type AcceptanceProgress = {
+  state: string; stage: string; attempt: number; error: string | null;
+  checks: { item_key: string; kind: EvidenceKind; state: string; reason: string; note: string }[];
+};
+const automaticStates: Record<string, string> = {
+  queued: '等待自动验收', running: '系统正在自动验收', paused: '自动验收已暂停',
+  waiting_environment: '等待 Docker 恢复后自动继续', completed: '自动验收已完成',
+  partial: '本轮自动验收结束，仍有未满足的要求', blocked: '自动验收遇到执行限制',
+  stale: '验证依据已变化，当前结果不计入新版本', failed: '本轮自动验收未完成',
+};
+const automaticReasons: Record<string, string> = {
+  external_service_required: '需要可用的外部服务、凭据或网络',
+  client_runner_unavailable: '尚无可执行此项的真实客户端环境',
+  test_runner_unavailable: '当前测试命令尚不支持自动集成验证',
+  repair_required: '仍需修复对应问题', evidence_unavailable: '尚缺有效的验证依据',
+  acceptance_budget_exhausted: '本项自动验证次数已用完',
+  acceptance_source_changed: '源码已变化，需要基于当前源码重新分析',
+  acceptance_basis_changed: '任务依据已变化，已停止使用旧证据',
+  acceptance_scope_rejected: '当前范围未通过独立审查',
+  acceptance_scope_invalid: '范围审查返回的验收项不完整或不一致',
+  acceptance_evidence_invalid: '审查返回的证据未通过校验',
+  acceptance_model_changed: '运行期间模型配置发生变化，本轮已停止',
+  acceptance_output_invalid: '审查输出纠正后仍未通过校验',
+  acceptance_test_invalid: '生成的验收测试未通过校验',
+  acceptance_context_limit: '验收上下文超过本轮处理上限',
+  acceptance_model_budget: '本轮自动验收的模型请求额度已用完',
+  acceptance_deadline_exceeded: '本轮自动验收已达到时限',
+  acceptance_interrupted: '上次自动验收中断，记录已保留',
+};
+export function AutomaticAcceptance({ progress }: { progress?: AcceptanceProgress | null }) {
+  if (!progress) return null;
+  const stage = ({ scope_review: '审查当前范围', evidence_registration: '登记真实测试证据',
+    verification: '执行剩余验收', finished: '本轮结束' } as Record<string, string>)[progress.stage];
+  return <div role="status">
+    <p>{automaticStates[progress.state] ?? '自动验收处理中'}
+      {progress.state === 'running' && stage ? ` · ${stage}` : ''}</p>
+    {progress.error && <p>{automaticReasons[progress.error] ?? '处理未完成，执行记录已保留。'}</p>}
+  </div>;
+}
 type RepairChoice = {
   id: string; analysis_id: string; revision: string;
   context: { finding: { title: string }; task_scope?: { version: number } };
@@ -135,6 +175,7 @@ export function TaskScopePanel({ scope, analysisId, analysisVersion, analysisSta
       : scope.combination_pending ? '各项已有单独验证；组合验收仍待验证，不能据此关闭原 Issue。'
         : scope.reviewed ? '整体任务尚未完成；部分修复可以提交，未完成项继续保留。'
           : '完整性未核验：原始任务范围尚未通过当前版本的独立审查。'}</p>
+    <AutomaticAcceptance progress={scope.automation} />
     {scope.stale && <p role="status">原问题或执行依据已变化，请继续范围审查；执行依据过期时需开始新分析。</p>}
     {scope.original.clipped && <p role="status">原始问题内容存在截断，不能自动判定整体完成。</p>}
     {!!scope.pending_limits.length && <p role="status">尚有 {scope.pending_limits.length} 项跳过或排除的验证未核清关联，不能自动判定整体完成。</p>}
@@ -167,9 +208,17 @@ export function TaskScopePanel({ scope, analysisId, analysisVersion, analysisSta
       <p className="diagnosis-meta">涉及：{item.paths.join('、')} · 必需：{item.required_evidence.map(kind => kinds[kind]).join('、')}</p>
       {item.conclusion && <p>{item.conclusion.rationale}</p>}
       {!!item.missing_evidence.length && <p>待补证据：{item.missing_evidence.map(kind => kinds[kind]).join('、')}</p>}
+      {scope.automation?.checks.filter(check => check.item_key === item.key).map(check =>
+        <div key={`${check.item_key}-${check.kind}`}>
+          <p>自动{kinds[check.kind]}：{({ queued: '等待执行', running: '正在执行',
+            passed: '验证通过', failed: '验证未通过', blocked: '执行受阻' } as Record<string, string>)[check.state] ?? '待处理'}
+            {check.reason && ` · ${automaticReasons[check.reason] ?? '执行条件未满足'}`}</p>
+          {check.note && <p>{check.note}</p>}
+        </div>)}
       {!!item.evidence.length && <details><summary>证据与核验历史（最近 {Math.min(12, item.evidence.length)} 条）</summary>
         {item.evidence.slice(-12).map(evidence => <div key={evidence.id}>
-          <p>{kinds[evidence.kind]} · {evidence.source === 'owner' ? '本人观察' : '系统补丁验证及独立审查'}
+          <p>{kinds[evidence.kind]} · {evidence.source === 'owner' ? '本人观察'
+            : evidence.source === 'acceptance' ? '系统实际执行及独立审查' : '系统补丁验证及独立审查'}
             {' · '}{!evidence.passed ? '未通过' : evidence.valid ? '计入当前验收' : '未计入当前验收'}
             {' · '}{new Date(evidence.created * 1000).toLocaleString('zh-CN')}</p>
           <p>{evidence.details.rationale ?? evidence.details.note}</p>
@@ -186,7 +235,7 @@ export function TaskScopePanel({ scope, analysisId, analysisVersion, analysisSta
         void api(`/analyses/${analysisId}/scope-review`, { version: analysisVersion })
           .then(refresh).catch(error => setNotice(errorText(error))).finally(() => setBusy(false));
       }}><RefreshCw size={15} />继续分析与范围审查</button>
-      <p className="diagnosis-meta">使用已启用的模型工作流，保留既有发现和验收条件；旧证据需按新范围重新核验。</p>
+      <p className="diagnosis-meta">自动修复启用后，系统会自动审查范围并推进支持的验证。此入口可重新发起审查，保留既有发现和验收条件。</p>
       <details><summary>补充遗漏的验收项</summary>
         <p>新增条件会使范围重新待审。已有条件和证据历史会保留。</p>
         <form className="analysis-feedback" onSubmit={event => {
