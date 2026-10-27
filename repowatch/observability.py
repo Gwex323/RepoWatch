@@ -29,7 +29,7 @@ _EVENTS = {
     "timeout_retry", "retry_call", "output_retry", "format_retry", "evidence_retry",
     "handoff_retry", "report_finalization", "report_validation", "verification_resume",
     "required_read_validation", "required_read_retry", "required_read_recovered",
-    "provider_structure",
+    "provider_structure", "provider_tool_call_compatibility",
 }
 _FAILURE_CODES = {
     "analysis_provider_timeout_exhausted", "analysis_deadline_exceeded", "analysis_cancelled",
@@ -37,11 +37,13 @@ _FAILURE_CODES = {
     "analysis_model_changed", "analysis_output_truncated", "analysis_json_invalid",
     "analysis_report_invalid", "analysis_evidence_unverified", "analysis_handoff_not_followed",
     "analysis_tool_arguments_exhausted", "analysis_tool_not_allowed",
+    "analysis_tool_call_protocol_invalid",
     "analysis_scope_unregistered", "analysis_scope_read_not_followed",
     "analysis_execution_read_not_followed", "analysis_source_read_not_followed",
     "analysis_execution_unread", "analysis_source_unread", "analysis_model_refused",
     "repair_deadline_exceeded", "repair_tests_failed", "repair_verification_required",
     "repair_output_truncated", "repair_handoff_incomplete",
+    "repair_tool_call_protocol_invalid",
 }
 
 

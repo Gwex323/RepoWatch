@@ -87,6 +87,7 @@ const errors: Record<string, string> = {
   repair_handoff_incomplete: '修复与独立审查未完成规定交接。',
   repair_review_evidence_required: '独立审查未读取验证证据，已阻止发布。',
   repair_output_invalid: '修复模型返回格式无效。',
+  repair_tool_call_protocol_invalid: '模型工具调用的协议字段不符合要求，无法安全兼容，本批调用未执行。',
   repair_output_truncated: '修复模型输出达到上限，本轮自动恢复已结束。请检查模型思考强度或调整修复范围后重试。',
   repair_model_timeout: '修复模型响应超时，自动重试已用完。',
   repair_tool_arguments_invalid: '模型工具参数不符合要求，自动纠正次数已用完。',
@@ -209,6 +210,14 @@ const verificationEvent = (kind: string, value: string) => {
     if (kind === 'verification_round') return `第 ${item.revision} 版验证${item.passed === true ? '通过' : '未通过'}`;
     return `根据第 ${item.revision} 版失败日志分析并纠正 · 还可生成 ${item.corrections_remaining} 版补丁`;
   } catch { return '修复验证记录'; }
+};
+const protocolEvent = (value: string) => {
+  try {
+    const item = JSON.parse(value);
+    return item.status === 'normalized'
+      ? `协议兼容：已修正 ${item.normalized ?? 0} 条函数调用的类型标记，继续权限与参数校验`
+      : '工具调用协议兼容检查未通过，本批调用未执行';
+  } catch { return '工具调用协议兼容检查已记录'; }
 };
 const providerEvent = (value: string) => {
   try {
@@ -434,6 +443,7 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
             event.kind === 'verification_round' || event.kind === 'verification_feedback' ? verificationEvent(event.kind, event.value) :
             event.kind === 'repair_unresolved' ? `未解决说明（模型判断）：${event.value}` :
             event.kind === 'provider_response' ? providerEvent(event.value) :
+            event.kind === 'provider_tool_call_compatibility' ? protocolEvent(event.value) :
             event.kind === 'model_configuration' ? agentModelEvent(event.value) :
             event.kind === 'source_blocked' ? sourceBlock(event.value) :
             event.kind === 'source_unavailable' ? unavailableSource(event.value) :

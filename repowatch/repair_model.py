@@ -21,7 +21,7 @@ from openai import (
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .analysis_model import REPAIR_REQUEST_TIMEOUT_SECONDS, OutputTruncated
+from .analysis_model import REPAIR_REQUEST_TIMEOUT_SECONDS, OutputTruncated, ToolCallProtocolError
 from .diagnosis import redact
 from .github_accounts import GitHubError
 from .observability import TracingHooks
@@ -118,6 +118,7 @@ def repair_failure_code(exc):
     for error in chain:
         for kind, code in (
             (OutputTruncated, "repair_output_truncated"),
+            (ToolCallProtocolError, "repair_tool_call_protocol_invalid"),
             (AuthenticationError, "repair_authentication_failed"),
             (RateLimitError, "repair_rate_limited"),
             (APITimeoutError, "repair_model_timeout"),

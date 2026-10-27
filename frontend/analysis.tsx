@@ -89,6 +89,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_handoff_not_followed: '已要求交接，但模型未返回有效的交接调用。请检查模型服务是否支持指定工具调用。',
   analysis_finalization_not_followed: '已要求提交报告，但模型仍尝试调用工具。请检查模型服务的工具选择支持。',
   analysis_model_output_invalid: '模型返回了无效的工具调用或输出格式，本次未保存问题。',
+  analysis_tool_call_protocol_invalid: '模型工具调用的协议字段不符合要求，无法安全兼容，本批调用未执行。请查看协议兼容检查记录。',
   analysis_output_truncated: '模型输出达到生成上限，扩容空间或重试额度已用完，本次未保存问题。',
   analysis_provider_empty_response: '模型服务没有返回可用的结果，请检查服务兼容性和状态。',
   analysis_tool_arguments_invalid: '模型工具参数未通过 JSON 或字段校验，本次未执行该调用。',
@@ -324,6 +325,21 @@ function eventLabel(item: Analysis['events'][number]) {
       const metadata = JSON.parse(item.agent) as { truncated?: boolean; output_tokens?: number; finish_reason?: string };
       return `${metadata.truncated ? '模型输出被截断' : '收到模型响应'}${metadata.output_tokens !== undefined ? ` · 输出 ${metadata.output_tokens} tokens` : ''}`;
     } catch { return '收到模型响应'; }
+  }
+  if (item.kind === 'provider_tool_call_compatibility') {
+    try {
+      const detail = JSON.parse(item.agent) as { status?: string; reason?: string; normalized?: number };
+      const reasons: Record<string, string> = {
+        ambiguous_legacy_call: '同时包含旧式函数调用', tools_closed: '当前请求未开放函数工具',
+        unsupported_type: '调用类型无法识别', ambiguous_custom_call: '混有自定义工具字段',
+        invalid_call_shape: '调用项不是有效对象',
+        invalid_call_id: '调用 ID 缺失或重复', invalid_function: '函数结构不完整',
+        tool_not_offered: '工具不在本次开放范围内', invalid_arguments_type: '参数字段不是字符串',
+      };
+      return detail.status === 'normalized'
+        ? `协议兼容：已修正 ${detail.normalized ?? 0} 条函数调用的类型标记，继续权限与参数校验`
+        : `协议兼容检查未通过：${reasons[detail.reason ?? ''] ?? '调用结构不符合要求'}，本批未执行`;
+    } catch { return '工具调用协议兼容检查已记录'; }
   }
   if (item.kind === 'provider_structure') {
     try {

@@ -26,7 +26,12 @@ from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .analysis_basis import analysis_current, execution_trigger
-from .analysis_model import REQUEST_TIMEOUT_SECONDS, OutputTruncated, sdk_response_structure
+from .analysis_model import (
+    REQUEST_TIMEOUT_SECONDS,
+    OutputTruncated,
+    ToolCallProtocolError,
+    sdk_response_structure,
+)
 from .analysis_tools import (
     SCOPE_BATCH_SIZE,
     TOOL_ROLES,
@@ -806,6 +811,7 @@ def failure_code(exc):
         (MaxTurnsExceeded, "analysis_max_turns_exceeded"),
         (ModelRefusalError, "analysis_model_refused"),
         (OutputTruncated, "analysis_output_truncated"),
+        (ToolCallProtocolError, "analysis_tool_call_protocol_invalid"),
         (ValidationError, "analysis_report_invalid"),
         (TimeoutError, "analysis_deadline_exceeded"),
     ):

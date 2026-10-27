@@ -10,6 +10,7 @@ from agents import FunctionTool, Model, OpenAIChatCompletionsModel, OpenAIRespon
 from agents.exceptions import ModelBehaviorError
 from cryptography.fernet import InvalidToken
 from openai import AsyncOpenAI
+from openai.types.chat import ChatCompletionMessageFunctionToolCall
 
 from .model_providers import ModelProviders, validate_model_config
 from .observability import Telemetry, model_observation, record_event, record_usage
@@ -76,11 +77,98 @@ def finalization_mode(config):
     return "provider_default"
 
 
-class JsonObjectChatModel(OpenAIChatCompletionsModel):
+class ToolCallProtocolError(ModelBehaviorError):
+    """A nonstandard tool call cannot safely be decoded as a native function."""
+
+
+def normalize_function_call_types(response, tools, handoffs, settings, event):
+    """Repair only the discriminator; never guess a tool, ID or argument value."""
+    if not response.choices:
+        return response
+    choice = response.choices[0]
+    message = choice.message
+    calls = message.tool_calls or []
+    unknown = [call for call in calls if getattr(call, "type", None) not in ("function", "custom")]
+    if not unknown:
+        return response
+
+    def reject(reason):
+        event("provider_tool_call_compatibility", json.dumps({
+            "status": "rejected", "reason": reason, "calls": len(calls), "normalized": 0,
+        }))
+        raise ToolCallProtocolError("Provider function tool call type is invalid.")
+
+    # A refusal remains a refusal. Let the SDK and original stage gates handle it.
+    if message.refusal or choice.finish_reason == "content_filter":
+        return response
+    if message.function_call is not None:
+        reject("ambiguous_legacy_call")
+    allowed = {tool.name for tool in tools if isinstance(tool, FunctionTool)}
+    allowed.update(handoff.tool_name for handoff in handoffs)
+    selection = settings.tool_choice
+    if selection == "none" or not allowed:
+        reject("tools_closed")
+    if selection not in (None, "auto", "required"):
+        allowed.intersection_update({selection} if isinstance(selection, str) else set())
+
+    normalized, ids = [], set()
+    for call in calls:
+        if not callable(getattr(call, "model_dump", None)):
+            reject("invalid_call_shape")
+        raw = call.model_dump(warnings=False)
+        label, call_id, function = raw.get("type"), raw.get("id"), raw.get("function")
+        if not isinstance(label, str) or not label.strip() or label == "custom":
+            reject("unsupported_type")
+        if raw.get("custom") is not None:
+            reject("ambiguous_custom_call")
+        if not isinstance(call_id, str) or not call_id.strip() or call_id in ids:
+            reject("invalid_call_id")
+        ids.add(call_id)
+        if not isinstance(function, dict):
+            reject("invalid_function")
+        name, arguments = function.get("name"), function.get("arguments")
+        if not isinstance(name, str) or name not in allowed:
+            reject("tool_not_offered")
+        if not isinstance(arguments, str):
+            reject("invalid_arguments_type")
+        # Preserve the exact argument string, including invalid JSON, so existing
+        # schema validation and bounded parameter correction still own that path.
+        normalized.append(ChatCompletionMessageFunctionToolCall.model_validate(
+            {**raw, "type": "function"}, strict=True,
+        ))
+    event("provider_tool_call_compatibility", json.dumps({
+        "status": "normalized", "reason": "function_shape", "calls": len(calls),
+        "normalized": len(unknown),
+    }))
+    updated = choice.model_copy(update={
+        "message": message.model_copy(update={"tool_calls": normalized}),
+    })
+    return response.model_copy(update={"choices": [updated, *response.choices[1:]]})
+
+
+class CompatibleChatModel(OpenAIChatCompletionsModel):
+    """Normalize native tool discriminators before the pinned SDK converter."""
+
+    def __init__(self, model, client, *, event=lambda *_: None):
+        super().__init__(model, client)
+        self.event = event
+
+    async def _fetch_response(self, system_instructions, input, model_settings, tools,
+                              output_schema, handoffs, span, tracing, stream=False, prompt=None):
+        response = await super()._fetch_response(
+            system_instructions, input, model_settings, tools, output_schema, handoffs,
+            span, tracing, stream=stream, prompt=prompt,
+        )
+        if stream:
+            return response
+        return normalize_function_call_types(response, tools, handoffs, model_settings, self.event)
+
+
+class JsonObjectChatModel(CompatibleChatModel):
     """Use provider JSON mode while retaining the SDK's strict output schema."""
 
     def __init__(self, model, client, *, fast_finalization=False, event=lambda *_: None):
-        super().__init__(model, client)
+        super().__init__(model, client, event=event)
         self.fast_finalization, self.event = fast_finalization, event
 
     async def get_response(self, *args, **kwargs):
@@ -645,18 +733,17 @@ class AnalysisModel:
                     ),
                 ))
                 if deepseek_chat_compatibility(config):
-                    delegate = DeepSeekChatModel(config["model"], client)
+                    delegate = DeepSeekChatModel(config["model"], client, event=event)
                 elif protocol == "json_object":
                     delegate = JsonObjectChatModel(
                         config["model"], client,
                         fast_finalization=finalization_mode(config) == "glm47_direct", event=event,
                     )
                 else:
-                    adapter = (
-                        OpenAIResponsesModel if config["api"] == "responses"
-                        else OpenAIChatCompletionsModel
-                    )
-                    delegate = adapter(config["model"], client)
+                    delegate = (OpenAIResponsesModel(config["model"], client)
+                                if config["api"] == "responses" else CompatibleChatModel(
+                                    config["model"], client, event=event,
+                                ))
                 models[role] = ObservedModel(
                     delegate, observation,
                     trace_config={"model": config["model"], "api": config["api"],
