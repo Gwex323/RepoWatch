@@ -19,6 +19,7 @@ type Repair = {
   workspace_recovery_available?: boolean;
   verification_recovery_available?: boolean;
   review_evidence_recovery_available?: boolean;
+  handoff_recovery_available?: boolean;
   verification_resume_available?: boolean;
   publication_retry_available?: boolean;
   docker_recovery_available?: boolean;
@@ -41,6 +42,9 @@ const labels: Record<string, string> = {
   tool_selection_retry: '工具选择不符合当前阶段，整批未执行，正在纠正',
   submission_recovery: '已使用新版提交校验策略的一次恢复机会',
   owner_model_retry: '用户已授权更换修复模型后额外续跑一次',
+  backend_handoff: '测试通过，系统已触发独立审查交接',
+  backend_review_evidence: '系统正在向审查提供真实验证证据',
+  handoff_recovery: '使用保存的补丁复验并恢复独立审查',
   cancelled: '已关闭', false_positive: '误报 · 用户已确认，已关闭',
   queued: '等待修复', waiting_environment: '等待 Docker 环境', running: '修复执行中',
   failed: '修复未完成', interrupted: '修复已中断',
@@ -374,6 +378,8 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
             ? 'repair_review_evidence_required' : task.error)}</p>}
       {task.review_evidence_recovery_available && task.can_retry &&
         <p>补丁已通过测试，但旧版审查遗漏证据读取。可额外恢复一次：重新验证已保存补丁后继续独立审查。</p>}
+      {task.handoff_recovery_available && task.can_retry &&
+        <p>补丁已验证，旧版模型未完成交接。可恢复一次：保留当前补丁和历史，复验后由系统触发独立审查。</p>}
       {task.timeout_recovery_available && task.can_retry &&
         <p>超时策略已更新，此任务可额外重试一次。</p>}
       {task.source_read_recovery_available && task.can_retry &&
@@ -427,7 +433,7 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
           void api(`/repairs/${task.id}/retry`, { version: task.version })
             .then(() => api<Repair[]>(`/environments/${envId}/repairs`)).then(setTasks)
             .catch(e => setError(message(e.message))).finally(() => setBusy(''));
-        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.submission_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available || task.review_evidence_recovery_available
+        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.submission_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available || task.review_evidence_recovery_available || task.handoff_recovery_available
           ? '使用新策略重试' : task.publication_retry_available ? '仅重试发布' : task.docker_recovery_available ? '继续修复' : task.status === 'waiting_environment' ? '检查并继续' : '重试修复'}</button>}
       {task.diff && <details><summary>代码差异</summary><pre>{task.diff}</pre></details>}
       {task.verification && <details><summary>修复验证记录</summary>
