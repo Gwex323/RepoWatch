@@ -107,7 +107,7 @@ def test_saved_glm_config_preserves_reads_handoffs_and_report_validation(
                 packet = json.loads(payload["messages"][1]["content"])
                 assert packet["execution_was_read"] is True
                 assert packet["source_evidence"][0]["source_blocks"] == [
-                    {"line": 1, "text": "print('ok')"},
+                    {"start_line": 1, "end_line": 1, "text": "print('ok')"},
                 ]
             message, reason = {"content": content}, "stop"
         return httpx.Response(200, json={
