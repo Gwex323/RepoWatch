@@ -4,7 +4,7 @@ import json
 
 MAX_REQUESTS = 32
 MAX_SECONDS = 1800
-RECOVERY_DELAYS = (10, 30)
+RECOVERY_DELAYS = (10, 30, 60)
 RETRY_FIELDS = ("used", "output_used", "format_used", "evidence_used",
                 "required_read_used", "tool_arguments_used")
 RECOVERABLE = frozenset({

@@ -4,11 +4,13 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import pytest
 from test_analysis_report_recovery import RecoveryEngine
 from test_execution import service  # noqa: F401
 from test_repository_analysis import prepare_tested
 
 from repowatch.repository_analysis import Analyses, report_diagnostics
+from repowatch.store import Conflict
 
 
 def failed_review(execution_fixture):
@@ -78,7 +80,7 @@ def test_automatic_retries_keep_the_same_persistent_budget_and_stop_at_limit(ser
     analysis_id = queued["id"]
     initial_requests = queued["automatic_recovery"]["requests"]
 
-    for expected_resume in (2, 2):
+    for expected_resume in (2, 3, 3):
         with analyses.store.connection() as db:
             db.execute("UPDATE analysis_report_recovery SET retry_after=0 "
                        "WHERE analysis_id=?", (analysis_id,))
@@ -90,8 +92,48 @@ def test_automatic_retries_keep_the_same_persistent_budget_and_stop_at_limit(ser
     assert stopped["status"] == "failed"
     assert stopped["automatic_recovery"]["state"] == "stopped"
     assert stopped["automatic_recovery"]["stop_reason"] == "resumption_limit"
-    assert stopped["automatic_recovery"]["requests"] == initial_requests + 2
+    assert stopped["automatic_recovery"]["max_resumptions"] == 3
+    assert stopped["automatic_recovery"]["requests"] == initial_requests + 3
     assert stopped["report"] is None
-    assert sum(event["kind"] == "report_recovery_scheduled"
-               for event in stopped["events"]) == 2
+    scheduled = [json.loads(event["agent"]) for event in stopped["events"]
+                 if event["kind"] == "report_recovery_scheduled"]
+    assert [item["delay_seconds"] for item in scheduled] == [10, 30, 60]
     assert stopped["events"][-1]["kind"] == "report_recovery_stopped"
+
+    with pytest.raises(Conflict, match="analysis_recovery_budget_exhausted"):
+        analyses.retry(analysis_id, stopped["version"])
+    rejected = analyses.get(analysis_id)["automatic_recovery"]
+    for key in ("requests", "resumptions", "deadline", "retry_budget", "state"):
+        assert rejected[key] == stopped["automatic_recovery"][key]
+
+
+def test_third_manual_continuation_preserves_existing_budget_after_restart(service):  # noqa: F811
+    analyses, engine, queued = failed_review(service)
+    analysis_id = queued["id"]
+    with analyses.store.connection() as db:
+        before = dict(db.execute("SELECT * FROM analysis_report_recovery WHERE analysis_id=?",
+                                 (analysis_id,)).fetchone())
+        db.execute("UPDATE repository_analyses SET status='failed',version=version+1 WHERE id=?",
+                   (analysis_id,))
+        db.execute("UPDATE analysis_report_recovery SET state='stopped',resumptions=2,"
+                   "retry_after=0,stop_reason='resumption_limit' WHERE analysis_id=?",
+                   (analysis_id,))
+
+    restarted = Analyses(analyses.execution, engine)
+    failed = restarted.get(analysis_id)
+    retried = restarted.retry(analysis_id, failed["version"])
+    assert retried["status"] == "queued"
+    assert retried["automatic_recovery"]["resumptions"] == 3
+    assert retried["automatic_recovery"]["max_resumptions"] == 3
+    assert retried["automatic_recovery"]["requests"] == before["requests"]
+    with restarted.store.connection() as db:
+        after = dict(db.execute("SELECT * FROM analysis_report_recovery WHERE analysis_id=?",
+                                (analysis_id,)).fetchone())
+    assert after["deadline"] == before["deadline"]
+    assert after["retry_budget"] == before["retry_budget"]
+
+    engine.fail = False
+    asyncio.run(restarted.tick())
+    completed = restarted.get(analysis_id)
+    assert completed["status"] == "completed", completed["error"]
+    assert completed["automatic_recovery"]["requests"] == before["requests"] + 1

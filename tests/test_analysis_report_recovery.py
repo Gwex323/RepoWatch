@@ -35,10 +35,13 @@ def state(value):
 def test_output_budget_grows_with_scope_and_historical_items_and_stays_bounded():
     small = output_budget(context())
     scoped = output_budget({"task_scope": {"items": [{}] * 6}})
+    medium = output_budget({"task_scope": {"items": [{}] * 6},
+                            "historical_findings": {"items": [{}] * 8}})
     large = output_budget({"task_scope": {"items": [{}] * 6},
-                           "historical_findings": {"items": [{}] * 8}})
+                           "historical_findings": {"items": [{}] * 200}})
     assert small == {"max_tokens": 5000, "reserve_seconds": 260, "review_items": 0}
-    assert small["max_tokens"] < scoped["max_tokens"] < large["max_tokens"] == 12000
+    assert small["max_tokens"] < scoped["max_tokens"] < medium["max_tokens"] == 12800
+    assert medium["max_tokens"] < large["max_tokens"] == 100000
     assert 240 < scoped["reserve_seconds"] <= large["reserve_seconds"] <= 360
 
 
@@ -341,11 +344,17 @@ def test_reviewer_reads_refresh_checkpoint_before_the_next_request():
     assert sum(kind == "source" for kind, _ in events) == 2
 
 
-@pytest.mark.parametrize("error,limit", [(OutputTruncated, 12000), (TimeoutError, 7600)])
-def test_finalization_retry_uses_compact_input_and_bounded_budget(monkeypatch, error, limit):
+@pytest.mark.parametrize("error,items,initial,limit", [
+    (OutputTruncated, 6, 7600, 15200),
+    (OutputTruncated, 90, 62200, 100000),
+    (TimeoutError, 6, 7600, 7600),
+])
+def test_finalization_retry_uses_compact_input_and_bounded_budget(
+    monkeypatch, error, items, initial, limit,
+):
     monkeypatch.setattr("repowatch.repository_analysis.RETRY_DELAY_SECONDS", 0)
     value, calls, events = context(), [], []
-    value["task_scope"] = {"items": [{"key": f"item_{i}"} for i in range(6)]}
+    value["task_scope"] = {"items": [{"key": f"item_{i}"} for i in range(items)]}
     model = ReviewModel()
     original = model.get_response
 
@@ -359,11 +368,11 @@ def test_finalization_retry_uses_compact_input_and_bounded_budget(monkeypatch, e
     model.get_response = respond
     report = asyncio.run(run_analysis(model, value, lambda *event: events.append(event)))
     assert len(calls) == 2 and len(report["handoffs"]) == 3
-    assert calls[0]["model_settings"].max_tokens == 7600
+    assert calls[0]["model_settings"].max_tokens == initial
     assert calls[1]["model_settings"].max_tokens == limit
     assert calls[1]["model_settings"].tool_choice == "none" and not calls[1]["tools"]
     packet = json.loads(calls[1]["input"])
-    assert len(packet["run_context"]["task_scope"]["items"]) == 6
+    assert len(packet["run_context"]["task_scope"]["items"]) == items
     assert any(kind == "review_checkpoint" for kind, _ in events)
 
 
