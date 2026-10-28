@@ -3,6 +3,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import patch as mock_patch
 
 import pytest
 from agents import ModelResponse, ModelSettings, Usage
@@ -21,7 +22,7 @@ from test_repairs import (
     pending as repair_pending,
 )
 
-from repowatch.repair_model import RepairStageModel, run_repair
+from repowatch.repair_model import RepairStageModel, run_repair, sdk_control_call
 from repowatch.store import Conflict
 
 
@@ -30,37 +31,38 @@ def pending(service):  # noqa: F811
     return repair_pending.__wrapped__(service)
 
 
+def review_response(approved=True):
+    return ModelResponse(output=[ResponseOutputMessage(
+        id="review_fixture", type="message", role="assistant", status="completed",
+        content=[ResponseOutputText(
+            type="output_text", annotations=[], text=json.dumps({
+                "approved": approved, "summary": "Synthetic review only.", "risks": [],
+            }),
+        )],
+    )], usage=Usage(requests=1), response_id=None)
+
+
+def omit_evidence_control(name):
+    # Simulate a broken/missing SDK action, not a successful evidence read.
+    if name == "read_repair_verification":
+        response = review_response()
+        response.usage = Usage()
+        return response
+    return sdk_control_call(name)
+
+
 class EarlyReview(RepairModel):
-    def __init__(self, *, persistent=False, approved=True, before_read=None):
+    def __init__(self, *, approved=True):
         super().__init__()
-        self.persistent, self.approved = persistent, approved
+        self.approved = approved
         self.review_requests = []
-        self.before_read = before_read
 
     async def get_response(self, system_instructions, input, **kwargs):
         reviewing = any(t.name == "read_repair_verification" for t in kwargs["tools"])
         if not reviewing and not self.review_requests:
             return await super().get_response(system_instructions, input, **kwargs)
         self.review_requests.append((system_instructions, input, kwargs))
-        count = len(self.review_requests)
-        if count == 2 and not self.persistent:
-            if self.before_read:
-                self.before_read()
-            output = ResponseFunctionToolCall(
-                id="evidence", call_id="evidence", type="function_call",
-                name="read_repair_verification", arguments="{}",
-            )
-        else:
-            output = ResponseOutputMessage(
-                id=f"early_{count}", type="message", role="assistant", status="completed",
-                content=[ResponseOutputText(
-                    type="output_text", annotations=[], text=json.dumps({
-                        "approved": self.approved, "summary": "Synthetic review only.",
-                        "risks": [],
-                    }),
-                )],
-            )
-        return ModelResponse(output=[output], usage=Usage(requests=1), response_id=None)
+        return review_response(self.approved)
 
 
 def install_model(repairs, model):
@@ -70,7 +72,7 @@ def install_model(repairs, model):
 
 
 @pytest.mark.parametrize("approved", [True, False])
-def test_early_review_is_discarded_and_real_evidence_read_precedes_final_review(pending, approved):
+def test_backend_reads_real_evidence_before_provider_review(pending, approved):
     repairs, _, _, runtime, publisher = pending
     task = confirm(pending)
     enable(repairs)
@@ -78,20 +80,26 @@ def test_early_review_is_discarded_and_real_evidence_read_precedes_final_review(
     install_model(repairs, model)
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert len(model.review_requests) == (3 if approved else 4)
+    assert len(model.review_requests) == (1 if approved else 2)
     if not approved:
         # The runner returns to repair; this evidence-only fake declines to revise.
         retry = model.review_requests[-1][2]
         assert any(tool.name == "submit_and_test_repair" for tool in retry["tools"])
         assert retry["output_schema"] is None and not retry["handoffs"]
-    for instructions, _, kwargs in model.review_requests[:2]:
-        assert kwargs["model_settings"].tool_choice == "read_repair_verification"
-        assert [t.name for t in kwargs["tools"]] == ["read_repair_verification"]
-        assert kwargs["output_schema"] is None
-        assert "exactly one JSON object" not in instructions
-    assert sum(e["kind"] == "review_evidence_retry" for e in result["events"]) == 1
+    instructions, evidence_input, kwargs = model.review_requests[0]
+    assert kwargs["output_schema"] is not None and not kwargs["handoffs"]
+    assert "exactly one JSON object" in instructions
+    assert "read_repair_verification" in json.dumps(evidence_input)
+    assert "1 test passed" in json.dumps(evidence_input)
+    assert sum(e["kind"] == "backend_review_evidence" for e in result["events"]) == 1
+    assert not any(e["kind"] == "review_evidence_retry" for e in result["events"])
     assert sum(e["kind"] == "tool_call" and e["value"] == "read_repair_verification"
                for e in result["events"]) == 1
+    read_index = next(i for i, e in enumerate(result["events"])
+                      if e["kind"] == "tool_call" and e["value"] == "read_repair_verification")
+    review_index = next(i for i, e in enumerate(result["events"])
+                        if e["kind"] == "model_call" and e["value"] == "independent_reviewer")
+    assert read_index < review_index
     assert result["verification"]["passed"] is True and len(runtime.test_calls) == 7
     assert result["status"] == ("pr_created" if approved else "failed")
     assert bool(publisher.calls) == approved
@@ -99,31 +107,55 @@ def test_early_review_is_discarded_and_real_evidence_read_precedes_final_review(
         assert result["error"] == "repair_review_rejected"
 
 
-def test_persistent_early_review_never_counts_as_evidence_or_publishes(pending):
+@pytest.mark.parametrize("missing", ["handoff", "evidence"])
+def test_missing_backend_control_action_cannot_publish(pending, monkeypatch, missing):
     repairs, _, _, _, publisher = pending
     task = confirm(pending)
     enable(repairs)
-    model = EarlyReview(persistent=True)
+    model = EarlyReview()
     install_model(repairs, model)
+    target = ("transfer_to_independent_reviewer" if missing == "handoff"
+              else "read_repair_verification")
+
+    def omit(name):
+        if name == target:
+            response = review_response()
+            response.usage = Usage()
+            return response
+        return sdk_control_call(name)
+
+    monkeypatch.setattr("repowatch.repair_model.sdk_control_call", omit)
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert result["error"] == "repair_review_evidence_required"
+    assert result["error"] == ("repair_handoff_incomplete" if missing == "handoff"
+                               else "repair_review_evidence_required")
     assert result["verification"]["passed"] is True and result["review"] is None
-    assert len(model.review_requests) == 2 and not publisher.calls
+    assert not model.review_requests and not publisher.calls
+    assert bool([e for e in result["events"] if e["kind"] == "handoff"]) == (missing != "handoff")
     assert not any(e["kind"] == "tool_call" and e["value"] == "read_repair_verification"
                    for e in result["events"])
 
 
-def test_pause_during_evidence_correction_stops_before_tool_and_publication(pending):
+def test_pause_before_backend_evidence_read_stops_before_tool_and_publication(pending, monkeypatch):
     repairs, _, _, _, publisher = pending
     task = confirm(pending)
     enable(repairs)
-    model = EarlyReview(before_read=lambda: repairs.configure(repairs.settings()["version"], False))
+    model = EarlyReview()
     install_model(repairs, model)
+
+    def pause(name):
+        if name == "read_repair_verification":
+            repairs.configure(repairs.settings()["version"], False)
+        return sdk_control_call(name)
+
+    monkeypatch.setattr("repowatch.repair_model.sdk_control_call", pause)
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
     assert result["error"] == "repair_paused" and not publisher.calls
     assert result["review"] is None
+    assert not model.review_requests
+    assert not any(e["kind"] == "tool_call" and e["value"] == "read_repair_verification"
+                   for e in result["events"])
 
 
 def old_evidence_failure(pending):
@@ -133,8 +165,14 @@ def old_evidence_failure(pending):
     with repairs.store.connection() as db:
         db.execute("UPDATE repair_tasks SET attempt=2 WHERE id=?", (task["id"],))
     repairs.event(task["id"], "retry", "3")
-    install_model(repairs, EarlyReview(persistent=True))
-    asyncio.run(repairs.tick())
+    install_model(repairs, EarlyReview())
+    with mock_patch("repowatch.repair_model.sdk_control_call", side_effect=omit_evidence_control):
+        asyncio.run(repairs.tick())
+    failed = repairs.get(task["id"])
+    assert failed["error"] == "repair_review_evidence_required" and not failed["review"]
+    assert failed["verification"]["passed"] and failed["remote"] is None
+    assert not any(e["kind"] == "tool_call" and e["value"] == "read_repair_verification"
+                   for e in failed["events"])
     with repairs.store.connection() as db:
         row = db.execute("SELECT * FROM repair_tasks WHERE id=?", (task["id"],)).fetchone()
         context = json.loads(row["context"])
@@ -155,14 +193,15 @@ def test_old_exhausted_review_retains_patch_and_revalidates_before_native_handof
     assert queued["context"]["resume_verification"]
     assert queued["attempt"] == 3
     assert queued["attempts"][-1]["error"] == "repair_handoff_incomplete"
-    # A retained patch permits only the native handoff, evidence read and final review.
+    # A retained patch uses backend SDK control and only one provider review request.
     model = RepairModel()
     model.calls = 2
     install_model(repairs, model)
     asyncio.run(repairs.tick())
     result = repairs.get(failed["id"])
     assert result["status"] == "pr_created" and result["attempt"] == 4
-    assert model.calls == 5 and len(runtime.test_calls) == calls + 7
+    assert model.calls == 3 and len(model.requests) == 1
+    assert len(runtime.test_calls) == calls + 7
     assert result["diff"] == failed["diff"] and len(publisher.calls) == 1
     assert not result["review_evidence_recovery_available"]
 
@@ -213,11 +252,13 @@ def test_review_recovery_cannot_bypass_gates_or_repeat(pending, case):
 
 
 @pytest.mark.parametrize("failure", ["tests", "source", "review"])
-def test_resumed_patch_still_requires_source_tests_and_independent_review(pending, failure):
+def test_resumed_patch_still_requires_source_tests_and_independent_review(
+    pending, monkeypatch, failure,
+):
     repairs, _, report, runtime, publisher = pending
     failed = old_evidence_failure(pending)
     repairs.retry(failed["id"], failed["version"])
-    model = EarlyReview(persistent=True)
+    model = EarlyReview()
     model.calls = 2
     install_model(repairs, model)
     if failure == "tests":
@@ -225,6 +266,8 @@ def test_resumed_patch_still_requires_source_tests_and_independent_review(pendin
     if failure == "source":
         source = repairs.execution.directory(report["env_id"]) / "source/app.py"
         source.write_text("print('changed')\n")
+    if failure == "review":
+        monkeypatch.setattr("repowatch.repair_model.sdk_control_call", omit_evidence_control)
     asyncio.run(repairs.tick())
     result = repairs.get(failed["id"])
     assert result["error"] == {
@@ -239,11 +282,11 @@ def test_resumed_patch_still_requires_source_tests_and_independent_review(pendin
         assert not result["review_evidence_recovery_available"]
 
 
-def test_evidence_gate_discards_entire_parallel_tool_batch(pending):
+def test_review_rejects_entire_parallel_tool_batch_after_trusted_evidence(pending):
     repairs, _, _, _, publisher = pending
     task = confirm(pending)
     enable(repairs)
-    model = EarlyReview(persistent=True)
+    model = EarlyReview()
     delegate = model.get_response
 
     async def batch(*args, **kwargs):
@@ -259,9 +302,14 @@ def test_evidence_gate_discards_entire_parallel_tool_batch(pending):
     install_model(repairs, model)
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert result["error"] == "repair_review_evidence_required" and not publisher.calls
-    assert not any(e["kind"] == "tool_call" and e["value"] == "read_repair_verification"
-                   for e in result["events"])
+    assert result["error"] == "repair_tool_selection_invalid" and not publisher.calls
+    assert result["review"] is None and len(model.review_requests) == 2
+    assert sum(e["kind"] == "tool_selection_retry" for e in result["events"]) == 1
+    # Exactly the original source read and trusted backend read executed;
+    # neither item in either rejected parallel provider response executed.
+    assert [e["value"] for e in result["events"] if e["kind"] == "tool_call"] == [
+        "read_repair_source", "submit_and_test_repair", "read_repair_verification",
+    ]
 
 
 def test_review_evidence_gate_does_not_extend_exploration_budget():
@@ -273,5 +321,6 @@ def test_review_evidence_gate_does_not_extend_exploration_budget():
     )
     model.turns = 3
     with pytest.raises(Conflict, match="repair_review_evidence_required"):
-        asyncio.run(model.get_response("", [], handoffs=[], model_settings=ModelSettings()))
+        asyncio.run(model.get_response("", [], handoffs=[], tools=[],
+                                       model_settings=ModelSettings()))
     assert delegate.calls == 0

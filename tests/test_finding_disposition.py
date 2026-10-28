@@ -128,7 +128,7 @@ def test_confirmed_finding_disposition_cancels_queued_repair(service):  # noqa: 
                             (repair["id"],)).fetchall()
     assert repair["status"] == "cancelled"
     assert [(item["kind"], item["value"]) for item in events] == [
-        ("queued", "confirmed_finding"), ("cancelled", "finding_disposition"),
+        ("queued", "confirmed_finding"), ("cancelled", "not_reproduced"),
     ]
 
 

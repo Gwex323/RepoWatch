@@ -378,10 +378,15 @@ def test_docker_recovery_retains_patch_and_revalidates_before_native_review(pend
     final = repairs.get(task["id"])
     if outcome == "passed":
         assert final["status"] == "pr_created" and len(publisher.calls) == 1
-        assert len(models) == 1 and len(models[0].requests) == 3
-        assert models[0].requests[0]["model_settings"].tool_choice == (
-            "transfer_to_independent_reviewer"
-        )
+        assert len(models) == 1 and len(models[0].requests) == 1
+        assert models[0].requests[0]["output_schema"] is not None
+        assert not models[0].requests[0]["handoffs"]
+        assert [e["value"] for e in final["events"] if e["kind"] == "handoff"] == [
+            "repair_agent -> independent_reviewer",
+        ]
+        assert sum(e["kind"] == "backend_review_evidence" for e in final["events"]) == 1
+        assert sum(e["kind"] == "tool_call" and e["value"] == "read_repair_verification"
+                   for e in final["events"]) == 1
         assert len(runtime.test_calls) == 7
         assert final["patch"] == failed["patch"]
     else:
@@ -439,7 +444,7 @@ def test_verified_retry_never_silently_rebinds_account(pending):
     assert repairs.get(task["id"])["status"] == "failed"
 
 
-def test_native_handoff_cannot_be_replaced_by_final_success_text(pending):
+def test_verified_patch_uses_backend_handoff_when_provider_would_omit_it(pending):
     repairs, _, _, _, publisher = pending
     task = confirm(pending)
     enable(repairs)
@@ -450,8 +455,12 @@ def test_native_handoff_cannot_be_replaced_by_final_success_text(pending):
     repairs.engine.repair = incomplete
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert result["error"] == "repair_handoff_incomplete"
-    assert not publisher.calls
+    assert result["status"] == "pr_created" and len(publisher.calls) == 1
+    assert result["verification"]["passed"] is True and result["review"]["approved"] is True
+    assert [e["value"] for e in result["events"] if e["kind"] == "handoff"] == [
+        "repair_agent -> independent_reviewer",
+    ]
+    assert sum(e["kind"] == "backend_handoff" for e in result["events"]) == 1
 
 
 def test_tool_failure_unwraps_only_safe_error_codes(pending):
@@ -509,7 +518,7 @@ def test_review_format_correction_is_bounded_and_cannot_publish_invalid_review(p
 
     async def malformed(*args, **kwargs):
         result = await delegate(*args, **kwargs)
-        if model.calls == 5 or not correct and model.calls > 5:
+        if model.calls == 3 or not correct and model.calls > 3:
             result.output[0].content[0].text = '{"approved": "true"}'
         return result
 
@@ -522,25 +531,33 @@ def test_review_format_correction_is_bounded_and_cannot_publish_invalid_review(p
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
     assert sum(e["kind"] == "format_retry" for e in result["events"]) == 1
-    assert model.calls == 6
+    assert model.calls == 4
     if correct:
         assert result["status"] == "pr_created" and len(publisher.calls) == 1
     else:
         assert result["error"] == "repair_output_invalid" and not publisher.calls
 
 
-@pytest.mark.parametrize("role,turns", [("repair_agent", 7), ("independent_reviewer", 4)])
-def test_model_stage_budget_prevents_unbounded_provider_calls(pending, role, turns):
+@pytest.mark.parametrize("role,turns,corrections", [
+    ("repair_agent", 11, 0), ("independent_reviewer", 4, 0),
+    ("repair_agent", 17, 1),
+])
+def test_model_stage_budget_prevents_unbounded_provider_calls(pending, role, turns, corrections):
     repairs, _, report, _, _ = pending
     workspace = RepairWorkspace(
         repairs.execution, "repair_" + "e" * 16, repairs.execution.get(report["env_id"]),
         lambda: None,
     )
     delegate = RepairModel()
-    model = RepairStageModel(delegate, role, workspace, lambda *args: None, dict, {"timeouts": 0})
+    model = RepairStageModel(
+        delegate, role, workspace, lambda *args: None,
+        lambda: {"verification_read": True},
+        {"timeouts": 0, "verification_corrections": corrections, "review_corrections": corrections},
+    )
     model.turns = turns
     with pytest.raises(Conflict, match="repair_model_budget"):
-        asyncio.run(model.get_response("", [], handoffs=[], model_settings=ModelSettings()))
+        asyncio.run(model.get_response("", [], handoffs=[], tools=[],
+                                       model_settings=ModelSettings()))
     assert delegate.calls == 0
 
 
@@ -577,7 +594,9 @@ def test_truncated_repair_never_executes_partial_tools_and_preserves_handoff(pen
         assert not result["patch"] and not runtime.test_calls and not publisher.calls
     else:
         assert result["status"] == "pr_created" and len(publisher.calls) == 1
-        assert requests[3][2] == "low" and requests[-1][2] == "high"
+        # Backend handoff and evidence reads do not consume provider requests;
+        # the first review request has its own saved reasoning preference.
+        assert [request[2] for request in requests] == ["high", "high", "low", "high"]
         assert [e["value"] for e in result["events"] if e["kind"] == "handoff"] == [
             "repair_agent -> independent_reviewer",
         ]
@@ -602,7 +621,7 @@ def test_output_retries_share_a_run_budget(pending):
     for count in range(3):
         model = RepairStageModel(delegate, "repair_agent", workspace, lambda *_: None, dict,
                                  budget)
-        call = model.get_response("", [], handoffs=[], model_settings=ModelSettings())
+        call = model.get_response("", [], handoffs=[], tools=[], model_settings=ModelSettings())
         if count == 2:
             with pytest.raises(Conflict, match="repair_output_truncated"):
                 asyncio.run(call)
@@ -711,7 +730,9 @@ def test_slow_repair_reply_can_exceed_old_timeout_and_emits_safe_timing(pending,
     monkeypatch.setattr("repowatch.repair_model.asyncio.wait_for", scaled_wait)
     model = RepairStageModel(delegate, "repair_agent", workspace,
                             lambda *args: events.append(args), dict, {"timeouts": 0})
-    asyncio.run(model.get_response("", [], handoffs=[], model_settings=ModelSettings()))
+    asyncio.run(model.get_response("", [], handoffs=[],
+                                   tools=[SimpleNamespace(name="read_repair_source")],
+                                   model_settings=ModelSettings()))
     assert limits == [450] and delegate.calls == 1
     assert [kind for kind, _ in events] == ["model_call", "request_started", "request_completed"]
     assert json.loads(events[-1][1])["elapsed_seconds"] >= 0
@@ -738,7 +759,7 @@ def test_real_wait_timeout_cancels_requests_and_never_logs_provider_text(pending
     model = RepairStageModel(delegate, "repair_agent", workspace,
                             lambda *args: events.append(args), dict, {"timeouts": 0})
     with pytest.raises(Conflict, match="repair_model_timeout"):
-        asyncio.run(model.get_response("private prompt", [], handoffs=[],
+        asyncio.run(model.get_response("private prompt", [], handoffs=[], tools=[],
                                        model_settings=ModelSettings()))
     assert len(cancelled) == 2
     assert sum(kind == "request_timeout" for kind, _ in events) == 2
@@ -1227,7 +1248,9 @@ def test_unverified_repair_cannot_offer_or_invoke_review_handoff(pending, invali
     repairs.engine.repair = repair
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert result["error"] == "repair_verification_required"
+    assert result["error"] == "repair_tool_selection_invalid"
+    assert len(calls) == (4 if invalid_first else 2)
+    assert sum(e["kind"] == "tool_selection_retry" for e in result["events"]) == 1
     assert not result["verification"] and not result["patch"]
     assert not runtime.test_calls and not publisher.calls
     assert not any(e["kind"] == "handoff" for e in result["events"])
