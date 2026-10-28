@@ -190,8 +190,15 @@ class FindingFeedbackBody(StrictBody):
 
 class FindingDispositionBody(StrictBody):
     version: int = Field(ge=1, strict=True)
-    decision: Literal["not_reproduced", "resolved"]
+    decision: Literal["not_reproduced", "resolved", "false_positive"]
     note: str = Field(default="", max_length=2000)
+
+
+class FindingContinuationBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    target_analysis_id: str = Field(min_length=1, max_length=100)
+    analysis_version: int = Field(ge=1, strict=True)
+    note: str = Field(min_length=1, max_length=2000)
 
 
 class RepairSettingsBody(StrictBody):
@@ -531,7 +538,9 @@ def create_app(
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
                 "AND t.status='running') AS repair_running,"
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
-                "AND t.status IN ('failed','interrupted')) AS repair_failed,"
+                "AND t.status IN ('failed','interrupted') AND EXISTS "
+                "(SELECT 1 FROM analysis_findings f WHERE f.id=t.finding_id "
+                "AND f.status='confirmed')) AS repair_failed,"
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
                 "AND t.status='pr_created') AS repair_published "
                 "FROM repository_analyses a JOIN repositories r ON r.id=a.repo_id "
@@ -703,6 +712,10 @@ def create_app(
     @app.post("/api/analyses/{analysis_id}/findings/{finding_id}/disposition")
     def finding_disposition(analysis_id: str, finding_id: str, body: FindingDispositionBody):
         return analyses.disposition(analysis_id, finding_id, **body.model_dump())
+
+    @app.post("/api/analyses/{analysis_id}/findings/{finding_id}/continue")
+    def continue_finding(analysis_id: str, finding_id: str, body: FindingContinuationBody):
+        return analyses.continue_finding(analysis_id, finding_id, **body.model_dump())
 
     @app.post("/api/environments/{env_id}/{action}", status_code=202)
     def environment_action(

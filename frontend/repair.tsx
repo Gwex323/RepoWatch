@@ -8,14 +8,18 @@ type Verification = Record<string, { command?: string; exit_code: number; log: s
 type Repair = {
   id: string; finding_id: string; version: number; status: string; stage: string | null;
   attempt: number; error: string | null; enabled: boolean; can_retry: boolean; revision: string;
+  finding_status?: string | null;
+  finding_feedback?: { note: string } | null;
   timeout_recovery_available?: boolean;
   source_read_recovery_available?: boolean;
+  submission_recovery_available?: boolean;
   failure_recovery_available?: boolean;
   output_recovery_available?: boolean;
   protocol_recovery_available?: boolean;
   workspace_recovery_available?: boolean;
   verification_recovery_available?: boolean;
   review_evidence_recovery_available?: boolean;
+  handoff_recovery_available?: boolean;
   verification_resume_available?: boolean;
   publication_retry_available?: boolean;
   docker_recovery_available?: boolean;
@@ -34,6 +38,14 @@ type Repair = {
     review: { summary: string } | null }[];
 };
 const labels: Record<string, string> = {
+  submission_required: '探索已结束，要求提交补丁并验证',
+  tool_selection_retry: '工具选择不符合当前阶段，整批未执行，正在纠正',
+  submission_recovery: '已使用新版提交校验策略的一次恢复机会',
+  owner_model_retry: '用户已授权更换修复模型后额外续跑一次',
+  backend_handoff: '测试通过，系统已触发独立审查交接',
+  backend_review_evidence: '系统正在向审查提供真实验证证据',
+  handoff_recovery: '使用保存的补丁复验并恢复独立审查',
+  cancelled: '已关闭', false_positive: '误报 · 用户已确认，已关闭',
   queued: '等待修复', waiting_environment: '等待 Docker 环境', running: '修复执行中',
   failed: '修复未完成', interrupted: '修复已中断',
   pr_created: 'PR 已创建', repair_agent: '修改代码', independent_reviewer: '独立审查',
@@ -63,6 +75,8 @@ const labels: Record<string, string> = {
 const errors: Record<string, string> = {
   repair_paused: '自动修复已暂停。请在「设置 → 自动修复」中启用后重试。',
   repair_model_required: '请先配置代码修复与独立审查模型，并启用模型工作流。',
+  repair_model_retry_unavailable: '此次模型变更不满足一次续跑的授权条件。',
+  repair_model_changed: '代码修复模型与此次用户授权的配置不一致，本轮已停止。',
   repair_settings_changed: '修复配置已变化，请刷新后重试。',
   repair_stale: '源码、配置或执行证据已变化，需重新分析并复现。',
   repair_source_changed: '本地源码与修复依据不一致，需重新分析。',
@@ -82,6 +96,8 @@ const errors: Record<string, string> = {
   repair_file_unavailable: '所需文件超出可处理范围或无法读取。',
   repair_model_budget: '模型已达到本轮调用预算。',
   repair_read_budget: '源码读取已达到本轮预算。',
+  repair_submission_not_followed: '模型仍未按要求提交补丁，自动纠正已用完，违规调用未执行。',
+  repair_tool_selection_invalid: '模型选择了当前阶段不允许的工具或多个调用，自动纠正已用完，整批未执行。',
   repair_patch_limit: '补丁超过大小限制。',
   repair_source_limit: '源码超过下载范围限制，请重新下载并分析。',
   repair_handoff_incomplete: '修复与独立审查未完成规定交接。',
@@ -283,7 +299,7 @@ export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?:
           onChange={e => setSettings({ ...settings, enabled: e.target.checked })} />自动修复并提交 Issue / PR</label>
         <button className="button secondary" disabled={busy}><Save size={15} />保存修复配置</button>
       </div>
-      <p className="diagnosis-meta">已有 Issue 只提交关联原编号的修复 PR；系统新发现的问题会创建 Issue 和 PR。</p>
+      <p className="diagnosis-meta">已有 Issue 关联原编号；新发现的问题先查找相似 Issue，匹配时补充评论，否则新建 Issue，再提交修复 PR。</p>
       <dl className="repair-facts">
         <div><dt>模型</dt><dd>{(modelEnabled ?? settings.model_enabled) ? '代码修复与独立审查模型已就绪' : '等待修复角色模型配置或启用'}</dd></div>
         <div><dt>每个问题</dt><dd>最多 {settings.max_attempts} 次尝试</dd></div>
@@ -314,7 +330,8 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
       .then(() => api<Repair[]>(`/environments/${envId}/repairs`)).then(setTasks)
       .catch(e => setError(message(e.message))).finally(() => setBusy(''));
   };
-  const publication = (task: Repair) => !!task.remote || !!task.publication_retry_available || task.stage === 'publishing' || (task.context.publication_retries ?? 0) > 0;
+  const publication = (task: Repair) => !!task.remote || (task.finding_status !== 'false_positive' &&
+    (!!task.publication_retry_available || task.stage === 'publishing' || (task.context.publication_retries ?? 0) > 0));
   if (view === 'pr') return <section aria-label="PR 发布结果">
     <h3>PR 与发布</h3>
     {error && <p role="alert">{error}</p>}
@@ -340,29 +357,35 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
     {error && <p role="alert">{error}</p>}
     {tasks.map(task => <article className="repair-task" key={task.id}>
       <div className="section-heading"><h4>{task.context.finding.title}</h4>
-        <span className="tag neutral">{!task.enabled && task.status === 'queued'
+        <span className="tag neutral">{task.finding_status === 'false_positive' ? labels.false_positive : task.finding_status === 'superseded' ? '已转到新版本' : !task.enabled && task.status === 'queued'
           ? '等待启用自动修复' : labels[task.status] ?? task.status}</span></div>
+      {task.finding_status === 'false_positive' && <p role="status">{task.finding_feedback?.note}。已停止该问题的修复；下方补丁与验证仅保留为历史记录。</p>}
+      {task.finding_status === 'superseded' && <p role="status">已转到最新版本的修复记录；本任务保留为历史。</p>}
       <p className="diagnosis-meta">版本 {task.revision.slice(0, 12)} · 已尝试 {task.attempt} 次
         {task.stage && ` · ${labels[task.stage] ?? task.stage}`}</p>
       {task.source_kind === 'existing_issue' && task.source_issue && <p className="diagnosis-meta">
         来源：<a href={task.source_issue.url} target="_blank" rel="noopener noreferrer">
           原 Issue #{task.source_issue.number}</a> · 修复 PR 将关联原编号</p>}
       {task.source_error && task.source_error !== task.error && <p role="alert">{message(task.source_error)}</p>}
-      {task.task_scope && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
+      {task.task_scope && !['false_positive', 'superseded'].includes(task.finding_status ?? '') && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
         {' · '}{task.task_scope.complete ? '当前范围已核验' : task.task_scope.reviewed
           ? '整体尚未完成，部分修复不关闭原 Issue' : '完整性未核验，不自动关闭原 Issue'}</p>}
       {task.status === 'running' && <p><Loader2 size={14} className="spin" />正在处理修复任务</p>}
-      {task.error && !publication(task) && task.status !== 'waiting_environment' && <p role="alert">
+      {task.error && task.finding_status !== 'false_positive' && !publication(task) && task.status !== 'waiting_environment' && <p role="alert">
         {task.error === 'docker_unavailable' && '上次失败：'}{message(task.output_recovery_available
         ? 'repair_output_truncated' : task.protocol_recovery_available
           ? 'repair_verification_required' : task.review_evidence_recovery_available
             ? 'repair_review_evidence_required' : task.error)}</p>}
       {task.review_evidence_recovery_available && task.can_retry &&
         <p>补丁已通过测试，但旧版审查遗漏证据读取。可额外恢复一次：重新验证已保存补丁后继续独立审查。</p>}
+      {task.handoff_recovery_available && task.can_retry &&
+        <p>补丁已验证，旧版模型未完成交接。可恢复一次：保留当前补丁和历史，复验后由系统触发独立审查。</p>}
       {task.timeout_recovery_available && task.can_retry &&
         <p>超时策略已更新，此任务可额外重试一次。</p>}
       {task.source_read_recovery_available && task.can_retry &&
         <p>文件读取策略已更新，此任务可额外重试一次。</p>}
+      {task.submission_recovery_available && task.can_retry &&
+        <p>旧版任务在要求提交后仍继续读取，未产出补丁。提交校验已更新，可恢复一次，原尝试记录保留。</p>}
       {task.failure_recovery_available && task.can_retry &&
         <p>错误处理已更新，此任务可额外重试一次。</p>}
       {task.output_recovery_available && task.can_retry &&
@@ -410,7 +433,7 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
           void api(`/repairs/${task.id}/retry`, { version: task.version })
             .then(() => api<Repair[]>(`/environments/${envId}/repairs`)).then(setTasks)
             .catch(e => setError(message(e.message))).finally(() => setBusy(''));
-        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available || task.review_evidence_recovery_available
+        }}><RefreshCw size={15} />{task.timeout_recovery_available || task.source_read_recovery_available || task.submission_recovery_available || task.failure_recovery_available || task.output_recovery_available || task.protocol_recovery_available || task.workspace_recovery_available || task.verification_recovery_available || task.review_evidence_recovery_available || task.handoff_recovery_available
           ? '使用新策略重试' : task.publication_retry_available ? '仅重试发布' : task.docker_recovery_available ? '继续修复' : task.status === 'waiting_environment' ? '检查并继续' : '重试修复'}</button>}
       {task.diff && <details><summary>代码差异</summary><pre>{task.diff}</pre></details>}
       {task.verification && <details><summary>修复验证记录</summary>

@@ -1239,13 +1239,16 @@ class Analyses:
                 ids = [item["finding_id"] for item in review["items"]]
                 marks = ",".join("?" * len(ids))
                 live = {item["id"]: item for item in db.execute(
-                    f"SELECT id,status,version FROM analysis_findings WHERE id IN ({marks})",
+                    "SELECT id,status,version,feedback FROM analysis_findings "
+                    f"WHERE id IN ({marks})",
                     ids,
                 )}
                 for item in review["items"]:
                     live_finding = live.get(item["finding_id"])
                     item["live_status"] = live_finding["status"] if live_finding else None
                     item["live_version"] = live_finding["version"] if live_finding else None
+                    item["live_feedback"] = (json.loads(live_finding["feedback"])
+                                             if live_finding and live_finding["feedback"] else None)
             result["coverage"] = context.get("coverage")
             result["memory_references"] = context.get("memories", [])
         result["current"] = self.current(row)
@@ -1352,8 +1355,10 @@ class Analyses:
         return self.get(analysis_id)
 
     def disposition(self, analysis_id, finding_id, version, decision, note):
-        if decision not in ("not_reproduced", "resolved"):
+        if decision not in ("not_reproduced", "resolved", "false_positive"):
             raise Conflict("disposition_invalid")
+        if decision == "false_positive" and not note.strip():
+            raise Conflict("false_positive_note_required")
         resolution = None
         if decision == "resolved" and self.repairer is not None:
             # Verify outside the write transaction; the finding CAS below closes the race.
@@ -1374,7 +1379,9 @@ class Analyses:
                 raise Missing("Finding not found.")
             if finding["version"] != version:
                 raise Conflict("finding_changed")
-            if finding["status"] not in ("waiting_reproduction", "confirmed"):
+            if (finding["status"] not in ("waiting_reproduction", "confirmed")
+                    and not (decision == "false_positive"
+                             and finding["status"] == "not_reproduced")):
                 raise Conflict("finding_closed")
             repair = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
                                 (finding_id,)).fetchone()
@@ -1383,6 +1390,8 @@ class Analyses:
             record = {"decision": decision, "note": note.strip(), "actor": "owner",
                       "revision": analysis["revision"], "at": time.time(),
                       "previous_status": finding["status"], "disposition": True}
+            if finding["feedback"]:
+                record["previous_feedback"] = json.loads(finding["feedback"])
             if decision == "resolved":
                 record["resolution"] = "merged_pr" if resolution else "owner_assertion"
                 if resolution:
@@ -1393,10 +1402,15 @@ class Analyses:
                 (decision, json.dumps(record, ensure_ascii=False), finding_id),
             )
             if self.repairer is not None:
-                self.repairer.cancel_pending_in(db, finding_id)
+                self.repairer.cancel_pending_in(db, finding_id, decision=decision)
             if decision == "resolved" and resolution is not None and repair is not None:
                 capture_repair_fix(db, repair)
         return self.get(analysis_id)
+
+    def continue_finding(self, analysis_id, finding_id, **values):
+        from .finding_continuation import continue_finding
+
+        return continue_finding(self, analysis_id, finding_id, **values)
 
     def discover_pending(self):
         with self.store.connection() as db:
