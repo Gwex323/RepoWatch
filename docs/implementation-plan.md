@@ -23,8 +23,8 @@ Status updated: 2026-10-29
   implemented on `feature/system-coordinator-80` (base `367baff`). Targeted
   validation and independent review passed: 24 coordinator cases, a real-source
   adapter recheck, 59 earlier related cases, one browser smoke, build and Ruff.
-  No new full regression was run, as requested by the owner. PR submission is
-  pending; it is not merged or deployed. See the
+  No new full regression was run, as requested by the owner. PR #91 is open;
+  it is not merged or deployed. See the
   [coordinator policy](system-coordinator-80.md) and
   [validation](system-coordinator-80-validation.md).
   Self-maintenance (#81), deployment/service recovery (#82), and full acceptance

@@ -39,7 +39,7 @@ server-authorized actions, bounded fallback, progress and deduplicated notificat
 Targeted validation and independent review passed: 24 coordinator cases, one
 real-source adapter recheck, 59 related cases from the earlier check, one browser
 smoke, frontend build and Ruff. Per owner request, no new full regression was run.
-PR submission is pending; it is not merged or deployed. See the
+Submitted as PR #91; it is not merged or deployed. See the
 [stage 3 policy](system-coordinator-80.md) and [validation](system-coordinator-80-validation.md).
 Stages 4-6 (#81-#83) remain unimplemented. See the
 [stage 2 policy](workflow-recovery-79.md) and [validation](workflow-recovery-79-validation.md).

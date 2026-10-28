@@ -11,7 +11,7 @@
 详见[规则与回退说明](docs/workflow-recovery-79.md)及[验证记录](docs/workflow-recovery-79-validation.md)。
 
 第三阶段（#80）已在 `feature/system-coordinator-80` 实现，并通过定向验证及独立 review：
-新增独立配置的系统协调角色，默认关闭，不覆盖五个业务角色配置。尚未合并或部署。
+新增独立配置的系统协调角色，默认关闭，不覆盖五个业务角色配置。已提交 PR #91，尚未合并或部署。
 详见[协调策略与启用](docs/system-coordinator-80.md)及[验证记录](docs/system-coordinator-80-validation.md)。
 
 单用户、本地运行的多 Agent 工作台，使用真实仓库源码、隔离执行记录与模型分析，
