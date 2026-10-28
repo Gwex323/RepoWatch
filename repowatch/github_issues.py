@@ -173,5 +173,8 @@ class GitHubIssues:
             try:
                 self.sync_all()
             except Exception:
+                from .system_faults import record_worker_failure
+
+                record_worker_failure(self.store, "github_issue_worker")
                 LOG.exception("GitHub Issue scheduler failed")
             await asyncio.sleep(SYNC_INTERVAL_SECONDS)

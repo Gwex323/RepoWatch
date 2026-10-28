@@ -37,6 +37,7 @@ from .roles import ROLES
 from .schedules import RepositorySchedules
 from .scope_models import ScopeRequirement
 from .store import SDK_VERSION, Conflict, Missing, Store
+from .system_faults import SystemFaults
 from .task_scopes import TaskScopes
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -235,6 +236,20 @@ class ScheduleBody(StrictBody):
     local_time: str = Field(min_length=5, max_length=5)
 
 
+class FaultDismissBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    reason: str = Field(min_length=1, max_length=512)
+
+
+class FaultImportBody(StrictBody):
+    limit: int = Field(default=200, ge=1, le=200, strict=True)
+
+
+class FaultSettingsBody(StrictBody):
+    version: int = Field(ge=1, strict=True)
+    enabled: bool = Field(strict=True)
+
+
 def create_app(
     db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
     execution_runtime=None, repository_source=None, execution_diagnoser=None, analysis_engine=None,
@@ -244,6 +259,7 @@ def create_app(
     mimetypes.add_type("text/javascript", ".js")
     mimetypes.add_type("text/css", ".css")
     store = Store(db_path or Path(os.getenv("REPOWATCH_DB", str(ROOT / "data/repowatch.db"))))
+    faults = SystemFaults(store)
     memory = Memory(store)
     github = GitHubAccounts(store, client=github_client, vault=credential_vault)
     issues = GitHubIssues(store, github)
@@ -267,6 +283,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
+        fault_worker = asyncio.create_task(faults.run()) if start_worker else None
         executor = asyncio.create_task(execution.run()) if start_worker else None
         diagnostics = asyncio.create_task(execution.diagnoses.run()) if start_worker else None
         analyst = asyncio.create_task(analyses.run()) if start_worker else None
@@ -305,10 +322,14 @@ def create_app(
             schedule_worker.cancel()
             with suppress(asyncio.CancelledError):
                 await schedule_worker
+        faults.closing.set()
+        if fault_worker:
+            await fault_worker
         await asyncio.to_thread(telemetry.shutdown)
 
     app = FastAPI(title="RepoWatch", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.store = store
+    app.state.faults = faults
     app.state.execution = execution
     app.state.analyses = analyses
     app.state.analysis_model = analysis_model
@@ -368,6 +389,8 @@ def create_app(
         # Pydantic's default error payload can echo rejected secret input.
         if request.url.path.startswith("/api/github/"):
             return JSONResponse({"detail": "github_invalid_input"}, 422)
+        if request.url.path.startswith("/api/system/faults"):
+            return JSONResponse({"detail": "fault_invalid_input"}, 422)
         if request.url.path.startswith(("/api/analysis-model", "/api/agent-models",
                                         "/api/model-providers")):
             return JSONResponse({"detail": "model_invalid_input"}, 422)
@@ -445,6 +468,7 @@ def create_app(
             "schedule": schedules.summary(),
             "tracing_export": telemetry.status()["enabled"],
             "langfuse": telemetry.status(),
+            "system_faults": faults.health(),
             "storage": "SQLite",
             "runtime": "Python",
             "platform": platform.system(),
@@ -453,6 +477,45 @@ def create_app(
             "memory": {"enabled": True, "scope": "repository_and_exact_revision",
                        "retrieval": "literal_relevance_and_recency", "semantic_search": False},
         }
+
+    @app.get("/api/system/faults/health")
+    def fault_health():
+        return faults.health()
+
+    @app.post("/api/system/faults/import-history")
+    def fault_import(body: FaultImportBody):
+        return faults.import_history(limit=body.limit)
+
+    @app.post("/api/system/faults/settings")
+    def fault_settings(body: FaultSettingsBody):
+        return faults.configure(**body.model_dump())
+
+    @app.get("/api/system/faults")
+    def fault_list(
+        limit: int = Query(default=50, ge=1, le=200), offset: int = Query(default=0, ge=0),
+        state: str | None = Query(default=None, max_length=20),
+        repo_id: str | None = Query(default=None, max_length=100),
+        env_id: str | None = Query(default=None, max_length=100),
+        task_id: str | None = Query(default=None, max_length=100),
+        flow: Literal["analysis", "execution", "diagnosis", "repair", "acceptance",
+                      "publication", "service"] | None = None,
+    ):
+        return faults.list(limit=limit, offset=offset, state=state, repo_id=repo_id, env_id=env_id,
+                           task_id=task_id, flow=flow)
+
+    @app.get("/api/system/faults/{fault_id}")
+    def fault_detail(fault_id: str, limit: int = Query(default=50, ge=1, le=200),
+                     offset: int = Query(default=0, ge=0)):
+        return faults.detail(fault_id, limit=limit, offset=offset)
+
+    @app.get("/api/system/faults/{fault_id}/history")
+    def fault_history(fault_id: str, limit: int = Query(default=50, ge=1, le=200),
+                      offset: int = Query(default=0, ge=0)):
+        return faults.history(fault_id, limit=limit, offset=offset)
+
+    @app.post("/api/system/faults/{fault_id}/occurrences/{occurrence_id}/dismiss")
+    def fault_dismiss(fault_id: str, occurrence_id: str, body: FaultDismissBody):
+        return faults.dismiss(fault_id, occurrence_id, **body.model_dump())
 
     @app.get("/api/github/accounts")
     def github_accounts():
@@ -672,8 +735,8 @@ def create_app(
         return execution.continue_pipeline(env_id, body.version)
 
     @app.get("/api/environments/{env_id}/analyses")
-    def environment_analyses(env_id: str):
-        return analyses.list(env_id)
+    def environment_analyses(env_id: str, focus: str | None = Query(default=None, max_length=100)):
+        return analyses.list(env_id, focus=focus)
 
     @app.get("/api/environments/{env_id}/repairs")
     def environment_repairs(env_id: str):

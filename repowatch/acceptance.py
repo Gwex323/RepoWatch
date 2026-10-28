@@ -392,9 +392,14 @@ class Acceptance:
     def _event(self, run, kind, value):
         # Keep only bounded protocol metadata, never provider text or request bodies.
         if kind not in ("agent", "request_started", "request_completed", "format_retry",
-                        "output_retry", "provider_response", "provider_rejection"):
+                        "output_retry", "provider_response", "provider_rejection",
+                        "model_configuration"):
             return
         metadata = {}
+        if kind == "model_configuration":
+            from .fault_contract import diagnostic
+
+            metadata = diagnostic(json.loads(value))
         if kind in ("provider_response", "provider_rejection"):
             try:
                 value = json.loads(value)
@@ -429,7 +434,8 @@ class Acceptance:
                 _bound(db, run["analysis_id"]),
                 "acceptance_" + kind,
                 "system",
-                {"run_id": run["id"], "role": "independent_reviewer", **metadata},
+                {"run_id": run["id"], "role": "independent_reviewer", **metadata,
+                 **({"attempt": run["attempt"]} if "attempt" in run else {})},
             )
 
     async def _model(self, run, packet, guard):
@@ -836,6 +842,13 @@ class Acceptance:
                 "updated=? WHERE id=?",
                 (reason, note, time.time(), row["id"]),
             )
+            run = db.execute("SELECT * FROM scope_acceptance_runs WHERE id=?",
+                             (row["run_id"],)).fetchone()
+            if run:
+                _event(db, _bound(db, run["analysis_id"]), "acceptance_check_blocked", "system", {
+                    "run_id": run["id"], "attempt": run["attempt"], "reason": reason,
+                    "executed": False, "workbench_version": self.store.workbench_version,
+                })
 
     def _save_result(self, run, row, result, verdict, passed):
         with self.store.connection() as db:
@@ -852,6 +865,11 @@ class Acceptance:
                 ),
             )
             scope = _bound(db, run["analysis_id"])
+            _event(db, scope, "acceptance_check_finished", "system", {
+                "run_id": run["id"], "attempt": run["attempt"], "passed": passed,
+                "executed": result.get("executed"), "exit_code": result.get("exit_code"),
+                "workbench_version": self.store.workbench_version,
+            })
             evidence_id = digest([row["id"], result, verdict.model_dump()])
             db.execute(
                 "INSERT OR IGNORE INTO task_scope_evidence VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -1111,6 +1129,10 @@ class Acceptance:
                     "updated=? WHERE id=? AND owner=? AND state='running'",
                     ("stale" if continued else state, time.time(), run["id"], self.owner),
                 )
+                if not continued and complete:
+                    _event(db, _bound(db, run["analysis_id"]), "acceptance_completed", "system",
+                           {"run_id": run["id"], "attempt": run["attempt"],
+                            "workbench_version": self.store.workbench_version})
         except Exception as exc:
             self._stop(run, exc)
         return True
@@ -1125,6 +1147,17 @@ class Acceptance:
             ).fetchone()
             if not live:
                 return
+            details["fault_basis"] = {
+                "workbench_version": getattr(self.store, "workbench_version", None),
+                "attempt": live["attempt"],
+                "budget": {
+                    "attempt": live["attempt"],
+                    "attempt_limit": MAX_RESUMES + live["additional_attempts"],
+                    "model_calls": live["model_calls"],
+                    "max_model_calls": MAX_MODEL_REQUESTS,
+                    "deadline": live["deadline"],
+                },
+            }
             now = time.time()
             retryable = bool(
                 code in TRANSIENT_CODES
@@ -1161,6 +1194,9 @@ class Acceptance:
             try:
                 await self.tick()
             except Exception:
+                from .system_faults import record_worker_failure
+
+                record_worker_failure(self.store, "acceptance_worker")
                 logging.getLogger(__name__).warning(
                     "Automatic acceptance worker stopped this tick."
                 )

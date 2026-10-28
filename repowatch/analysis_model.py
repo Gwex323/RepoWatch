@@ -655,13 +655,13 @@ class AnalysisModel:
             request_timeout_seconds=REPAIR_REQUEST_TIMEOUT_SECONDS,
         )
 
-    async def diagnose(self, context):
+    async def diagnose(self, context, event=None):
         from .diagnosis import run_agents
 
         async def runner(model, value, _event, *, reasoning_effort=None):
-            return await run_agents(model, value, reasoning_effort=reasoning_effort)
+            return await run_agents(model, value, reasoning_effort=reasoning_effort, event=_event)
 
-        return await self._run(runner, context, lambda *_: None, flow="diagnosis")
+        return await self._run(runner, context, event or (lambda *_: None), flow="diagnosis")
 
     async def _run(self, runner, context, event, *, flow,
                    request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
@@ -721,6 +721,10 @@ class AnalysisModel:
                 event("model_configuration", json.dumps({
                     "role": role, "name": ROLE_DETAILS[role]["name"],
                     "model": config["model"], "output_protocol": protocol,
+                    "model_version": rows[role]["version"],
+                    "configuration_version": row["version"],
+                    "api": config["api"],
+                    "request_timeout_seconds": request_timeout_seconds,
                     "provider_id": rows[role]["provider_id"],
                     "provider_name": rows[role]["provider_name"],
                     "provider_version": rows[role]["provider_version"],

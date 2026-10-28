@@ -404,5 +404,8 @@ class MemoryEvaluations:
             try:
                 await self.tick()
             except Exception:
+                from .system_faults import record_worker_failure
+
+                record_worker_failure(self.store, "memory_evaluation_worker")
                 LOG.exception("Memory evaluation worker failed")
             await asyncio.sleep(2)

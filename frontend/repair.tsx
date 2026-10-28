@@ -332,20 +332,24 @@ export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?:
   </section>;
 }
 
-export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId: string; api: Api; view?: 'repair' | 'pr'; onNavigate?: (view: string) => void }) {
+export function RepairPanel({ envId, api, focusTaskId = '', view = 'repair', onNavigate }: { envId: string; api: Api; focusTaskId?: string; view?: 'repair' | 'pr'; onNavigate?: (view: string) => void }) {
   const [tasks, setTasks] = useState<Repair[]>([]);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   useEffect(() => {
     let active = true;
     const load = () => {
-      void api<Repair[]>(`/environments/${envId}/repairs`).then(value => {
+      void api<Repair[]>(`/environments/${envId}/repairs`).then(async value => {
+        if (focusTaskId) {
+          const focused = value.find(item => item.id === focusTaskId) ?? await api<Repair>(`/repairs/${focusTaskId}`);
+          value = [focused, ...value.filter(item => item.id !== focusTaskId)];
+        }
         if (active) { setTasks(value); setError(''); }
       }).catch(() => { if (active) setError('无法读取修复任务'); });
     };
     load(); const timer = setInterval(load, 2000);
     return () => { active = false; clearInterval(timer); };
-  }, [api, envId]);
+  }, [api, envId, focusTaskId]);
   const retry = (task: Repair) => {
     setBusy(task.id); setError('');
     void api(`/repairs/${task.id}/retry`, { version: task.version })
@@ -384,6 +388,7 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
           ? '等待启用自动修复' : labels[task.status] ?? task.status}</span></div>
       {task.finding_status === 'false_positive' && <p role="status">{task.finding_feedback?.note}。已停止该问题的修复；下方补丁与验证仅保留为历史记录。</p>}
       {task.finding_status === 'superseded' && <p role="status">已转到最新版本的修复记录；本任务保留为历史。</p>}
+      <a className="text-link" href={`#system-faults?task_id=${encodeURIComponent(task.id)}`}>查看此任务的系统故障记录</a>
       <p className="diagnosis-meta">版本 {task.revision.slice(0, 12)} · 已尝试 {task.attempt} 次
         {task.stage && ` · ${labels[task.stage] ?? task.stage}`}</p>
       {task.source_kind === 'existing_issue' && task.source_issue && <p className="diagnosis-meta">

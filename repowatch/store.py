@@ -25,6 +25,14 @@ def uid(prefix: str) -> str:
 class Store:
     def __init__(self, path: Path):
         self.path = path
+        self.faults_ready = False
+        self.fault_ingestion_error = None
+        self.fault_capture_failures = 0
+        # A source digest identifies the code actually loaded, including a local build.
+        source = Path(__file__).resolve().parent
+        self.workbench_version = hashlib.sha256(b"".join(
+            item.name.encode() + item.read_bytes() for item in sorted(source.glob("*.py"))
+        )).hexdigest()[:32]
         path.parent.mkdir(parents=True, exist_ok=True)
         with self.connection() as db:
             db.executescript("""
@@ -78,14 +86,27 @@ class Store:
             from .task_scopes import initialize as initialize_scopes
 
             initialize_scopes(db)
+            from .system_faults import initialize as initialize_faults
+
+            initialize_faults(db)
+            health = db.execute("SELECT failures FROM system_fault_ingestion "
+                                "WHERE source='source_capture'").fetchone()
+            if health:
+                self.fault_capture_failures = health[0]
+        self.faults_ready = True
 
     @contextmanager
     def connection(self):
+        fault_transaction_started = time.time()
         db = sqlite3.connect(self.path, timeout=10)
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         try:
             yield db
+            if self.faults_ready and db.total_changes:
+                from .system_faults import capture_safely
+
+                capture_safely(self, db, live_after=fault_transaction_started)
             db.commit()
         except Exception:
             db.rollback()

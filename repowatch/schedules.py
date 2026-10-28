@@ -260,5 +260,8 @@ class RepositorySchedules:
             try:
                 self.tick()
             except Exception:
+                from .system_faults import record_worker_failure
+
+                record_worker_failure(self.store, "repository_schedule_worker")
                 LOG.exception("Repository schedule worker failed")
             await asyncio.sleep(CHECK_INTERVAL_SECONDS)

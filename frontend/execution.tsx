@@ -401,19 +401,19 @@ function SchedulePanel({ repo, api }: { repo: { id: string }; api: Api }) {
   </section>;
 }
 
-export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
-  repo: { id: string; name: string }; api: Api; initialEnvId?: string;
+export function ExecutionPanel({ repo, api, initialEnvId = '', initialSection = '', initialAnalysisId = '', initialRepairId = '' }: {
+  repo: { id: string; name: string }; api: Api; initialEnvId?: string; initialSection?: string; initialAnalysisId?: string; initialRepairId?: string;
 }) {
   const [environments, setEnvironments] = useState<Environment[]>([]);
   const [selected, setSelected] = useState(initialEnvId);
   const selectedRef = useRef(initialEnvId);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
-  const [issueAnalysisId, setIssueAnalysisId] = useState('');
+  const [issueAnalysisId, setIssueAnalysisId] = useState(initialAnalysisId);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [autoRun, setAutoRun] = useState(true);
   const [tab, setTab] = useState('logs');
-  const [section, setSection] = useState(initialEnvId ? 'reproduction' : 'environment');
+  const [section, setSection] = useState(initialSection || (initialEnvId ? 'reproduction' : 'environment'));
   const refresh = useCallback(async () => {
     const data = await api<Environment[]>(`/repositories/${repo.id}/environments`);
     const id = data.some(env => env.id === selectedRef.current || env.reused_environment_id === selectedRef.current)
@@ -590,7 +590,7 @@ export function ExecutionPanel({ repo, api, initialEnvId = '' }: {
           focusAnalysisId={issueAnalysisId} pipelineActive={chainActive && env.pipeline?.stage !== 'analysis'} />
       </div>
       <div hidden={!['repair', 'pr'].includes(section)}>
-        <RepairPanel key={env.id} envId={env.id} api={api} view={section === 'pr' ? 'pr' : 'repair'} onNavigate={setSection} />
+        <RepairPanel key={env.id} envId={env.id} api={api} focusTaskId={initialRepairId} view={section === 'pr' ? 'pr' : 'repair'} onNavigate={setSection} />
       </div>
     </> : !['environment', 'issues'].includes(section) && <div className="empty"><p>尚无源码版本，请先完成环境准备。</p><button className="button secondary" onClick={() => setSection('environment')}>前往环境准备</button></div>}
     <div className="process-footer">

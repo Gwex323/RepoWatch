@@ -291,9 +291,21 @@ class StageModel(Model):
             remaining = min(remaining, allowance["remaining_seconds"])
         if request_timeout is not None:
             remaining = min(remaining, request_timeout)
-        return await asyncio.wait_for(self.delegate.get_response(
-            system_instructions=system_instructions, input=input, **kwargs,
-        ), timeout=min(REQUEST_TIMEOUT_SECONDS, remaining))
+        timeout = min(REQUEST_TIMEOUT_SECONDS, remaining)
+        started = time.monotonic()
+        try:
+            return await asyncio.wait_for(self.delegate.get_response(
+                system_instructions=system_instructions, input=input, **kwargs,
+            ), timeout=timeout)
+        except (TimeoutError, APITimeoutError):
+            self.event("model_request_failed", json.dumps({
+                "role": self.role, "request_timeout_seconds": timeout,
+                "request_elapsed_seconds": round(time.monotonic() - started, 3),
+                "timeout_kind": "unknown", "timing_scope": "request",
+                "budget": allowance if isinstance(allowance, dict) else {},
+                "retry_budget": asdict(self.retries),
+            }))
+            raise
 
     def handoff_validation(self, response, expected):
         calls = [item for item in response.output if item.type == "function_call"]
@@ -1530,7 +1542,8 @@ class Analyses:
             limit = (4096 if kind in {"tool_arguments_invalid", "tool_arguments_preserved",
                                      "output_limit", "scope_mapping_validation",
                                      "required_read_validation", "provider_structure",
-                                     "handoff_validation", "report_diagnostics"}
+                                     "handoff_validation", "report_diagnostics",
+                                     "model_configuration", "model_request_failed"}
                      else 1024 if kind == "failure" else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
@@ -1846,13 +1859,17 @@ class Analyses:
         result["report_recovery"]["available"] &= result["current"]
         return result
 
-    def list(self, env_id):
+    def list(self, env_id, *, focus=None):
         with self.store.connection() as db:
             self.execution.row(db, env_id)
             ids = [row["id"] for row in db.execute(
                 "SELECT id FROM repository_analyses WHERE env_id=? ORDER BY created DESC LIMIT 10",
                 (env_id,),
             )]
+            if focus and focus not in ids and db.execute(
+                "SELECT 1 FROM repository_analyses WHERE id=? AND env_id=?", (focus, env_id),
+            ).fetchone():
+                ids.insert(0, focus)
         return [self.get(item) for item in ids]
 
     def retry(self, analysis_id, version):
@@ -2080,6 +2097,9 @@ class Analyses:
             )
         started = time.monotonic()
         run_version = row["version"] + 1
+        self.event(row["id"], "fault_attempt", json.dumps({
+            "attempt": run_version, "workbench_version": self.store.workbench_version,
+        }))
         stage = None
         context = None
         model_identity = self.model_identity()
@@ -2127,7 +2147,14 @@ class Analyses:
                             raise AnalysisFailure("analysis_recovery_budget_exhausted")
                         db.execute("UPDATE analysis_report_recovery SET requests=requests+1 "
                                    "WHERE analysis_id=?", (row["id"],))
-                        return {"remaining_seconds": saved["deadline"] - time.time()}
+                        return {
+                            "remaining_seconds": saved["deadline"] - time.time(),
+                            "requests": saved["requests"] + 1,
+                            "max_requests": report_scheduler.MAX_REQUESTS,
+                            "resumptions": saved["resumptions"],
+                            "max_resumptions": len(report_scheduler.RECOVERY_DELAYS),
+                            "deadline": saved["deadline"],
+                        }
                     if kind == "analysis_retry_budget":
                         report_scheduler.save_budget(db, row["id"], json.loads(agent))
                         return
@@ -2361,12 +2388,22 @@ class Analyses:
                            (row["id"],))
                 db.execute("UPDATE analysis_report_recovery SET state='completed',retry_after=0,"
                            "stop_reason=NULL,last_error=NULL WHERE analysis_id=?", (row["id"],))
+                db.execute(
+                    "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                    (row["id"], "fault_verified", "analysis_report_validated", time.time()),
+                )
         except Exception as exc:
             code = failure_code(exc)
             # Do not store exception messages, request bodies, headers or provider responses.
             details = {"code": code, "stage": stage, "exception_type": type(exc).__name__[:60],
                        "elapsed_seconds": round(time.monotonic() - started),
                        "http_status": exc.status_code if isinstance(exc, APIStatusError) else None}
+            with self.store.connection() as db:
+                saved_budget = report_scheduler.public_state(
+                    report_scheduler.row(db, row["id"]), time.time(),
+                )
+            if saved_budget:
+                details["budget"] = saved_budget
             record("failure", json.dumps(details))
             logging.getLogger(__name__).warning(
                 "Repository analysis %s failed: %s (stage=%s)", row["id"], code, stage,
@@ -2396,5 +2433,8 @@ class Analyses:
             try:
                 await self.tick()
             except Exception:
+                from .system_faults import record_worker_failure
+
+                record_worker_failure(self.store, "analysis_worker")
                 logging.getLogger(__name__).warning("Repository analysis worker will retry.")
             await asyncio.sleep(2)
