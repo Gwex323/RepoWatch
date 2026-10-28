@@ -31,7 +31,8 @@ execute recovery. Stage 2 (#79) is implemented and verified on
 `feature/workflow-recovery-79`, based on `ba043b1`: shared ownership and budgets,
 atomic scope batches and opt-in rule recovery (disabled by default). Final backend
 regression: 1088 passed, 0 failed, 12 opt-in Docker cases skipped; browser checks:
-4 passed; frontend build, Ruff and independent review passed. It is not merged or deployed.
+4 passed; frontend build, Ruff and independent review passed. Delivery PR #90 is
+open; it is not merged or deployed.
 Stages 3-6 (#80-#83) remain unimplemented. See the
 [stage 2 policy](workflow-recovery-79.md) and [validation](workflow-recovery-79-validation.md).
 Merge does not establish deployment to the running workbench. See

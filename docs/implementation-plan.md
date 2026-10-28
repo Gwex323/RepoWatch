@@ -14,7 +14,8 @@ Status updated: 2026-10-28
 - Central coordination (#77) is a separate six-stage effort. Unified fault
   recording (#78) was merged via PR #84 on 2026-10-28. Automatic recovery (#79)
   is implemented and verified on `feature/workflow-recovery-79`
-  (base `ba043b1`), not merged or deployed. Final backend regression: 1088 passed,
+  (base `ba043b1`), delivered for review in PR #90, not merged or deployed.
+  Final backend regression: 1088 passed,
   0 failed, 12 opt-in Docker cases skipped; browser checks: 4 passed. Frontend
   build, Ruff and independent review passed. New rule recovery is disabled by
   default. See the [policy](workflow-recovery-79.md)
