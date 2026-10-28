@@ -14,7 +14,7 @@ MAX_ACTIONS = 3
 MAX_CORRECTIONS = 32
 MAX_RESUMPTIONS = 12
 DELAYS = (10, 30, 60)
-FLOWS = {"analysis", "repair", "acceptance", "coordination"}
+FLOWS = {"analysis", "repair", "acceptance", "coordination", "maintenance"}
 AUTOMATIC_ERRORS = {
     "repair_model_timeout",
     "repair_provider_unreachable",

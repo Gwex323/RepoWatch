@@ -44,5 +44,5 @@
 启用后模型调用仍可能消耗已配置供应商额度，开关与备用授权默认关闭。
 只记录 SDK 实际报告的令牌，未知费用保持未知。
 
-交付：[PR #91](https://github.com/Gwex323/RepoWatch/pull/91)。是否已合并和已部署
-须分别依据 GitHub 事实与运行环境核验更新。
+交付：[PR #91](https://github.com/Gwex323/RepoWatch/pull/91)，已于 2026-10-29（Asia/Shanghai）
+合并为 `74b0918`。GitHub 合并事实已核对，运行环境部署未核验。

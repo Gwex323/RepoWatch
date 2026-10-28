@@ -82,7 +82,7 @@ def source_basis(db, occurrence, repairs):
     return recovery.digest([payload, snapshot, binding])
 
 
-def source_budget(db, occurrence, *, reserve=False, capacity=False):
+def source_budget(db, occurrence, *, reserve=False, capacity=False, maintenance=False):
     flow, task_id = occurrence["flow"], occurrence["task_id"]
     table = {
         "analysis": "repository_analyses",
@@ -100,7 +100,9 @@ def source_budget(db, occurrence, *, reserve=False, capacity=False):
         saved = recovery_row(db, task_id)
         if saved and (
             saved["deadline"] <= time.time()
-            or saved["stop_reason"]
+            or saved["stop_reason"] and not (maintenance and saved["stop_reason"] in {
+                "non_recoverable", "review_not_started", "checkpoint_invalid",
+            })
             or saved["requests"] + int(reserve or capacity) > MAX_REQUESTS
         ):
             raise Conflict("coordination_source_budget_exhausted")

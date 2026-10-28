@@ -11,8 +11,12 @@
 详见[规则与回退说明](docs/workflow-recovery-79.md)及[验证记录](docs/workflow-recovery-79-validation.md)。
 
 第三阶段（#80）已在 `feature/system-coordinator-80` 实现，并通过定向验证及独立 review：
-新增独立配置的系统协调角色，默认关闭，不覆盖五个业务角色配置。已提交 PR #91，尚未合并或部署。
+新增独立配置的系统协调角色，默认关闭，不覆盖五个业务角色配置。PR #91 已于 2026-10-29（Asia/Shanghai）合并为 `74b0918`，部署未核验。
 详见[协调策略与启用](docs/system-coordinator-80.md)及[验证记录](docs/system-coordinator-80-validation.md)。
+
+第四阶段（#81）已在 `feature/system-maintenance-81` 实现并通过定向验证和独立 review，PR 待创建，未合并或部署。
+独立授权的自身维护默认关闭，绑定 `Gwex323/RepoWatch`，先查重并登记 Issue，再隔离修复、验证和独立审查，交付中文 PR；不伪造用户确认、不自动合并或部署、不以 PR 代替原故障恢复。
+当前自动补丁范围为 Python 实现和新增 Python 回归，其他文件拒绝。详见[维护范围与操作](docs/system-maintenance-81.md)及[验证记录](docs/system-maintenance-81-validation.md)。
 
 单用户、本地运行的多 Agent 工作台，使用真实仓库源码、隔离执行记录与模型分析，
 支持人工复现确认、持久化任务和受控自动修复。

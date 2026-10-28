@@ -23,12 +23,21 @@ Status updated: 2026-10-29
   implemented on `feature/system-coordinator-80` (base `367baff`). Targeted
   validation and independent review passed: 24 coordinator cases, a real-source
   adapter recheck, 59 earlier related cases, one browser smoke, build and Ruff.
-  No new full regression was run, as requested by the owner. PR #91 is open;
-  it is not merged or deployed. See the
+  No new full regression was run, as requested by the owner. PR #91 was merged
+  as `74b0918` on 2026-10-29 (Asia/Shanghai); deployment is unverified. See the
   [coordinator policy](system-coordinator-80.md) and
   [validation](system-coordinator-80-validation.md).
-  Self-maintenance (#81), deployment/service recovery (#82), and full acceptance
-  (#83) remain unimplemented. A merged change is not proof
+  Self-maintenance (#81) is implemented on `feature/system-maintenance-81`
+  (base `74b0918`): dedicated maintenance ledger, fixed repository/identity,
+  evidence-based Issue/PR reuse, isolated feature workspaces and existing
+  verification/review gates. Targeted validation passed: 13 backend cases,
+  one desktop/mobile browser smoke, frontend build and Ruff. Independent review
+  passed; no full regression was run, as requested. Chinese delivery PR is pending;
+  not merged or deployed. The automatic patch boundary is Python implementation
+  and new Python regressions. See the [policy](system-maintenance-81.md) and
+  [validation](system-maintenance-81-validation.md).
+  Deployment/service recovery (#82) and full acceptance (#83) remain unimplemented.
+  A merged change is not proof
   that the running workbench has been deployed.
 - Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend
   tests. The same 35 failures appeared on its unmodified base; no new failures
