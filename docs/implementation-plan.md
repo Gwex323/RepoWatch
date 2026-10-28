@@ -1,8 +1,31 @@
 # Implementation Plan
 
 Date: 2026-10-09
-Status: milestones one and two and the analysis/repair/publication increments
-implemented; real Issue intake, daily scheduling and live acceptance remain planned
+Status updated: 2026-10-28
+
+## Current Delivery Status
+
+- The original execution, analysis, controlled repair and GitHub publication
+  increments are implemented. Real GitHub Issues can be synchronized and used
+  for analysis; daily repository checks and their history are available.
+- The Windows main path has undergone real-model and real-GitHub-write acceptance.
+  This is not universal provider or repository acceptance; independent live
+  diagnosis and Linux migration acceptance remain outstanding.
+- Central coordination (#77) is a separate six-stage effort. Unified fault
+  recording (#78) was merged via PR #84 on 2026-10-28. Automatic recovery (#79),
+  the coordinator (#80), self-maintenance (#81), deployment/service recovery
+  (#82), and full acceptance (#83) remain open. A merged change is not proof
+  that the running workbench has been deployed.
+- Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend
+  tests. The same 35 failures appeared on its unmodified base; no new failures
+  were identified in that comparison. The suite must not be described as green.
+  See [the validation record](system-fault-records-78-validation.md).
+- Automatic merging is not available; the project owner merges on GitHub.
+  See the [README](../README.md) for current operational limits.
+
+The dated increments and milestone sections below preserve the state and acceptance
+scope at the time they were written. Their statements about what was not yet
+implemented or verified do not override this current status or later ADRs.
 
 ## Milestone-One Delivery
 
