@@ -97,10 +97,15 @@ class RepairModel(Model):
         self.calls += 1
         self.requests.append(kwargs)
         name, args = None, {}
-        if self.calls == 1:
+        if kwargs.get("output_schema") is not None:
+            pass
+        elif self.calls == 1:
             name, args = "read_repair_source", {"path": "app.py", "candidate": False}
         elif self.calls == 2:
-            name, args = "submit_and_test_repair", {"patch": fixture_patch()}
+            patch = fixture_patch()
+            if getattr(self, "retry_review", False):
+                patch["edits"][0]["content"] = "print('retry corrected')\n"
+            name, args = "submit_and_test_repair", {"patch": patch}
         elif self.calls == 3 and not self.skip_handoff:
             name = kwargs["handoffs"][0].tool_name
         elif self.calls == 4:
@@ -139,6 +144,7 @@ class RepairEngine:
 
     async def repair(self, context, event, *, workspace):
         model = RepairModel(approved=self.approved)
+        model.retry_review = bool(context.get("previous_review"))
         self.models.append(model)
         return await run_repair(model, context, event, workspace=workspace)
 
@@ -230,7 +236,8 @@ def test_confirmed_finding_runs_real_sdk_tools_and_handoff_then_publishes_once(p
     ]
     requests = repairs.engine.models[0].requests
     assert not requests[0]["handoffs"] and not requests[1]["handoffs"]
-    assert requests[2]["handoffs"][0].tool_name == "transfer_to_independent_reviewer"
+    assert requests[2]["output_schema"] is not None and not requests[2]["handoffs"]
+    assert any(event["kind"] == "backend_handoff" for event in task["events"])
     assert original.read_text() == "print('ok')"
     assert len(publisher.calls) == 1
     assert len(runtime.removed_volumes) >= 6
@@ -1824,8 +1831,8 @@ def test_output_recovery_reduces_reasoning_and_keeps_it_for_later_calls(role, ef
             raise OutputTruncated("private-unfinished-tool-arguments")
         return SimpleNamespace(output=[])
 
-    workspace = SimpleNamespace(check=lambda: None, verification=None)
-    # Exercise output budgets after the review's mandatory evidence prerequisite.
+    workspace = SimpleNamespace(check=lambda: None, verification=None, ready_for_review=False,
+                                source_read_budget_low=False)
     model = RepairStageModel(SimpleNamespace(get_response=provider), role, workspace,
                              lambda *args: events.append(args),
                              lambda: {"verification_read": True}, {"timeouts": 0})
@@ -1855,7 +1862,8 @@ def test_output_recovery_preserves_default_and_already_low_reasoning(effort):
         return SimpleNamespace(output=[])
 
     model = RepairStageModel(SimpleNamespace(get_response=provider), "repair_agent",
-                             SimpleNamespace(check=lambda: None, verification=None),
+                             SimpleNamespace(check=lambda: None, verification=None,
+                                             ready_for_review=False, source_read_budget_low=False),
                              lambda *args: events.append(args), dict, {"timeouts": 0})
     asyncio.run(model.get_response("", [], handoffs=[], tools=[], model_settings=settings))
     assert [s.max_tokens for s in requests] == [12000, 16000]

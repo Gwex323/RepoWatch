@@ -389,3 +389,26 @@ current source/confirmation evidence and matching task version, archives the
 failed attempt, and never resets attempt numbers. Deployment alone does not
 queue repairs, call providers or publish contributions. This is bounded
 recovery, not a guarantee that every provider will complete a repair.
+
+## Independent Review Correction (2026-10-26, Issue #59)
+
+An independent rejection now returns its conclusion, risks, candidate and real
+verification to the repair agent automatically. There are two review corrections
+in addition to the existing two verification corrections, at most five candidates.
+Every candidate is rebuilt from the immutable original, retested and independently
+reviewed with a fresh mandatory evidence read. The repairer's exploration allowance
+grows only with actual bounded corrections. Source, output, timeout, argument and
+overall task budgets remain shared. Repeated candidates are rejected before tests.
+
+Each review is persisted with its candidate revision and digest. Preparing another
+candidate clears the current review while retaining all previous conclusions.
+Only the latest passed candidate and its current approval authorize publication.
+
+While repair automation and models are enabled, an old-policy review rejection may
+automatically resume once if its owner confirmation, analysis/execution evidence,
+complete verification, patch and source digest remain valid and no remote artifact
+exists. The old attempt is archived and the policy allowance is durable. The new
+workspace verifies the original source digest before any model call and cannot
+resubmit that rejected patch unchanged. Paused, stale, current-policy or previously
+recovered tasks do not receive another automatic allowance. This specific upgrade
+recovery can invoke models and publish according to the existing automation setting.

@@ -26,6 +26,7 @@ SOURCE_READ_POLICY = "recoverable_source_reads_v1"
 MAX_SOURCE_READS = 24
 MAX_SOURCE_READ_CHARS = 100000
 MAX_VERIFICATION_REVISIONS = 3
+MAX_REVIEW_CORRECTIONS = 2
 
 
 class RepairPathRejected(Conflict):
@@ -161,8 +162,28 @@ class RepairWorkspace:
         self.verification = None
         self.revision = 1
         self.verification_history = []
+        self.review = None
+        self.review_history = []
+        self.prior_rejected_patches = []
         self.candidate = self.root / "candidate"
         self.baseline = self.root / "baseline"
+
+    @property
+    def ready_for_review(self):
+        return bool(self.verification and self.verification.get("passed")
+                    and self.review is None)
+
+    def record_review(self, review):
+        """Record a validated independent SDK conclusion for the current candidate."""
+        self.check()
+        if not self.ready_for_review:
+            raise Conflict("repair_review_evidence_required")
+        self.review = copy.deepcopy(review)
+        self.review_history.append({
+            "revision": self.revision,
+            "patch_digest": digest(self.patch.model_dump_json().encode()),
+            "review": copy.deepcopy(review),
+        })
 
     def index(self):
         eligible = []
@@ -220,9 +241,13 @@ class RepairWorkspace:
     def prepare(self, patch, *, revise=False):
         self.check()
         if self.patch is not None:
+            rejected = bool(self.review and self.review.get("approved") is False)
+            rejected_rounds = sum(item["review"]["approved"] is False
+                                  for item in self.review_history)
+            limit = MAX_VERIFICATION_REVISIONS + min(rejected_rounds, MAX_REVIEW_CORRECTIONS)
             if (not revise or not self.verification
-                    or self.verification.get("passed") is not False
-                    or self.revision >= MAX_VERIFICATION_REVISIONS):
+                    or (self.verification.get("passed") is not False and not rejected)
+                    or self.revision >= limit):
                 raise Conflict("repair_patch_already_submitted")
         if len(patch.model_dump_json().encode()) > 160000:
             raise Conflict("repair_patch_limit")
@@ -268,10 +293,12 @@ class RepairWorkspace:
                 raise RepairPathRejected("case_alias")
         if source_changes == 0 or "\0" in patch.regression_command:
             raise Conflict("repair_regression_required")
-        if self.patch is not None:
+        if self.patch is not None or self.prior_rejected_patches:
             next_edits = {e.path: (e.original_sha256, e.content) for e in patch.edits}
-            previous_patches = [self.patch.model_dump(),
+            previous_patches = [*self.prior_rejected_patches,
                                 *(item["patch"] for item in self.verification_history)]
+            if self.patch:
+                previous_patches.append(self.patch.model_dump())
             for previous in previous_patches:
                 previous_edits = {e["path"]: (e["original_sha256"], e["content"])
                                   for e in previous["edits"]}
@@ -280,6 +307,7 @@ class RepairWorkspace:
                         and patch.regression_command.strip()
                         == previous["regression_command"].strip()):
                     raise Conflict("repair_patch_unchanged")
+        if self.patch is not None:
             # Keep prior candidates and test evidence intact. Every revision is
             # built from the same original, never from the failed candidate.
             next_revision = self.revision + 1
@@ -292,6 +320,7 @@ class RepairWorkspace:
         self.patch = patch
         self.diff = ""
         self.verification = None
+        self.review = None
         shutil.copytree(self.original, self.baseline)
         shutil.copytree(self.original, self.candidate)
         fragments = []

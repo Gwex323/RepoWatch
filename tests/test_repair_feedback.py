@@ -154,7 +154,7 @@ def test_failed_verification_is_fed_back_then_revised_or_bounded(workspace, fail
 
 
 @pytest.mark.parametrize("action,code", [
-    ("handoff", "repair_verification_required"), ("unresolved", "repair_tests_failed"),
+    ("handoff", "repair_tool_selection_invalid"), ("unresolved", "repair_tests_failed"),
     ("unsafe", "repair_unsafe_path"), ("wrong_hash", "repair_source_changed"),
     ("old_test", "repair_existing_tests_protected"),
 ])
@@ -184,7 +184,7 @@ def test_persistent_identical_proposals_exhaust_model_budget_without_rerunning_t
         asyncio.run(run_repair(model, {"finding": {}, "confirmation": {}}, lambda *_: None,
                                workspace=workspace))
     assert repair_failure_code(error.value) == "repair_tests_failed"
-    assert model.calls <= 9 and len(workspace.verification_history) == 1
+    assert model.calls == 13 and len(workspace.verification_history) == 1
     assert len(workspace.execution.runtime.test_calls) == 7
 
 

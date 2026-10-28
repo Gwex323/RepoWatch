@@ -78,7 +78,12 @@ def test_early_review_is_discarded_and_real_evidence_read_precedes_final_review(
     install_model(repairs, model)
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert len(model.review_requests) == 3
+    assert len(model.review_requests) == (3 if approved else 4)
+    if not approved:
+        # The runner returns to repair; this evidence-only fake declines to revise.
+        retry = model.review_requests[-1][2]
+        assert any(tool.name == "submit_and_test_repair" for tool in retry["tools"])
+        assert retry["output_schema"] is None and not retry["handoffs"]
     for instructions, _, kwargs in model.review_requests[:2]:
         assert kwargs["model_settings"].tool_choice == "read_repair_verification"
         assert [t.name for t in kwargs["tools"]] == ["read_repair_verification"]
@@ -262,7 +267,8 @@ def test_evidence_gate_discards_entire_parallel_tool_batch(pending):
 def test_review_evidence_gate_does_not_extend_exploration_budget():
     delegate = RepairModel()
     model = RepairStageModel(
-        delegate, "independent_reviewer", SimpleNamespace(check=lambda: None, verification=None),
+        delegate, "independent_reviewer",
+        SimpleNamespace(check=lambda: None, verification=None, ready_for_review=False),
         lambda *_: None, lambda: {"verification_read": False}, {"timeouts": 0},
     )
     model.turns = 3

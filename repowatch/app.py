@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from .acceptance import Acceptance
 from .analysis_model import AnalysisModel
 from .diagnosis import AnalysisModelDiagnoser
 from .execution import Execution
@@ -74,6 +75,11 @@ class GitHubConnectBody(StrictBody):
 
 class GitHubVersionBody(StrictBody):
     version: int = Field(ge=1, le=2**63 - 1, strict=True)
+
+
+class AcceptanceRetryBody(GitHubVersionBody):
+    additional_attempt: bool = Field(default=False, strict=True)
+    run_id: str | None = Field(default=None, min_length=1, max_length=80)
 
 
 class GitHubRepositoryBody(GitHubVersionBody):
@@ -254,6 +260,7 @@ def create_app(
     memory_evaluations = MemoryEvaluations(analyses, analysis_engine or analysis_model)
     schedules = RepositorySchedules(store, execution)
     repairs.analyses = analyses
+    acceptance = Acceptance(analyses, repairs, analysis_model.for_flow("acceptance"))
     login_attempts: dict[str, deque] = defaultdict(deque)
 
     @asynccontextmanager
@@ -265,10 +272,14 @@ def create_app(
             memory_evaluations.run(),
         ) if start_worker else None
         repair_worker = asyncio.create_task(repairs.run()) if start_worker else None
+        acceptance_worker = asyncio.create_task(acceptance.run()) if start_worker else None
         issue_worker = asyncio.create_task(issues.run()) if start_worker else None
         schedule_worker = asyncio.create_task(schedules.run()) if start_worker else None
         yield
         execution.closing.set()
+        acceptance.closing.set()
+        if acceptance_worker:
+            await acceptance_worker
         if analyst:
             await analyst
         if evaluation_worker:
@@ -301,6 +312,7 @@ def create_app(
     app.state.model_providers = model_providers
     app.state.memory_evaluations = memory_evaluations
     app.state.repairs = repairs
+    app.state.acceptance = acceptance
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
     @app.middleware("http")
@@ -692,6 +704,13 @@ def create_app(
     @app.post("/api/analyses/{analysis_id}/scope-review", status_code=202)
     def reassess_task_scope(analysis_id: str, body: GitHubVersionBody):
         return analyses.reassess_scope(analysis_id, body.version)
+
+    @app.post("/api/analyses/{analysis_id}/acceptance/retry", status_code=202)
+    def retry_automatic_acceptance(analysis_id: str, body: AcceptanceRetryBody):
+        return acceptance.retry(
+            analysis_id, body.version, additional_attempt=body.additional_attempt,
+            run_id=body.run_id,
+        )
 
     @app.post("/api/task-scopes/{scope_id}/items/{key}/observations")
     def scope_observation(scope_id: str, key: str, body: ScopeObservationBody):
