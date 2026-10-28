@@ -18,8 +18,14 @@ Status updated: 2026-10-28
   that the running workbench has been deployed.
 - Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend
   tests. The same 35 failures appeared on its unmodified base; no new failures
-  were identified in that comparison. The suite must not be described as green.
+  were identified in that comparison. That historical run was not green.
   See [the validation record](system-fault-records-78-validation.md).
+- Issue #88 corrects stale repair/review test contracts and fixtures on
+  `feature/main-regression-88`. The full backend run now reports 1061 passed,
+  0 failed and 12 skipped; the skipped cases require explicit real Docker
+  integration opt-in. Production behavior and recovery budgets are unchanged.
+  This regression cleanup is implemented and verified on its branch, not merged
+  or deployed. See [the regression validation](main-regression-88-validation.md).
 - Automatic merging is not available; the project owner merges on GitHub.
   See the [README](../README.md) for current operational limits.
 

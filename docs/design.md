@@ -32,6 +32,14 @@ role, self-maintenance, deployment recovery and complete acceptance, remain open
 Merge does not establish deployment to the running workbench. See
 [stage 1 validation](system-fault-records-78-validation.md).
 
+Issue #88 aligns the repair/review regression fixtures and assertions with the
+existing backend-controlled SDK handoff and evidence-read contract. On
+`feature/main-regression-88`, backend regression verification reports 1061 passed,
+0 failed and 12 skipped (opt-in real Docker integration tests). Production logic
+is unchanged; this change is verified on its branch, not merged or deployed.
+See [the regression validation](main-regression-88-validation.md) for the original
+35 failures, preserved negative gates and acceptance limits.
+
 ## Confirmed Requirements
 
 - Version one accepts a user-provided GitHub repository URL as its entry point.
