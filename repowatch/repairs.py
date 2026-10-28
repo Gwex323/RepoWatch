@@ -12,6 +12,7 @@ from .diagnosis import redact, redact_values
 from .environment_recovery import EnvironmentRecovery
 from .github_accounts import GitHubError
 from .github_contributions import GitHubPublisher
+from .observability import task_binding
 from .repair_model import (
     FAILURE_POLICY,
     HANDOFF_POLICY,
@@ -1074,9 +1075,11 @@ class Repairs(EnvironmentRecovery):
                     except Exception:
                         pass
                     raise
-            call = asyncio.create_task(self.engine.repair(
-                redact_values(context), event, workspace=workspace,
-            ))
+            with task_binding(task_id=row["id"], repo_id=row["repo_id"], env_id=row["env_id"],
+                              revision=env["revision"], attempt=row["attempt"]):
+                call = asyncio.create_task(self.engine.repair(
+                    redact_values(context), event, workspace=workspace,
+                ))
             try:
                 while not call.done():
                     check()

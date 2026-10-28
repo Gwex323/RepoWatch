@@ -14,7 +14,6 @@ from agents import (
     ModelResponse,
     ModelSettings,
     RunConfig,
-    RunHooks,
     Runner,
     Usage,
     function_tool,
@@ -33,9 +32,10 @@ from openai.types.responses import ResponseFunctionToolCall
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .analysis_model import REPAIR_REQUEST_TIMEOUT_SECONDS, OutputTruncated
+from .analysis_model import REPAIR_REQUEST_TIMEOUT_SECONDS, OutputTruncated, ToolCallProtocolError
 from .diagnosis import redact
 from .github_accounts import GitHubError
+from .observability import TracingHooks
 from .repair_workspace import (
     MAX_REVIEW_CORRECTIONS,
     MAX_VERIFICATION_REVISIONS,
@@ -142,6 +142,7 @@ def repair_failure_code(exc):
     for error in chain:
         for kind, code in (
             (OutputTruncated, "repair_output_truncated"),
+            (ToolCallProtocolError, "repair_tool_call_protocol_invalid"),
             (AuthenticationError, "repair_authentication_failed"),
             (RateLimitError, "repair_rate_limited"),
             (APITimeoutError, "repair_model_timeout"),
@@ -562,11 +563,12 @@ async def run_repair(model, context, event, *, workspace, reasoning_effort=None)
         review_read = True
         return {"diff": workspace.diff, "verification": workspace.verification}
 
-    class Audit(RunHooks):
+    class Audit(TracingHooks):
         async def on_agent_start(self, context, agent):
             nonlocal active
             active = agent.name
             event("agent", agent.name)
+            await super().on_agent_start(context, agent)
 
         async def on_handoff(self, context, from_agent, to_agent):
             if not workspace.ready_for_review:
@@ -574,6 +576,7 @@ async def run_repair(model, context, event, *, workspace, reasoning_effort=None)
                                else "repair_verification_required")
             handoffs.append(f"{from_agent.name} -> {to_agent.name}")
             event("handoff", handoffs[-1])
+            await super().on_handoff(context, from_agent, to_agent)
 
     def packet():
         return {
