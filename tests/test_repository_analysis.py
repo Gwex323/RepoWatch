@@ -68,14 +68,46 @@ class ReviewModel(Model):
     def __init__(self, *, invented=False, skip_review=False, findings=True):
         self.calls = 0
         self.invented, self.skip_review, self.findings = invented, skip_review, findings
+        self.scope = None
 
     async def get_response(self, system_instructions, input, **kwargs):
+        packets = [input] if isinstance(input, str) else [
+            item.get("output", item.get("content", "")) for item in input
+            if isinstance(item, dict) and (
+                item.get("type") == "function_call_output" or item.get("role") == "user"
+            )
+        ]
+        for packet in packets:
+            try:
+                value = json.loads(packet)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(value, dict):
+                scope = value.get("run_context", value).get("task_scope", value)
+                if isinstance(scope, dict) and "items" in scope and "version" in scope:
+                    self.scope = scope
         self.calls += 1
         identity = f"analysis_call_{self.calls}"
+        schema = kwargs.get("output_schema")
+        if schema is not None and "corrections" in schema.json_schema().get("properties", {}):
+            packet = json.loads(input)
+            return final_message(json.dumps({"summary": None, "corrections": [{
+                "section": target["section"], "item": target["item"], "withdraw": False,
+                "rationale": "Synthetic evidence correction only.",
+                "edits": [{"evidence": issue["evidence"],
+                           "source": len(packet["source_references"]) + 1 if self.invented else 1,
+                           "start_line": 1, "end_line": 1} for issue in target["issues"]],
+            } for target in packet["targets"]]}))
         if self.calls == 1:
             name, args = "read_execution_records", {}
         elif self.calls == 2:
             name, args = "read_source_file", {"path": "app.py", "start_line": 1, "end_line": 3}
+        elif kwargs["model_settings"].tool_choice == "register_task_scope":
+            name, args = "register_task_scope", {"items": [{
+                "key": "fixture_behavior", "title": "Fixture behavior",
+                "expected": "Preserve the original fixture behavior", "paths": ["app.py"],
+                "required_evidence": ["regression"],
+            }]}
         elif kwargs["handoffs"] and not self.skip_review:
             name, args = kwargs["handoffs"][0].tool_name, {}
         else:
@@ -90,6 +122,18 @@ class ReviewModel(Model):
                                   "quote": "invented quote" if self.invented else "print('ok')"}],
                 }] if self.findings else [],
             }
+            if self.scope and self.scope.get("items"):
+                data["scope_review"] = {
+                    "version": self.scope["version"], "accepted": False,
+                    "rationale": "Fixture scope review does not prove completion.",
+                    "items": [{"key": item["key"], "outcome": "investigating",
+                               "rationale": "Fixture only.", "evidence": [], "finding_ids": []}
+                              for item in self.scope["items"]],
+                    "exclusions": [{"key": item["key"], "outcome": "unknown",
+                                    "required_keys": [], "rationale": "Fixture limitation.",
+                                    "evidence": []}
+                                   for item in self.scope.get("execution_limits", [])],
+                }
             return ModelResponse(output=[ResponseOutputMessage(
                 id=identity, type="message", role="assistant", status="completed",
                 content=[ResponseOutputText(type="output_text", text=json.dumps(data),
@@ -275,7 +319,7 @@ def test_chat_adapter_truncation_recovers_before_executing_tools_and_keeps_hando
     metadata = [json.loads(value) for kind, value in events if kind == "provider_response"]
     assert metadata[0] == {
         "finish_reason": "length", "truncated": True, "output_tokens": 3000,
-        "reasoning_tokens": 2999,
+        "reasoning_tokens": 2999, "payload_tokens": 1,
     }
 
 
@@ -429,7 +473,7 @@ def test_truncation_metadata_is_secret_free_and_rejects_partial_output(body):
 
     async def response_with_metadata(*args, **kwargs):
         observation["truncated"] = True
-        return "partial-result-must-not-be-accepted"
+        return ModelResponse(output=[], usage=Usage(), response_id=None)
 
     model.get_response = response_with_metadata
     with pytest.raises(OutputTruncated):
@@ -666,8 +710,11 @@ def test_evidence_correction_does_not_replay_tools_or_handoffs():
                 return final_message(evidence_review("private-secret").model_dump_json())
             assert kwargs["tools"] == [] and kwargs["handoffs"] == []
             assert kwargs["model_settings"].tool_choice == "none"
-            assert "source_blocks" in kwargs["input"]
-            assert "private-secret" not in str(args) + str(kwargs)
+            assert "source_references" in kwargs["input"]
+            assert "private-secret" not in kwargs.get("system_instructions", "")
+            packet = json.loads(kwargs["input"])
+            assert packet["accepted"] is False
+            assert packet["targets"][0]["candidate"]["evidence"][0]["quote"] == "private-secret"
         return await original(*args, **kwargs)
 
     model.get_response = wrong_then_correct
@@ -701,7 +748,7 @@ def test_numbered_evidence_is_canonicalized_before_sdk_output_and_persistence():
 def test_repeated_forged_evidence_fails_after_one_correction():
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     events = []
-    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+    with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(ReviewModel(invented=True), context, lambda *e: events.append(e)))
     assert sum(kind == "evidence_retry" for kind, _ in events) == 1
     assert sum(kind == "source" for kind, _ in events) == 1
@@ -710,7 +757,7 @@ def test_repeated_forged_evidence_fails_after_one_correction():
 @pytest.mark.parametrize("outcome,code,calls", [
     ("tool", "analysis_finalization_not_followed", 2),
     ("deadline", "analysis_deadline_exceeded", 1),
-    ("silent_empty", "analysis_evidence_unverified", 2),
+    ("silent_empty", "analysis_report_invalid", 3),
     ("disclosed_empty", None, 2),
 ])
 def test_evidence_correction_keeps_deadline_tool_and_disclosure_gates(outcome, code, calls):
@@ -736,10 +783,9 @@ def test_evidence_correction_keeps_deadline_tool_and_disclosure_gates(outcome, c
             )], usage=Usage(requests=1), response_id=None)
         return final_message(json.dumps({
             "summary": "Synthetic correction",
-            "limitations": (
-                ["Unsupported finding excluded."] if outcome == "disclosed_empty" else []
-            ),
-            "findings": [],
+            "corrections": [{"section": "findings", "item": 1, "withdraw": True,
+                             "rationale": "Unsupported finding excluded."
+                             if outcome == "disclosed_empty" else "", "edits": []}],
         }))
 
     model.get_response = respond
@@ -913,7 +959,7 @@ def test_correction_never_bypasses_source_evidence_checks():
         return await original(*args, **kwargs)
 
     model.get_response = bad_then_invented
-    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+    with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(model, context))
     assert len(attempts) == 3
 
@@ -1225,7 +1271,7 @@ def test_provider_ignoring_forced_handoff_is_rejected_without_fabricated_handoff
     with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
         asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
     assert not any(kind == "handoff" for kind, _ in events)
-    assert model.calls == STAGE_LIMITS[ROLES[0]][0] + 1
+    assert model.calls == STAGE_LIMITS[ROLES[0]][0] + 2
 
 
 def test_reviewer_cannot_continue_reading_after_finalization_budget():
@@ -1256,7 +1302,7 @@ def test_native_source_tools_handoffs_and_evidence_validation():
     assert len(report["handoffs"]) == 3
     assert ("source", "app.py") in events
     assert report["findings"][0]["evidence"][0]["quote"] == "print('ok')"
-    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+    with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(ReviewModel(invented=True), context))
     with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
         asyncio.run(run_analysis(ReviewModel(skip_review=True), context))
@@ -1486,7 +1532,7 @@ def test_failure_stage_and_retry_attempt_are_persisted_without_secrets(
     completed = analyses.get(row["id"])
     assert completed["status"] == "completed"
     assert completed["failure_details"] is None
-    assert completed["progress"]["model_calls"] == 6
+    assert completed["progress"]["model_calls"] == 7  # Includes durable scope registration.
     assert sum(event["kind"] == "attempt" for event in completed["events"]) == 2
 
 

@@ -52,6 +52,15 @@ def test_output_budget_grows_with_scope_and_historical_items_and_stays_bounded()
     assert 240 < scoped["reserve_seconds"] <= large["reserve_seconds"] <= 360
 
 
+@pytest.mark.parametrize("effort", ["high", "xhigh", "max"])
+def test_high_reasoning_report_reserves_reasoning_space_and_time_without_changing_effort(effort):
+    small = output_budget(context(), effort)
+    large = output_budget({"task_scope": {"items": [{}] * 6}}, effort)
+    assert small["max_tokens"] == 10000
+    assert large["max_tokens"] == 12600
+    assert small["reserve_seconds"] == large["reserve_seconds"] == 360
+
+
 def test_compaction_merges_only_read_lines_and_retains_complete_requirements():
     value = context()
     original = "Original request, including Trae Work CN. " * 50
@@ -218,7 +227,7 @@ def test_resume_still_rejects_fabricated_evidence_and_persists_no_findings(servi
     assert result["status"] == "queued"
     assert result["automatic_recovery"]["state"] == "waiting"
     assert result["report"] is None and not result["findings"]
-    assert len(engine.requests) == 2
+    assert len(engine.requests) == 3
 
 
 def test_legacy_failure_without_checkpoint_restarts_full_flow(service):  # noqa: F811
@@ -360,7 +369,7 @@ def test_finalization_retry_uses_compact_input_and_bounded_budget(
 ):
     monkeypatch.setattr("repowatch.repository_analysis.RETRY_DELAY_SECONDS", 0)
     value, calls, events = context(), [], []
-    value["task_scope"] = {"items": [{"key": f"item_{i}"} for i in range(items)]}
+    value["task_scope"] = {"version": 1, "items": [{"key": f"item_{i}"} for i in range(items)]}
     model = ReviewModel()
     original = model.get_response
 

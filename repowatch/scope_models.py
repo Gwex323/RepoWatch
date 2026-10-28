@@ -8,7 +8,8 @@ from pydantic import BaseModel, ConfigDict, Field
 class ScopeRequirement(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: str = Field(pattern=r"^[a-z][a-z0-9_]{0,63}$")
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=200,
+                       description="Required short title for this acceptance item; never omit.")
     expected: str = Field(min_length=1, max_length=1600)
     paths: list[str] = Field(min_length=1, max_length=12)
     required_evidence: list[Literal["regression", "integration", "client"]] = Field(
@@ -49,6 +50,24 @@ class ScopeReview(BaseModel):
     rationale: str = Field(min_length=1, max_length=1600)
     items: list[ScopeConclusion] = Field(min_length=1, max_length=32)
     exclusions: list[ScopeExclusion] = Field(default_factory=list, max_length=64)
+
+
+def scope_mapping_issues(findings, review, requirements, finding_ids):
+    """Shared, value-free reference checks before model acceptance and persistence."""
+    issues = []
+    for index, finding in enumerate(findings, 1):
+        positions = [position for position, key in enumerate(finding.get("scope_keys", []), 1)
+                     if key not in requirements]
+        if positions:
+            issues.append({"section": "findings", "item": index, "field": "scope_keys",
+                           "reason": "unknown_scope_key", "positions": positions})
+    for index, item in enumerate((review or {}).get("items", []), 1):
+        positions = [position for position, identity in enumerate(item["finding_ids"], 1)
+                     if identity not in finding_ids]
+        if positions:
+            issues.append({"section": "scope_items", "item": index, "field": "finding_ids",
+                           "reason": "unknown_finding_id", "positions": positions})
+    return issues
 
 
 class RepairScopeCoverage(BaseModel):

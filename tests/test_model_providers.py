@@ -17,7 +17,7 @@ from test_github_accounts import MemoryVault
 from test_repairs import RepairModel, RepairRuntime
 from test_repository_analysis import ReviewModel
 
-from repowatch.analysis_model import AnalysisModel
+from repowatch.analysis_model import AnalysisModel, DeepSeekChatModel
 from repowatch.app import create_app
 from repowatch.diagnosis import run_agents
 from repowatch.github_accounts import GitHubAccounts
@@ -293,7 +293,7 @@ def test_evaluation_rejects_different_role_models_even_when_default_matches():
     assert not _model_consistent(first, second)
 
 
-def test_selected_deepseek_role_keeps_its_own_handoff_policy(catalog):
+def test_selected_deepseek_role_keeps_its_own_provider_compatibility(catalog):
     providers, engine = catalog
     saved = create(providers)
     saved = create(providers, name="DeepSeek", base_url="https://api.deepseek.com/v1")
@@ -301,17 +301,19 @@ def test_selected_deepseek_role_keeps_its_own_handoff_policy(catalog):
                           "problem_investigator": choice(saved, index=1)})
 
     async def runner(model, *args, **kwargs):
-        assert not model_for_role(model, "repository_analyst").retry_handoff_mismatch
+        assert not isinstance(model_for_role(model, "repository_analyst").delegate,
+                              DeepSeekChatModel)
         chosen = model_for_role(model, "problem_investigator")
-        assert chosen.retry_handoff_mismatch
+        assert isinstance(chosen.delegate, DeepSeekChatModel)
         assert reasoning_for_role(kwargs["reasoning_effort"], "problem_investigator") is None
-        assert not model_for_role(model, "independent_reviewer").retry_handoff_mismatch
+        assert not isinstance(model_for_role(model, "independent_reviewer").delegate,
+                              DeepSeekChatModel)
         return {}
 
     asyncio.run(engine._run(runner, {}, lambda *_: None, flow="analysis"))
 
 
-def test_handoff_retry_is_selected_per_role_in_the_native_graph(monkeypatch):
+def test_handoff_retry_does_not_require_a_provider_flag_in_the_native_graph(monkeypatch):
     from repowatch.repository_analysis import STAGE_LIMITS
 
     for role, turns in zip(("repository_analyst", "problem_investigator",
@@ -320,7 +322,6 @@ def test_handoff_retry_is_selected_per_role_in_the_native_graph(monkeypatch):
     shared, events = ReviewModel(), []
 
     class HandoffProbe(RoleProbe):
-        retry_handoff_mismatch = True
         rejected = False
 
         async def get_response(self, *args, **kwargs):

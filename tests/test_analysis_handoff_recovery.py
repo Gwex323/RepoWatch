@@ -98,7 +98,7 @@ def test_ignored_recovery_fails_once_without_faking_missing_handoffs():
         asyncio.run(run_analysis(model, context(), lambda *args: events.append(args)))
     assert [name for kind, name in events if kind == "handoff"] == [f"{ROLES[0]} -> {ROLES[1]}"]
     assert events.count(("handoff_recovery", ROLES[1])) == 1
-    assert len(model.recoveries) == 1 and model.calls == 5
+    assert len(model.recoveries) == 2 and model.calls == 6
     assert events.count(("source", "app.py")) == 1
     assert events.count(("evidence", "execution_records")) == 1
 
@@ -114,7 +114,7 @@ def test_refusal_is_not_reinterpreted_as_permission_to_continue():
 
 def test_recovery_does_not_relax_final_current_source_quote_validation():
     model, events = EarlyAnswerModel([ROLES[1]], invented=True), []
-    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+    with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(model, context(), lambda *args: events.append(args)))
     assert events.count(("handoff_recovery", ROLES[1])) == 1
     assert sum(kind == "handoff" for kind, _ in events) == 3
@@ -137,7 +137,7 @@ def test_early_role_recovery_persists_only_after_independent_review(service):  #
     assert len(completed["report"]["handoffs"]) == 3
     assert sum(item["kind"] == "attempt" for item in completed["events"]) == 1
     assert sum(item["kind"] == "handoff_recovery" for item in completed["events"]) == 1
-    assert completed["progress"]["model_calls"] == 7
+    assert completed["progress"]["model_calls"] == 8  # Includes durable scope registration.
     assert completed["progress"]["source_reads"] == 1
     with execution.store.connection() as db:
         assert db.execute("SELECT COUNT(*) FROM repair_tasks").fetchone()[0] == 0
@@ -150,12 +150,13 @@ def test_cancel_after_early_stop_cannot_publish_late_recovered_report(service): 
     class CancellingEngine(Engine):
         async def analyze(self, context, event):
             def record(kind, value):
-                event(kind, value)
+                result = event(kind, value)
                 if kind == "handoff_recovery":
                     with execution.store.connection() as db:
                         db.execute("UPDATE repository_analyses SET status='cancelled',"
                                    "version=version+1 WHERE env_id=? AND status='running'",
                                    (env["id"],))
+                return result
             return await run_analysis(EarlyAnswerModel([ROLES[1]]), context, record)
 
     analyses = Analyses(execution, CancellingEngine())

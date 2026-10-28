@@ -16,6 +16,7 @@ from repowatch.historical_review import (
 from repowatch.repository_analysis import (
     ROLES,
     Analyses,
+    AnalysisFailure,
     Review,
     evidence_issues,
     normalize_evidence_quotes,
@@ -48,7 +49,7 @@ def recheck(outcome="still_present"):
 def report(items):
     return {
         "summary": "Fixture, not a real diagnosis.", "limitations": ["Source review only."],
-        "findings": [], "historical_rechecks": items,
+        "findings": [], "historical_rechecks": items, "scope_review": None,
         "files_read": ["app.py"], "read_ranges": {"app.py": [[1, 1]]},
         "execution_read": True,
         "handoffs": [f"{a} -> {b}" for a, b in zip(ROLES, ROLES[1:])],
@@ -138,7 +139,14 @@ class HistoricalModel(ReviewModel):
         for output in response.output:
             if output.type == "message":
                 data = json.loads(output.content[0].text)
-                data["historical_rechecks"] = self.items
+                if "corrections" in data:
+                    withdraw = bool(self.items and self.items[0]["outcome"] == "not_covered")
+                    data["summary"] = "Unsupported history is not covered." if withdraw else None
+                    for item in data["corrections"]:
+                        item.update(withdraw=withdraw, edits=[],
+                                    rationale="Synthetic historical correction.")
+                else:
+                    data["historical_rechecks"] = self.items
                 output.content[0].text = json.dumps(data)
         return response
 
@@ -339,10 +347,13 @@ def test_historical_evidence_correction_is_bounded_and_keeps_origin_packet():
     assert model.calls == 7
     assert len([kind for kind, _ in events if kind == "evidence_retry"]) == 1
     packet = json.loads(model.inputs[-1][1])
-    assert packet["run_context"]["historical_findings"]["items"][0]["finding_id"] == "finding_old"
-    assert packet["execution_was_read"] is True
-    assert packet["source_evidence"][0]["path"] == "app.py"
-    with pytest.raises(ValueError, match="analysis_evidence_unverified"):
+    assert packet["targets"][0]["section"] == "historical_rechecks"
+    assert packet["source_references"][0]["path"] == "app.py"
+    assert packet["source_references"][0]["text"] == context()["files"]["app.py"]
+    evidence = packet["evidence_data"]
+    assert evidence["run_context"]["historical_findings"]["items"][0]["finding_id"] == "finding_old"
+    assert evidence["execution_was_read"] is True
+    with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(HistoricalModel([
             {**recheck("fixed"), "finding_id": "invented_id"},
         ]), context()))

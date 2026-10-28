@@ -42,6 +42,14 @@ type System = {
   repository_analysis?: { enabled: boolean; model: string };
   automatic_repair?: { enabled: boolean; model_enabled?: boolean };
   schedule?: { enabled: boolean; enabled_repositories: number };
+  tracing_export?: boolean;
+  langfuse?: { enabled: boolean; reason: string; base_url: string | null;
+    capture_mode: string; connection_verified: boolean; instrumentation_error: boolean };
+};
+const langfuseReasons: Record<string, string> = {
+  disabled: '未启用', configuration_required: '等待服务地址和项目密钥',
+  invalid_url: '服务地址格式有误', sdk_required: '需要安装追踪依赖',
+  initialization_failed: '初始化失败 · 任务继续运行', initialized: '已初始化 · 连通性未核验',
 };
 type ScheduleOverview = {
   repo_id: string; repository: string; kind: string; enabled: boolean;
@@ -508,10 +516,17 @@ function App() {
                   ? `${system.schedule.enabled_repositories} 个仓库` : '未启用'],
                 ['自动合并', '禁止'],
                 ['分析任务最大轮数', String(system?.max_turns)], ['修复任务最大尝试次数', String(system?.max_attempts)],
-                ['外部 Trace 上传', '关闭'], ['访问范围', '本机 · 所有者登录'],
+                ['外部 Trace 上传', system?.tracing_export ? 'Langfuse · 仅运行元数据' : '关闭'],
+                ['Langfuse', system?.langfuse?.instrumentation_error ? '追踪组件异常 · 任务继续运行'
+                  : langfuseReasons[system?.langfuse?.reason ?? 'disabled'] ?? '状态未知'],
+                ['访问范围', '本机 · 所有者登录'],
               ]
                 .map(([label, value]) => <div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}
-            </dl></div>
+            </dl>
+            <p className="section-intro">Langfuse 可追踪任务、Agent、模型请求及工具调用的耗时、用量和结果。
+              通过启动环境变量配置，重启后生效；不上传源码、提示词、模型正文或工具参数。
+              {system?.langfuse?.base_url && <> <a href={system.langfuse.base_url} target="_blank" rel="noreferrer">打开 Langfuse</a>。</>}
+            </p></div>
           </section>}
         </>}
         <footer className="page-footer"><span><ShieldCheck size={13} />所有合并由项目拥有者执行</span><span>RepoWatch / 0.1.0</span></footer>

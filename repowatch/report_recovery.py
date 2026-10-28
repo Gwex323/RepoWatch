@@ -8,6 +8,8 @@ import hashlib
 import json
 from collections import Counter
 
+from .analysis_tools import high_reasoning_reserve
+
 PROTOCOL = 1
 MAX_CHECKPOINT_BYTES = 160_000
 MAX_OUTPUT_TOKENS = 100_000
@@ -24,12 +26,13 @@ def public_context(context):
     return {key: value for key, value in context.items() if not key.startswith("_")}
 
 
-def output_budget(context):
+def output_budget(context, reasoning_effort=None):
     """Reserve space per acceptance item / historical conclusion, with a hard cap."""
     scope = context.get("task_scope") or {}
     historical = context.get("historical_findings") or {}
     items = len(scope.get("items", [])) + len(historical.get("items", []))
-    tokens = min(MAX_OUTPUT_TOKENS, 5000 + max(0, items - 2) * 650)
+    tokens = min(MAX_OUTPUT_TOKENS, 5000 + max(0, items - 2) * 650
+                 + high_reasoning_reserve(reasoning_effort))
     reserve = max(MIN_FINALIZATION_RESERVE_SECONDS, min(360, (tokens + 34) // 35 + 110))
     return {"max_tokens": tokens, "reserve_seconds": reserve, "review_items": items}
 
@@ -127,7 +130,8 @@ def compact_context(context):
     return replace(value), {reference: text for text, reference in refs.items()}
 
 
-def final_input(context, state):
+def source_evidence(context, state):
+    """Materialize only immutable snapshot lines covered by successful reads."""
     evidence = []
     for path in state["files_read"]:
         lines = context["files"][path].splitlines()
@@ -141,6 +145,11 @@ def final_input(context, state):
             {"start_line": start, "end_line": end, "text": "\n".join(lines[start-1:end])}
             for start, end in merged
         ]})
+    return evidence
+
+
+def final_input(context, state):
+    evidence = source_evidence(context, state)
     run_context, shared_texts = compact_context(context)
     return json.dumps({
         "review_request": (

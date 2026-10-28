@@ -45,7 +45,7 @@ type Analysis = {
   coverage: { captured: number; eligible: number; complete: boolean } | null;
   progress?: { stage: string | null; model_calls: number; source_reads: number };
   failure_details?: { stage: string | null; elapsed_seconds: number; http_status: number | null } | null;
-  provider_response?: { finish_reason?: string; output_tokens?: number; reasoning_tokens?: number; truncated?: boolean } | null;
+  provider_response?: { finish_reason?: string; output_tokens?: number; reasoning_tokens?: number; payload_tokens?: number; truncated?: boolean } | null;
 };
 const statuses: Record<string, string> = {
   cancelled: '已取消', waiting_model: '等待模型配置', queued: '等待分析', running: 'Agent 分析中',
@@ -63,7 +63,7 @@ const recoveryStopReasons: Record<string, string> = {
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
   scope_review_incomplete: '范围审查遗漏验收项或版本不一致；原范围已保留，请继续分析与范围审查。',
-  scope_mapping_invalid: '问题与验收项的关联不完整，请继续范围审查。',
+  scope_mapping_invalid: '问题与验收项的关联引用未通过校验，报告未保存。请查看具体原因；若可恢复报告，可从已保存证据继续。',
   scope_changed: '任务范围已变化，请刷新后重新审查。',
   analysis_model_changed: '模型配置已变化，请刷新后重试；分析将使用当前配置重新执行。',
   analysis_model_key_required: '请填写分析模型的 API Key。',
@@ -87,7 +87,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_recovery_budget_exhausted: '本条分析的累计恢复额度已用完。已有证据和失败记录已保留；重试不会重置额度。',
   analysis_recovery_basis_changed: '恢复依据已变化，本次自动续办停止，未复用过期证据。请确认当前任务后重新分析。',
   analysis_provider_unreachable: '无法连接模型服务，请检查地址与网络。',
-  analysis_evidence_unverified: '模型返回的源码证据未通过校验，本次未保存问题，请重试。',
+  analysis_evidence_unverified: '源码证据未通过完整校验，本次未保存问题。请查看具体原因；若可恢复报告，可从已保存证据继续。',
   analysis_review_incomplete: 'Agent 未完成规定的源码读取与交接，本次未保存问题，请重试。',
   analysis_execution_unread: 'Agent 未读取已保存的测试／启动记录，报告未保存。请重试分析。',
   analysis_source_unread: 'Agent 未成功读取任何源码，报告未保存。请重试分析。',
@@ -106,12 +106,17 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   resolution_verification_failed: '无法核验修复 PR 的合并状态，请检查 GitHub 账号与网络后重试。',
   analysis_max_turns_exceeded: '分析已达到总调用轮数上限，尚未生成完整报告。',
   analysis_stage_budget_exceeded: '当前阶段已耗尽预算，尚未完成交接或报告。',
-  analysis_handoff_not_followed: '已要求交接，但模型未返回有效的交接调用。请检查模型服务是否支持指定工具调用。',
+  analysis_handoff_not_followed: '指定角色交接未通过，本轮分析停止。请查看交接调用检查中的原因与纠正记录。',
   analysis_finalization_not_followed: '已要求提交报告，但模型仍尝试调用工具。请检查模型服务的工具选择支持。',
   analysis_model_output_invalid: '模型返回了无效的工具调用或输出格式，本次未保存问题。',
-  analysis_output_truncated: '模型输出达到长度上限而被截断，有限扩容重试仍未完成，本次未保存问题。',
+  analysis_tool_call_protocol_invalid: '模型工具调用的协议字段不符合要求，无法安全兼容，本批调用未执行。请查看协议兼容检查记录。',
+  analysis_output_truncated: '模型输出达到生成上限，扩容空间或重试额度已用完，本次未保存问题。',
   analysis_provider_empty_response: '模型服务没有返回可用的结果，请检查服务兼容性和状态。',
-  analysis_tool_arguments_invalid: '模型返回的工具参数不是合法 JSON，本次未执行该调用。',
+  analysis_tool_arguments_invalid: '模型工具参数未通过 JSON 或字段校验，本次未执行该调用。',
+  analysis_tool_arguments_exhausted: '工具调用的自动纠正次数已用完，本批调用未执行。请查看最后一次参数校验的具体原因。',
+  analysis_tool_not_allowed: '模型请求了当前角色无权使用的工具，该调用已阻止。请查看角色与工具记录。',
+  analysis_scope_unregistered: '仓库分析尚未成功登记任务范围，阶段预算已耗尽，本轮未进入后续处理。',
+  analysis_scope_read_not_followed: '模型未按要求登记任务范围，本轮未进入后续处理。',
   analysis_json_invalid: '模型返回内容未通过 JSON 校验，本次未保存问题。',
   analysis_report_invalid: '模型报告字段不符合要求，本次未保存问题。',
   analysis_model_refused: '模型拒绝完成本次分析，尚未生成报告。',
@@ -128,6 +133,85 @@ const names: Record<string, string> = {
   repository_analyst: '仓库分析', problem_investigator: '问题调查',
   reproduction_assistant: '复现辅助', independent_reviewer: '独立审查',
 };
+type ToolArgumentDetail = {
+  role?: string; tool?: string; reason?: string; fields?: string[];
+  recoverable?: boolean; corrections_remaining?: number;
+  issues?: { field: string; code: string }[]; line?: number; column?: number;
+  suspected_output_limit?: boolean;
+};
+const toolNames: Record<string, string> = {
+  register_task_scope: '登记任务范围', read_source_file: '读取源码',
+  read_execution_records: '读取运行记录',
+};
+function toolArgumentReason(detail: ToolArgumentDetail) {
+  const reasons: Record<string, string> = {
+    invalid_json: 'JSON 语法错误', object_required: '参数应为 JSON 对象',
+    unexpected_field: '包含多余字段', arguments_schema: 'JSON 可解析，但字段不符合要求',
+    repair_batch_mismatch: '未按要求纠正原工具批次，不能改为交接、报告或其他调用',
+    repair_valid_fields_changed: '纠正时改动了原有合法字段或条目数量',
+  };
+  const labels: Record<string, string> = {
+    required_field: '缺少必填字段', enum_value: '不在允许选项中',
+    string_required: '应为文本', integer_required: '应为整数', list_required: '应为列表',
+    object_required: '应为对象', unexpected_field: '多余字段', too_long: '超过长度上限',
+    too_short: '未达到最小长度', pattern: '格式不符合要求', invalid_value: '值不符合要求',
+  };
+  const fields = detail.issues?.length
+    ? detail.issues.map(issue => `${issue.field}：${labels[issue.code] ?? '不符合要求'}`).join('；')
+    : detail.fields?.join('、');
+  return `${reasons[detail.reason ?? ''] ?? '字段不符合要求'}${fields ? `（${fields}）` : ''}${
+    detail.line ? ` · 第 ${detail.line} 行第 ${detail.column} 列` : ''}`;
+}
+function analysisFailureMessage(analysis: Analysis) {
+  const message = errorMessage(analysis.error ?? '');
+  if (['analysis_execution_read_not_followed', 'analysis_source_read_not_followed',
+    'analysis_scope_read_not_followed', 'analysis_model_refused'].includes(analysis.error ?? '')) {
+    for (let index = analysis.events.length - 1; index >= 0; index--) {
+      const event = analysis.events[index];
+      if (event.kind === 'attempt') break;
+      if (event.kind === 'required_read_validation' || event.kind === 'handoff_validation') return `${message} ${eventLabel(event)}。`;
+    }
+    return message;
+  }
+  if (analysis.error === 'analysis_handoff_not_followed') {
+    for (let index = analysis.events.length - 1; index >= 0; index--) {
+      const event = analysis.events[index];
+      if (event.kind === 'attempt') break;
+      if (event.kind === 'handoff_validation' || event.kind === 'handoff_recovery_stopped') {
+        return `${message} ${eventLabel(event)}。`;
+      }
+    }
+    return message;
+  }
+  if (['analysis_evidence_unverified', 'analysis_report_invalid', 'scope_mapping_invalid'].includes(analysis.error ?? '')) {
+    const kind = analysis.error === 'scope_mapping_invalid' ? 'scope_mapping_validation'
+      : analysis.error === 'analysis_evidence_unverified' ? 'evidence_validation' : 'report_validation';
+    for (let index = analysis.events.length - 1; index >= 0; index--) {
+      const event = analysis.events[index];
+      if (event.kind === 'attempt') break;
+      if (event.kind === kind) return `${message} ${eventLabel(event)}。`;
+    }
+    return message;
+  }
+  if (analysis.error === 'analysis_output_truncated') {
+    const response = analysis.provider_response;
+    const content = response?.payload_tokens ?? (response?.output_tokens !== undefined && response.reasoning_tokens !== undefined
+      ? Math.max(0, response.output_tokens - response.reasoning_tokens) : undefined);
+    return `${message}${response?.reasoning_tokens !== undefined
+      ? ` 最后一次推理 ${response.reasoning_tokens} tokens${content !== undefined ? `，非推理输出 ${content} tokens` : ''}。` : ''}`;
+  }
+  if (!['analysis_tool_arguments_invalid', 'analysis_tool_arguments_exhausted'].includes(analysis.error ?? '')) return message;
+  for (let index = analysis.events.length - 1; index >= 0; index--) {
+    const event = analysis.events[index];
+    if (event.kind === 'attempt') break;
+    if (event.kind !== 'tool_arguments_invalid') continue;
+    try {
+      const detail = JSON.parse(event.agent) as ToolArgumentDetail;
+      return `${message} ${toolNames[detail.tool ?? ''] ?? '工具调用'}：${toolArgumentReason(detail)}。`;
+    } catch { return message; }
+  }
+  return message;
+}
 function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'finding_continued') return '历史确认问题已在当前版本继续修复';
   const name = names[item.agent] ?? item.agent;
@@ -152,14 +236,24 @@ function eventLabel(item: Analysis['events'][number]) {
   }
   if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
   if (item.kind === 'handoff_retry') return `${name} · 指定交接未通过，使用同一轮证据重试一次`;
+  if (item.kind === 'handoff_recovered') return `${name} · 交接纠正已通过校验，等待实际交接`;
+  if (item.kind === 'handoff_recovery_stopped') return '交接纠正已停止：阶段时限已到，本批未执行';
   if (item.kind === 'handoff_validation') {
     try {
       const detail = JSON.parse(item.agent) as {
-        expected?: string; calls?: number; matching?: number; names?: string[]; accepted?: boolean;
+        expected?: string; calls?: number; matching?: number; accepted?: boolean;
+        reason?: string; recovery?: string; corrections_remaining?: number;
       };
-      const actual = detail.names?.length ? detail.names.join('、') : '无工具调用';
-      return `交接调用检查：期望 ${detail.expected ?? '指定工具'} · 收到 ${actual} · ${
-        detail.accepted ? '通过' : `未通过（${detail.matching ?? 0}/${detail.calls ?? 0} 匹配）`}`;
+      const target = names[(detail.expected ?? '').replace(/^transfer_to_/, '')] ?? '指定角色';
+      const reasons: Record<string, string> = { missing_call: '没有返回交接调用', wrong_tool: '调用不符合指定交接',
+        too_many_calls: '返回了多条调用', refusal: '模型明确拒绝' };
+      const recovery: Record<string, string> = { retry: '准备有限纠正', retry_exhausted: '本阶段交接纠正机会已用完',
+        shared_budget_exhausted: '共享工具纠正额度已用完', stage_deadline: '阶段时限已到',
+        argument_correction_active: '不能改变原参数纠正批次', refusal: '已停止，不重试拒绝' };
+      return `交接调用检查：交给${target} · 匹配 ${detail.matching ?? 0}/${detail.calls ?? 0} · ${
+        detail.accepted ? '通过' : reasons[detail.reason ?? ''] ?? '未通过'}${
+          recovery[detail.recovery ?? ''] ? ` · ${recovery[detail.recovery ?? '']}` : ''}${
+          detail.corrections_remaining !== undefined ? ` · 共享纠正剩余 ${detail.corrections_remaining} 次` : ''}`;
     } catch { return '交接调用检查已记录'; }
   }
   if (item.kind === 'model_call') return `${name} · 请求模型`;
@@ -167,24 +261,100 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'retry_call') return `${name} · 正在重试当前请求`;
   if (item.kind === 'output_retry') return `${name} · 输出被截断，增加额度后重试当前请求`;
   if (item.kind === 'format_retry') return `${name} · 报告格式不合格，正在纠正一次`;
+  if (item.kind === 'tool_arguments_retry') return `${name} · 保留已有证据，正在纠正原工具批次`;
+  if (item.kind === 'tool_arguments_repaired') return `${name} · 参数纠正通过校验，等待工具实际执行`;
+  if (item.kind === 'required_read_retry') return '必读工具调用缺失，正在有限纠正；此前没有执行读取';
+  if (item.kind === 'required_read_recovered') return '必读调用已通过检查，等待工具实际执行';
+  if (item.kind === 'tool_arguments_preserved') {
+    try {
+      const detail = JSON.parse(item.agent) as { role?: string; calls?: { tool?: string; fields?: string[] }[] };
+      const fields = detail.calls?.flatMap(call => call.fields ?? []).join('、');
+      return `${names[detail.role ?? ''] ?? '当前角色'} · 已保留原合法参数，仅采纳错误字段的修正${fields ? `（${fields}）` : ''}，等待工具实际执行`;
+    } catch { return '已保留原合法参数，仅采纳错误字段的修正，等待工具实际执行'; }
+  }
+  if (item.kind === 'scope_registered') return `任务范围已登记：${item.agent} 项`;
+  if (item.kind === 'tool_output_budget' || item.kind === 'tool_output_retry') {
+    try {
+      const budget = JSON.parse(item.agent) as { role?: string; max_tokens?: number; from?: number; to?: number };
+      return `${names[budget.role ?? ''] ?? '当前角色'} · ${budget.to
+        ? `疑似输出额度不足，扩容 ${budget.from} → ${budget.to}` : `工具输出预算 ${budget.max_tokens}`} tokens · 保持已配置推理强度`;
+    } catch { return '已调整工具输出预算'; }
+  }
+  if (item.kind === 'tool_access_rejected') {
+    try {
+      const denied = JSON.parse(item.agent) as { role?: string; tool?: string };
+      return `${names[denied.role ?? ''] ?? '当前角色'} · 已阻止越权工具 ${denied.tool ?? ''}`;
+    } catch { return '已阻止越权工具调用'; }
+  }
+  if (item.kind === 'tool_arguments_invalid') {
+    try {
+      const detail = JSON.parse(item.agent) as ToolArgumentDetail;
+      return `${names[detail.role ?? ''] ?? '当前角色'} · ${toolNames[detail.tool ?? ''] ?? '工具调用'}：${toolArgumentReason(detail)}${
+        detail.suspected_output_limit ? ' · 疑似达到输出额度' : ''}；本批调用未执行，${
+        detail.recoverable ? `准备自动纠正，此后剩余 ${detail.corrections_remaining ?? 0} 次` : '本次自动纠正已停止'}`;
+    } catch { return '工具参数校验未通过，本批调用未执行'; }
+  }
   if (item.kind === 'evidence_retry') return `${name} · 源码证据不匹配，正在纠正一次`;
+  if (item.kind === 'evidence_correction') {
+    try {
+      const detail = JSON.parse(item.agent) as { role?: string; items?: number; issues?: number; protocol?: string };
+      return `${names[detail.role ?? ''] ?? '独立审查'} · 保留报告其他内容，仅纠正 ${detail.items ?? 0} 项中的 ${detail.issues ?? 0} 处证据${detail.protocol === 'source_references' ? '；选择已读片段，由程序复制源码原文' : ''}`;
+    } catch { return '保留报告其他内容，仅纠正未通过校验的证据'; }
+  }
+  if (item.kind === 'evidence_correction_applied') return `${name} · 已合并证据纠正，正在检查完整报告`;
+  if (item.kind === 'scope_mapping_validation') {
+    try {
+      const detail = JSON.parse(item.agent) as { section?: string; item?: number; reason?: string; positions?: number[] };
+      const target = detail.section === 'findings' ? '新问题' : '范围验收项';
+      const reason = detail.reason === 'unknown_scope_key' ? '引用了未登记的验收项'
+        : detail.reason === 'unknown_finding_id' ? '引用了本任务中不存在的问题 ID；新问题应通过验收项 key 关联' : '关联引用无效';
+      return `${target} ${detail.item ?? ''} · ${reason}${detail.positions?.length ? `（第 ${detail.positions.join('、')} 个引用）` : ''}`;
+    } catch { return '问题与验收项关联检查未通过'; }
+  }
+  if (item.kind === 'scope_mapping_correction') {
+    try {
+      const detail = JSON.parse(item.agent) as { role?: string; items?: number };
+      return `${names[detail.role ?? ''] ?? '独立审查'} · 正在纠正 ${detail.items ?? 0} 项关联，保留问题正文与源码证据`;
+    } catch { return '正在纠正问题与验收项关联'; }
+  }
+  if (item.kind === 'scope_mapping_correction_applied') return `${name} · 已合并关联纠正，正在重新校验完整报告`;
+  if (item.kind === 'output_limit') {
+    try {
+      const detail = JSON.parse(item.agent) as { role?: string; phase?: string; max_tokens?: number; reasoning_tokens?: number; payload_tokens?: number; can_expand?: boolean };
+      const phase = ({ evidence_correction: '局部证据纠正', scope_mapping_correction: '范围关联纠正', tool_arguments: '工具参数纠正', report: '最终报告', exploration: '分析探索' } as Record<string, string>)[detail.phase ?? ''] ?? '模型请求';
+      return `${names[detail.role ?? ''] ?? '当前角色'} · ${phase}达到 ${detail.max_tokens ?? 0} tokens 上限${detail.reasoning_tokens !== undefined ? ` · 推理 ${detail.reasoning_tokens}` : ''}${detail.payload_tokens !== undefined ? ` · 非推理输出 ${detail.payload_tokens}` : ''} · ${detail.can_expand ? '按剩余额度扩容' : '扩容空间或重试额度已用完'}`;
+    } catch { return '模型输出达到本次生成上限'; }
+  }
   if (item.kind === 'evidence_normalized') return `源码引用已去除显示行号：${item.agent} 处`;
   if (item.kind === 'evidence_validation') {
     try {
-      const detail = JSON.parse(item.agent) as { finding?: number; evidence?: number; reason?: string; historical?: boolean };
+      const detail = JSON.parse(item.agent) as { finding?: number; evidence?: number; reason?: string; historical?: boolean; scope?: string };
       const reason = ({ unknown_file: '文件不存在', unread_file: '文件未读取',
         invalid_range: '行号范围无效', unread_range: '范围包含未读行',
         quote_mismatch: '引用文本与源码不一致',
         unknown_historical_finding: '旧问题编号不在本轮范围内',
         duplicate_historical_finding: '旧问题被重复复核',
         missing_current_evidence: '缺少当前源码证据' } as Record<string, string>)[detail.reason ?? ''] ?? '证据未匹配';
-      return `${detail.historical ? '旧问题' : '问题'} ${detail.finding} · 证据 ${detail.evidence}：${reason}`;
+      const target = detail.historical ? '旧问题' : detail.scope === 'items' ? '范围验收项' : detail.scope === 'exclusions' ? '运行限制' : '问题';
+      return `${target} ${detail.finding} · 证据 ${detail.evidence}：${reason}`;
     } catch { return '源码证据检查未通过'; }
   }
   if (item.kind === 'report_finalization') return `${name} · 使用已读取证据生成最终报告`;
   if (item.kind === 'finalization_thinking') return '最终报告请求：已关闭额外思考';
-  if (item.kind === 'report_validation') return item.agent === 'invalid_json'
-    ? '报告格式检查：不是合法 JSON' : '报告格式检查：字段不符合要求';
+  if (item.kind === 'report_validation') {
+    const selectionReason = ({ evidence_correction_unknown_source: '所选源码片段编号不在实际读取目录中',
+      evidence_correction_source_range: '所选行区间越界、跨越未读间隙或超过行数上限',
+      evidence_correction_source_length: '所选源码片段为空白或超过 1200 字符',
+      scope_correction_targets_mismatch: '未按原错误项目逐项纠正关联',
+      scope_correction_unknown_reference: '所选验收项或问题编号不在本次目录中',
+      scope_correction_invalid_selection: '关联选择重复、为空或不符合项目要求',
+      scope_correction_unresolved_has_links: '待审查关联同时提交了确定引用' } as Record<string, string>)[item.agent];
+    if (selectionReason) return `证据选择检查：${selectionReason}`;
+    return item.agent === 'invalid_json'
+    ? '报告格式检查：不是合法 JSON' : item.agent === 'scope_review_required'
+      ? '报告范围检查：缺少已登记验收项的审查结论' : item.agent === 'scope_review_incomplete'
+        ? '报告范围检查：版本、验收项或运行限制未完整覆盖' : '报告格式检查：字段不符合要求';
+  }
   if (item.kind === 'report_diagnostics') {
     try {
       const detail = JSON.parse(item.agent) as { category?: string; text_chars?: number; line?: number; column?: number;
@@ -211,6 +381,46 @@ function eventLabel(item: Analysis['events'][number]) {
       return `${metadata.truncated ? '模型输出被截断' : '收到模型响应'}${metadata.output_tokens !== undefined ? ` · 输出 ${metadata.output_tokens} tokens` : ''}`;
     } catch { return '收到模型响应'; }
   }
+  if (item.kind === 'provider_tool_call_compatibility') {
+    try {
+      const detail = JSON.parse(item.agent) as { status?: string; reason?: string; normalized?: number };
+      const reasons: Record<string, string> = {
+        ambiguous_legacy_call: '同时包含旧式函数调用', tools_closed: '当前请求未开放函数工具',
+        unsupported_type: '调用类型无法识别', ambiguous_custom_call: '混有自定义工具字段',
+        invalid_call_shape: '调用项不是有效对象',
+        invalid_call_id: '调用 ID 缺失或重复', invalid_function: '函数结构不完整',
+        tool_not_offered: '工具不在本次开放范围内', invalid_arguments_type: '参数字段不是字符串',
+      };
+      return detail.status === 'normalized'
+        ? `协议兼容：已修正 ${detail.normalized ?? 0} 条函数调用的类型标记，继续权限与参数校验`
+        : `协议兼容检查未通过：${reasons[detail.reason ?? ''] ?? '调用结构不符合要求'}，本批未执行`;
+    } catch { return '工具调用协议兼容检查已记录'; }
+  }
+  if (item.kind === 'provider_structure') {
+    try {
+      const detail = JSON.parse(item.agent) as { protocol?: string; tool_calls?: number;
+        content_chars?: number; content_parts?: number; legacy_call?: boolean; content_state?: string;
+        call_item_state?: string; call_type_state?: string; call_id_state?: string;
+        function_state?: string; function_name_state?: string; arguments_state?: string;
+        arguments_json_state?: string; finish_reason?: string };
+      const content = ({ missing: '缺少正文字段', null: '正文为空', empty: '正文为空文本',
+        text: `正文 ${detail.content_chars ?? 0} 字符`, parts: `正文 ${detail.content_parts ?? 0} 段`,
+        invalid_type: '正文字段类型不符合协议' } as Record<string, string>)[detail.content_state ?? ''];
+      const shapes = [
+        detail.call_item_state && `调用项 ${detail.call_item_state}`,
+        detail.call_type_state && `type ${detail.call_type_state}`,
+        detail.call_id_state && `id ${detail.call_id_state}`,
+        detail.function_state && `function ${detail.function_state}`,
+        detail.function_name_state && `name ${detail.function_name_state}`,
+        detail.arguments_state && `arguments ${detail.arguments_state}`,
+        detail.arguments_json_state && `参数 JSON ${detail.arguments_json_state}`,
+        detail.finish_reason && `finish_reason ${detail.finish_reason}`,
+      ].filter(Boolean).join(' · ');
+      return `供应商响应结构：${detail.tool_calls === undefined ? '未提供工具调用计数' : `工具调用 ${detail.tool_calls} 条`}${
+        content ? ` · ${content}` : ''}${shapes ? ` · ${shapes}` : ''}${
+          detail.legacy_call ? ' · 含旧式函数调用字段' : ''}`;
+    } catch { return '供应商响应结构已记录'; }
+  }
   if (item.kind === 'budget') return `${name} · 当前阶段收束，进入交接或报告`;
   if (item.kind === 'time_budget') return `${name} · 收束当前阶段，为报告预留时间`;
   if (item.kind === 'reasoning_setting') return `请求推理强度：${({ default: '服务默认', low: '低', medium: '中', high: '高', max: '最高' } as Record<string, string>)[item.agent] ?? item.agent}`;
@@ -224,13 +434,24 @@ function eventLabel(item: Analysis['events'][number]) {
     try {
       const check = JSON.parse(item.agent) as {
         required?: string; calls?: number; matching?: number; other?: number; allowed?: number; messages?: number;
+        reason?: string; recovery?: string; wire_tool_calls?: number;
       };
-      return `必读请求检查（${check.required === 'execution' ? '运行记录' : '源码'}）：${
-        check.calls ?? 0} 条调用 · 匹配 ${check.matching ?? 0} · 其他 ${check.other ?? 0} · 上限 ${check.allowed ?? 0} · 正文 ${check.messages ?? 0}`;
+      const reason = ({ missing_call: '没有返回必读工具调用', wrong_tool: '返回了其他工具或交接',
+        too_many_calls: '调用数量超过允许上限', refusal: '模型明确拒绝',
+      } as Record<string, string>)[check.reason ?? ''];
+      const recovery = ({ retry: '准备有限纠正', request_mismatch: '调用不匹配，已停止',
+        retry_exhausted: '必读调用纠正机会已用完', shared_budget_exhausted: '共享工具纠正额度已用完',
+        stage_deadline: '阶段时限已到', argument_correction_active: '原参数纠正不能跳过绑定批次',
+        refusal: '已停止，不自动重试拒绝',
+      } as Record<string, string>)[check.recovery ?? ''];
+      return `前置请求检查（${check.required === 'execution' ? '运行记录' : check.required === 'scope' ? '任务范围' : '源码'}）：${
+        check.calls ?? 0} 条调用 · 匹配 ${check.matching ?? 0} · 其他 ${check.other ?? 0} · 上限 ${check.allowed ?? 0} · 正文 ${check.messages ?? 0}`
+        + `${check.wire_tool_calls !== undefined ? ` · 供应商工具调用 ${check.wire_tool_calls} 条` : ''}${reason ? ` · ${reason}` : ''}${recovery ? ` · ${recovery}` : ''}`;
     } catch { return '必读请求检查已记录'; }
   }
   if (item.kind === 'required_read') return item.agent === 'read_execution_records'
-    ? '必读检查：先读取已保存的测试／启动记录' : '必读检查：先读取当前源码';
+    ? '必读检查：先读取已保存的测试／启动记录' : item.agent === 'register_task_scope'
+      ? '范围检查：仓库分析交接前先登记验收项（每批最多三项）' : '必读检查：先读取当前源码';
   if (item.kind === 'evidence') return '读取运行记录';
   if (item.kind === 'handoff') return item.agent.split(' -> ').map(value => names[value] ?? value).join(' → ');
   return name;
@@ -406,7 +627,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       本次模型调用 {analysis.progress.model_calls} 轮 · 已读取源码 {analysis.progress.source_reads} 次
     </p>}
     {analysis && !analysis.current && <p className="diagnosis-meta">历史分析 · 当前配置已变化</p>}
-    {analysis?.error && <p role="alert">{errorMessage(analysis.error)}</p>}
+    {analysis?.error && <p role="alert">{analysisFailureMessage(analysis)}</p>}
     {analysis?.error && analysis.failure_details && <p className="diagnosis-meta">
       失败阶段：{names[analysis.failure_details.stage ?? ''] ?? '准备分析'}
       {' · '}耗时 {analysis.failure_details.elapsed_seconds} 秒
@@ -416,6 +637,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       模型结束原因：{analysis.provider_response.finish_reason}
       {analysis.provider_response.output_tokens !== undefined && ` · 输出 ${analysis.provider_response.output_tokens} tokens`}
       {analysis.provider_response.reasoning_tokens !== undefined && ` · 推理 ${analysis.provider_response.reasoning_tokens} tokens`}
+      {analysis.provider_response.payload_tokens !== undefined && ` · 非推理输出 ${analysis.provider_response.payload_tokens} tokens`}
     </p>}
     {analysis && ['failed', 'interrupted'].includes(analysis.status) &&
       <button className="button secondary" disabled={busy || !analysis.current || recoveryExhausted}

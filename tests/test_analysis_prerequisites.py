@@ -197,7 +197,10 @@ def test_required_source_accepts_bounded_pure_read_batches(count):
     assert sum(kind == "source" for kind, _ in events) == count
     checks = [json.loads(value) for kind, value in events if kind == "required_read_validation"]
     assert checks[-1] == {"required": "source", "calls": count, "matching": count,
-                           "other": 0, "allowed": 10, "messages": 0}
+                         "other": 0, "allowed": 10, "messages": 0, "refusals": 0,
+                         "text_chars": 0, "accepted": True, "reason": "accepted",
+                         "recoverable": False, "recovery": "not_needed",
+                         "corrections_remaining": 0}
     assert model.calls == 6
 
 
@@ -234,7 +237,7 @@ def test_required_batch_rejection_is_pre_execution_and_diagnostics_do_not_leak(c
         assert checks[-1]["other"] == 1 and checks[-1]["matching"] == 1
     assert "credential-sentinel" not in str(events)
     assert "unknown_sensitive_tool_name" not in str(events)
-    assert model.calls <= 2
+    assert model.calls == (1 if case == "duplicate_execution" else 3 if case == "empty" else 2)
 
 
 def test_invalid_source_batch_still_consumes_original_read_budget():
