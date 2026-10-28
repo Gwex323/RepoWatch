@@ -14,8 +14,9 @@ import { ExecutionPanel } from './execution';
 import { AgentModelSettings, AgentRoleCards } from './agent-models';
 import type { AgentModels } from './agent-models';
 import { RepairSettings } from './repair';
+import { SystemFaults } from './system-faults';
 
-type View = 'overview' | 'repositories' | 'findings' | 'memory' | 'activity' | 'settings';
+type View = 'overview' | 'repositories' | 'findings' | 'memory' | 'activity' | 'faults' | 'settings';
 type Session = { authenticated: boolean; setup_required: boolean; csrf: string | null };
 type Repo = { id: string; name: string; url: string | null; kind: string; language: string };
 type Event = {
@@ -196,6 +197,9 @@ function App() {
   const [openScheduleHistory, setOpenScheduleHistory] = useState<string | null>(null);
   const [settingsSection, setSettingsSection] = useState('models');
   const [view, setView] = useState<View>('overview');
+  const [faultRoute, setFaultRoute] = useState(location.hash);
+  const [sourceSection, setSourceSection] = useState('');
+  const [sourceTask, setSourceTask] = useState('');
   const [executionRepo, setExecutionRepo] = useState<string | null>(null);
   const [executionEnv, setExecutionEnv] = useState('');
   const [filter, setFilter] = useState('all');
@@ -206,6 +210,15 @@ function App() {
   const [url, setUrl] = useState('');
   const [menuOpen, setMenuOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    const route = () => {
+      if (location.hash.startsWith('#system-faults')) {
+        setFaultRoute(location.hash); setView('faults');
+      }
+    };
+    route(); window.addEventListener('hashchange', route);
+    return () => window.removeEventListener('hashchange', route);
+  }, []);
   useEffect(() => { void api<Session>('/session').then(s => { csrf = s.csrf; setSession(s); })
     .catch(e => setError(e.message)); }, []);
   const refresh = useCallback(async () => {
@@ -251,10 +264,14 @@ function App() {
       .finally(() => setScheduleHistoryLoading(current => current === repoId ? null : current));
   };
   const openRepository = (id: string, envId = '') => {
+    setSourceSection(''); setSourceTask('');
     setExecutionEnv(envId); setExecutionRepo(id); setView('repositories'); setMenuOpen(false);
   };
-  const navigate = (next: View) => { setView(next); setQuery(''); setMenuOpen(false); };
-  const pageHelp: Record<View, string> = { overview: '先看需要你处理的事项，再继续仓库任务。', repositories: '选择仓库，处理已有 Issue 或启动一次完整检查。', findings: '查看分析发现，按复现步骤确认问题，再跟进修复。', memory: '保存项目约定与修复经验，供后续分析参考。', activity: '查看发生了什么，点击记录回到对应任务。', settings: '先连接账号与模型，再按需要开启自动修复。' };
+  const navigate = (next: View) => {
+    history.replaceState(null, '', location.pathname); setFaultRoute('');
+    setView(next); setQuery(''); setMenuOpen(false); setSourceSection(''); setSourceTask('');
+  };
+  const pageHelp: Record<View, string> = { overview: '先看需要你处理的事项，再继续仓库任务。', repositories: '选择仓库，处理已有 Issue 或启动一次完整检查。', findings: '查看分析发现，按复现步骤确认问题，再跟进修复。', memory: '保存项目约定与修复经验，供后续分析参考。', activity: '查看发生了什么，点击记录回到对应任务。', faults: '查看系统运行故障、实际执行情况与处理历史。', settings: '先连接账号与模型，再按需要开启自动修复。' };
   const waiting = data.findings.filter(f => f.status === 'waiting_reproduction');
   const needsAttention = (f: Finding) => f.status === 'waiting_reproduction' ||
     (f.status === 'confirmed' && ['failed', 'interrupted'].includes(f.repair_status ?? ''));
@@ -269,6 +286,7 @@ function App() {
     ['findings', '待办与问题', CircleHelp],
     ['memory', '项目知识', BookOpen],
     ['activity', '运行记录', Activity],
+    ['faults', '系统故障', ShieldCheck],
     ['settings', '设置', Settings2],
   ] as const;
   if (!session) return <div className="boot"><Workflow size={30} /><span>{error || '连接本地工作空间…'}</span>
@@ -468,7 +486,10 @@ function App() {
             {!!data.repositories.length && !data.repositories.some(r => r.name.toLowerCase().includes(query.toLowerCase())) && <Empty title="没有匹配的仓库，试试其他关键词" />}
             </div>
             {data.repositories.filter(repo => repo.id === executionRepo && repo.kind === 'github').map(repo =>
-              <ExecutionPanel key={`${repo.id}:${executionEnv}`} repo={repo} api={api} initialEnvId={executionEnv} />)}
+              <ExecutionPanel key={`${repo.id}:${executionEnv}:${sourceSection}:${sourceTask}`} repo={repo} api={api}
+                initialEnvId={executionEnv} initialSection={sourceSection}
+                initialAnalysisId={sourceSection === 'analysis' ? sourceTask : ''}
+                initialRepairId={['repair', 'pr'].includes(sourceSection) ? sourceTask : ''} />)}
           </section>}
           {view === 'findings' && <section className="activity-page">
             <div className="segmented">
@@ -488,6 +509,14 @@ function App() {
             <div className="section-heading"><h2>执行时间线</h2><span className="section-meta">最近 {data.events.length} 条</span></div>
             <EventFeed events={data.events.filter(e => !query || `${e.repository} ${e.detail} ${e.task_id}`.includes(query))} onSelect={openRepository} /></section>}
           {view === 'memory' && <MemoryView repositories={data.repositories} api={api} />}
+          {view === 'faults' && <SystemFaults key={faultRoute} api={api} repositories={data.repositories}
+            onSource={(repoId, envId, flow, taskId) => {
+              history.replaceState(null, '', location.pathname);
+              openRepository(repoId, envId);
+              setSourceSection(['analysis', 'acceptance'].includes(flow) ? 'analysis' : flow === 'publication' ? 'pr' :
+                flow === 'repair' ? 'repair' : 'environment');
+              setSourceTask(taskId);
+            }} />}
           {view === 'settings' && <section className="settings-page">
             <nav className="section-nav" aria-label="设置分类">{[['models', '模型与供应商'], ['accounts', 'GitHub 账号'], ['automation', '自动修复'], ['about', '系统信息']].map(([key, label]) => <button key={key} aria-current={settingsSection === key ? 'page' : undefined} className={settingsSection === key ? 'active' : ''} onClick={() => setSettingsSection(key)}>{label}</button>)}</nav>
             <div hidden={settingsSection !== 'models'}>

@@ -276,7 +276,8 @@ class RepairStageModel(Model):
             request += 1
             started = time.monotonic()
             details = {"role": self.role, "turn": self.turns, "request": request,
-                       "timeout_seconds": REPAIR_REQUEST_TIMEOUT_SECONDS}
+                       "timeout_seconds": REPAIR_REQUEST_TIMEOUT_SECONDS,
+                       "budget": dict(self.budget)}
             self.event("request_started", json.dumps(details))
             try:
                 response = await asyncio.wait_for(self.delegate.get_response(

@@ -375,11 +375,16 @@ class Execution(EnvironmentReuse, ExecutionPipeline):
             ).fetchone()
             if not row:
                 return None
+            revision = db.execute("SELECT revision FROM environments WHERE id=?",
+                                  (row["env_id"],)).fetchone()[0]
+            fault_basis = json.dumps({"revision": revision,
+                                      "workbench_version": self.store.workbench_version})
             db.execute(
-                "UPDATE execution_jobs SET state='running',owner=?,lease=?,updated=? WHERE id=?",
-                (self.owner, time.time() + 45, time.time(), row["id"]),
+                "UPDATE execution_jobs SET state='running',owner=?,lease=?,updated=?,"
+                "fault_basis=? WHERE id=?",
+                (self.owner, time.time() + 45, time.time(), fault_basis, row["id"]),
             )
-            return dict(row)
+            return {**dict(row), "fault_basis": fault_basis}
 
     def checkpoint(self, job):
         if self.closing.is_set():
@@ -408,6 +413,11 @@ class Execution(EnvironmentReuse, ExecutionPipeline):
                  time.time(), job["id"], self.owner),
             ).rowcount
             if changed:
+                db.execute("UPDATE execution_jobs SET fault_basis=? WHERE id=?", (json.dumps({
+                    **json.loads(job.get("fault_basis") or "{}"),
+                    "workbench_version": self.store.workbench_version,
+                    "execution": "not_executed" if job.get("preflight_failed") else "unknown",
+                }), job["id"]))
                 self._pipeline_finished_job(db, job, error)
         if (
             changed and error and not job.get("preflight_failed")
@@ -620,6 +630,9 @@ class Execution(EnvironmentReuse, ExecutionPipeline):
                 await asyncio.to_thread(self.tick)
             except Exception:
                 # Recover leased jobs on the next tick without logging secret-bearing exceptions.
+                from .system_faults import record_worker_failure
+
+                record_worker_failure(self.store, "execution_worker")
                 logging.getLogger(__name__).warning("Execution worker will retry after an error.")
             await asyncio.sleep(1)
         await asyncio.to_thread(self.stop_previews)

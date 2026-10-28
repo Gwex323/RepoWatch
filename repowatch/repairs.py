@@ -950,6 +950,10 @@ class Repairs(EnvironmentRecovery):
         if not row:
             return False
         started, workspace = time.monotonic(), None
+        self.event(row["id"], "fault_attempt", json.dumps({
+            "attempt": row["attempt"], "workbench_version": self.store.workbench_version,
+            "attempt_limit": self._attempt_limit(row),
+        }))
         stop = threading.Event()
         def check():
             if self.closing.is_set() or self.execution.closing.is_set() or stop.is_set():
@@ -1114,6 +1118,8 @@ class Repairs(EnvironmentRecovery):
             code = self._error_code(exc, workspace)
             self.event(row["id"], "failure_details", json.dumps({
                 "code": code, **repair_failure_details(exc),
+                "attempt_elapsed_seconds": round(time.monotonic() - started, 3),
+                "attempt_timeout_seconds": REPAIR_TIMEOUT_SECONDS, "timing_scope": "attempt",
             }))
             if workspace:
                 self._save_artifacts(row["id"], workspace)
@@ -1235,5 +1241,8 @@ class Repairs(EnvironmentRecovery):
             try:
                 await self.tick()
             except Exception:
+                from .system_faults import record_worker_failure
+
+                record_worker_failure(self.store, "repair_worker")
                 logging.getLogger(__name__).warning("Repair worker will retry.")
             await asyncio.sleep(1)

@@ -218,8 +218,14 @@ def local_report(context):
 
 
 class HandoffAudit(TracingHooks):
-    def __init__(self):
+    def __init__(self, event=None):
         self.handoffs = []
+        self.event = event
+
+    async def on_agent_start(self, context, agent):
+        if self.event:
+            self.event("agent", agent.name)
+        await super().on_agent_start(context, agent)
 
     async def on_handoff(self, context, from_agent, to_agent):
         self.handoffs.append(f"{from_agent.name} -> {to_agent.name}")
@@ -270,8 +276,8 @@ def agents_for(model, reasoning_effort=None):
     )
 
 
-async def run_agents(model, context, *, reasoning_effort=None):
-    audit = HandoffAudit()
+async def run_agents(model, context, *, reasoning_effort=None, event=None):
+    audit = HandoffAudit(event)
     result = await Runner.run(
         agents_for(model, reasoning_effort), input=json.dumps(context, ensure_ascii=False),
         hooks=audit, max_turns=6,
@@ -351,7 +357,31 @@ class AnalysisModelDiagnoser:
     async def analyze(self, context):
         if not self.status()["enabled"]:
             raise ValueError("analysis_model_required")
-        return await self.analysis_model.diagnose(context)
+        job_id = context.get("_fault_job_id")
+        def event(kind, value):
+            if kind not in ("model_configuration", "agent") or not job_id:
+                return
+            from .fault_contract import diagnostic
+
+            with self.analysis_model.store.connection() as db:
+                if kind == "agent":
+                    from .roles import FLOW_ROLES
+
+                    if value in FLOW_ROLES["diagnosis"]:
+                        db.execute("UPDATE execution_diagnoses SET fault_role=? WHERE job_id=?",
+                                   (value, job_id))
+                else:
+                    row = db.execute("SELECT fault_model_binding FROM execution_diagnoses "
+                                     "WHERE job_id=?", (job_id,)).fetchone()
+                    models = json.loads(row[0] or "{}") if row else {}
+                    model = diagnostic(json.loads(value))
+                    models[model["role"]] = model
+                    db.execute("UPDATE execution_diagnoses SET fault_model_binding=? "
+                               "WHERE job_id=?",
+                               (json.dumps(models), job_id))
+        return await self.analysis_model.diagnose(
+            {key: value for key, value in context.items() if key != "_fault_job_id"}, event,
+        )
 
 
 class Diagnoses:
@@ -469,14 +499,18 @@ class Diagnoses:
             if not row:
                 return False
             db.execute(
-                "UPDATE execution_diagnoses SET state='running',lease=?,updated=? WHERE job_id=?",
-                (now + 120, now, row["job_id"]),
+                "UPDATE execution_diagnoses SET state='running',lease=?,updated=?,"
+                "fault_workbench_version=? WHERE job_id=?",
+                (now + 120, now, self.store.workbench_version, row["job_id"]),
             )
         report = json.loads(row["report"])
         try:
             with task_binding(task_id=row["job_id"], env_id=row["env_id"], repo_id=row["repo_id"],
                               revision=row["revision"]):
-                task = asyncio.create_task(self.engine.analyze(json.loads(row["context"])))
+                packet = json.loads(row["context"])
+                if isinstance(self.engine, AnalysisModelDiagnoser):
+                    packet["_fault_job_id"] = row["job_id"]
+                task = asyncio.create_task(self.engine.analyze(packet))
             deadline = time.monotonic() + 90
             try:
                 while not task.done():
@@ -496,9 +530,17 @@ class Diagnoses:
                     task.cancel()
                     with suppress(asyncio.CancelledError):
                         await task
-        except Exception:
+        except Exception as exc:
             report["model_status"] = "unavailable"
             state = "failed"
+            from .fault_contract import diagnostic
+
+            with self.store.connection() as db:
+                db.execute("UPDATE execution_diagnoses SET fault_diagnostic=? WHERE job_id=?",
+                           (json.dumps(diagnostic({"exception_type": type(exc).__name__,
+                                                  "attempt_timeout_seconds": 90,
+                                                  "timing_scope": "attempt",
+                                                  "timeout_kind": "unknown"})), row["job_id"]))
         with self.store.connection() as db:
             db.execute(
                 "UPDATE execution_diagnoses SET report=?,state=?,lease=0,updated=? "
@@ -513,5 +555,8 @@ class Diagnoses:
                 await self.tick()
             except Exception:
                 # A diagnostic failure must not terminate the repository execution worker.
+                from .system_faults import record_worker_failure
+
+                record_worker_failure(self.store, "diagnosis_worker")
                 logging.getLogger(__name__).warning("Diagnostic worker will retry from evidence.")
             await asyncio.sleep(1)

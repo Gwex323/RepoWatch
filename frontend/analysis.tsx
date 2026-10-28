@@ -572,14 +572,15 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
   const [selected, setSelected] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
-  const refresh = async () => setAnalyses(await api<Analysis[]>(`/environments/${envId}/analyses`));
+  const analysisPath = `/environments/${envId}/analyses${focusAnalysisId ? `?focus=${encodeURIComponent(focusAnalysisId)}` : ''}`;
+  const refresh = async () => setAnalyses(await api<Analysis[]>(analysisPath));
   useEffect(() => {
     let active = true;
-    const load = () => { void api<Analysis[]>(`/environments/${envId}/analyses`)
+    const load = () => { void api<Analysis[]>(analysisPath)
       .then(value => { if (active) setAnalyses(value); }).catch(() => { if (active) setError('无法读取分析状态'); }); };
     load(); const timer = window.setInterval(load, 2000);
     return () => { active = false; window.clearInterval(timer); };
-  }, [api, envId]);
+  }, [api, analysisPath]);
   useEffect(() => {
     if (focusAnalysisId) setSelected('');
   }, [focusAnalysisId]);
@@ -601,10 +602,11 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       {view === 'analysis' && <button className="button secondary" disabled={busy || active || pipelineActive}
         onClick={() => perform(`/environments/${envId}/analyses`, { version })}><RefreshCw size={15} />分析当前版本</button>}
     </div>
-    {analyses.length > 1 && <label>分析记录<select value={analysis?.id} onChange={e => setSelected(e.target.value)}>
+    {analyses.length > 1 && <label>分析记录<select aria-label="分析记录" value={analysis?.id} onChange={e => setSelected(e.target.value)}>
       {analyses.map(item => <option key={item.id} value={item.id}>{new Date(item.created * 1000).toLocaleString('zh-CN')} · {statuses[item.status]}</option>)}
     </select></label>}
     {error && <p role="alert">{error}</p>}
+    {analysis && <a className="text-link" href={`#system-faults?task_id=${encodeURIComponent(analysis.id)}`}>查看此任务的系统故障记录</a>}
     <div hidden={view !== 'analysis'}>
     {!analysis && <p className="action-hint">尚无分析记录，可分析当前版本或从 Issue 页选择问题。</p>}
     {recovery && <div className="diagnosis-meta" role="status">
