@@ -135,7 +135,7 @@ An observed SDK adapter preserves this classification when the SDK rejects an
 empty truncated completion first.
 
 Confirmed truncation permits one retry of that request with twice its output
-limit, capped at 12,000 tokens and two output retries across the entire run.
+limit, capped at 100,000 tokens and two output retries across the entire run.
 Stage-turn limits and the overall deadline are unchanged. This can increase
 cost but does not rerun prior tools/stages. Unknown malformed tool output is not
 automatically altered or replayed. Empty provider envelopes and invalid tool

@@ -33,6 +33,11 @@ type Analysis = {
   historical_review?: HistoricalReview | null;
   task_scope?: TaskScope;
   report_recovery?: { available: boolean };
+  automatic_recovery?: {
+    state: string; requests: number; max_requests: number; resumptions: number; max_resumptions: number;
+    retry_after: number; deadline: number; remaining_seconds: number; last_error: string | null;
+    stop_reason: string | null; retry_budget: Record<string, number>;
+  } | null;
   report: { summary: string; limitations: string[]; files_read: string[]; model?: string;
     execution_scope?: { kind: string; executed: number | null; skipped: number;
       uncovered: string[]; complete: boolean } } | null;
@@ -48,6 +53,12 @@ const statuses: Record<string, string> = {
   superseded: '已由新记录继续处理',
   waiting_reproduction: '待人工复现', confirmed: '复现成功', not_reproduced: '未能复现',
   resolved: '已解决', false_positive: '误报 · 用户已确认，已关闭',
+};
+const recoveryStopReasons: Record<string, string> = {
+  total_deadline: '整条分析的总时限已到', request_limit: '累计模型请求额度已用完',
+  resumption_limit: '续办次数已用完', basis_changed: '源码或执行依据已变化',
+  checkpoint_invalid: '检查点与当前任务不再匹配', pipeline_stopped: '流程已停止或账号已变化',
+  review_not_started: '尚未形成可恢复的最终审查', non_recoverable: '该故障不允许自动恢复',
 };
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
   analysis_model_invalid: '请检查模型名称、接口类型和服务地址。',
@@ -73,6 +84,8 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_rate_limited: '模型服务限流或额度不足，请检查账户后重试。',
   analysis_provider_timeout: '模型服务响应超时。请检查模型服务负载或网络；旧失败记录不会因配置更新而自动消失。',
   analysis_provider_timeout_exhausted: '模型请求超过等待时限，且本次允许的自动重试已用完。请检查模型服务负载或网络后再重试。',
+  analysis_recovery_budget_exhausted: '本条分析的累计恢复额度已用完。已有证据和失败记录已保留；重试不会重置额度。',
+  analysis_recovery_basis_changed: '恢复依据已变化，本次自动续办停止，未复用过期证据。请确认当前任务后重新分析。',
   analysis_provider_unreachable: '无法连接模型服务，请检查地址与网络。',
   analysis_evidence_unverified: '模型返回的源码证据未通过校验，本次未保存问题，请重试。',
   analysis_review_incomplete: 'Agent 未完成规定的源码读取与交接，本次未保存问题，请重试。',
@@ -123,6 +136,14 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'report_checkpoint_saved') return '已保存最终审查输入及真实读取、交接记录';
   if (item.kind === 'report_checkpoint_invalidated') return '已保存的审查依据发生变化，重新执行完整分析';
   if (item.kind === 'report_resumed') return '从已保存证据恢复最终报告，仅调用独立审查员';
+  if (item.kind === 'report_recovery_scheduled') {
+    try {
+      const detail = JSON.parse(item.agent) as { attempt: number; delay_seconds: number };
+      return `已安排第 ${detail.attempt} 次审查续办，等待 ${detail.delay_seconds} 秒，沿用已有证据与累计额度`;
+    } catch { return '已安排自动恢复最终审查'; }
+  }
+  if (item.kind === 'report_recovery_stopped') return `自动恢复已停止：${recoveryStopReasons[item.agent] ?? '请查看失败记录'}`;
+  if (item.kind === 'report_recovery_new_scope') return '用户发起新范围审查，上一条恢复链额度已归档；新范围按新任务计额';
   if (item.kind === 'report_budget') {
     try {
       const budget = JSON.parse(item.agent) as { max_tokens: number; reserve_seconds: number; review_items: number };
@@ -166,12 +187,18 @@ function eventLabel(item: Analysis['events'][number]) {
     ? '报告格式检查：不是合法 JSON' : '报告格式检查：字段不符合要求';
   if (item.kind === 'report_diagnostics') {
     try {
-      const detail = JSON.parse(item.agent) as { category?: string; text_chars?: number; line?: number; column?: number };
+      const detail = JSON.parse(item.agent) as { category?: string; text_chars?: number; line?: number; column?: number;
+        reason?: string; fields?: { path: string; reason: string }[] };
       const category = detail.category === 'empty' ? '空输出'
         : detail.category === 'textual_tool_call' ? '工具调用被当作正文返回'
         : detail.category === 'schema_mismatch' ? '字段不符合要求' : 'JSON 语法错误';
+      const reasons: Record<string, string> = { expected_delimiter: '缺少分隔符', expected_colon: '缺少冒号',
+        expected_value: '缺少合法值', expected_property: '属性名需要双引号', extra_data: 'JSON 后存在额外内容',
+        invalid_escape: '转义字符不合法' };
       return `报告诊断：${category} · 正文 ${detail.text_chars ?? 0} 字符${
-        detail.line !== undefined ? ` · 第 ${detail.line} 行，第 ${detail.column ?? 1} 列` : ''}`;
+        detail.line !== undefined ? ` · 第 ${detail.line} 行，第 ${detail.column ?? 1} 列` : ''}${
+        reasons[detail.reason ?? ''] ? ` · ${reasons[detail.reason ?? '']}` : ''}${
+        detail.fields?.length ? ` · ${detail.fields.map(field => `${field.path || '报告根节点'} (${field.reason})`).join('；')}` : ''}`;
     } catch { return '报告诊断已记录'; }
   }
   if (item.kind === 'output_protocol') return `输出协议：${item.agent === 'json_object' ? 'JSON Object' : 'JSON Schema'}`;
@@ -342,6 +369,9 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
     void api(path, body).then(refresh).catch(e => setError(errorMessage(e.message))).finally(() => setBusy(false));
   };
   const active = analyses.some(item => ['queued', 'running', 'waiting_model'].includes(item.status));
+  const recovery = analysis?.automatic_recovery;
+  const recoveryExhausted = !!recovery && (recovery.requests >= recovery.max_requests
+    || recovery.resumptions >= recovery.max_resumptions || recovery.remaining_seconds <= 0);
   const stage = analysis?.progress?.stage ??
     analysis?.events.filter(event => event.kind === 'agent').at(-1)?.agent;
   return <section id="repository-analysis" className="repository-analysis" aria-label={view === 'analysis' ? '仓库自动分析' : '复现结果'}>
@@ -356,6 +386,15 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
     {error && <p role="alert">{error}</p>}
     <div hidden={view !== 'analysis'}>
     {!analysis && <p className="action-hint">尚无分析记录，可分析当前版本或从 Issue 页选择问题。</p>}
+    {recovery && <div className="diagnosis-meta" role="status">
+      <p>累计模型请求 {recovery.requests} / {recovery.max_requests} 次 · 续办 {recovery.resumptions} / {recovery.max_resumptions} 次
+        {recovery.state !== 'completed' && ` · 总时限剩余 ${Math.ceil(recovery.remaining_seconds / 60)} 分钟`}</p>
+      {recovery.state === 'waiting' && <p>已安排自动恢复审查，无需点击重试。
+        {recovery.remaining_seconds > 0 && ` 预计 ${new Date(recovery.retry_after * 1000).toLocaleTimeString('zh-CN')} 后继续；模型工作流需保持启用。`}
+        已读取证据与累计额度保留。</p>}
+      {recovery.state === 'stopped' && <p>自动恢复停止：{recoveryStopReasons[recovery.stop_reason ?? ''] ?? '请查看失败记录'}。
+        已有证据及历史记录保留，尚未生成完整报告。</p>}
+    </div>}
     {analysis?.status === 'waiting_model' && <p className="error-inline">请在“设置 → 模型与供应商 → 分配模型”配置分析所需的四个角色，并启用模型工作流，任务将自动继续。</p>}
     {analysis?.status === 'running' && <p><Loader2 size={14} className="spin" /> {names[stage ?? ''] ?? '正在准备源码与执行证据'}</p>}
     {analysis?.status === 'running' &&
@@ -379,7 +418,7 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
       {analysis.provider_response.reasoning_tokens !== undefined && ` · 推理 ${analysis.provider_response.reasoning_tokens} tokens`}
     </p>}
     {analysis && ['failed', 'interrupted'].includes(analysis.status) &&
-      <button className="button secondary" disabled={busy || !analysis.current}
+      <button className="button secondary" disabled={busy || !analysis.current || recoveryExhausted}
         onClick={() => perform(`/analyses/${analysis.id}/retry`, { version: analysis.version })}><RefreshCw size={15} />
         {analysis.report_recovery?.available ? '从已保存证据恢复报告' : '重试分析'}</button>}
     {analysis?.report_recovery?.available && <p className="diagnosis-meta">

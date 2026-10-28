@@ -8,7 +8,7 @@ import os
 import re
 import time
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -24,6 +24,7 @@ from openai import (
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from . import report_scheduler
 from .analysis_basis import analysis_current, execution_trigger
 from .analysis_model import REQUEST_TIMEOUT_SECONDS, OutputTruncated
 from .diagnosis import evidence_matches, fingerprint, redact, redact_values
@@ -130,7 +131,53 @@ def report_diagnostics(response):
         )
     else:
         details["category"] = "schema_mismatch"
+    if details["category"] == "invalid_json":
+        reasons = {
+            "Expecting ',' delimiter": "expected_delimiter",
+            "Expecting ':' delimiter": "expected_colon",
+            "Expecting value": "expected_value",
+            "Expecting property name enclosed in double quotes": "expected_property",
+            "Extra data": "extra_data",
+            "Invalid \\escape": "invalid_escape",
+        }
+        try:
+            json.loads(text)
+        except json.JSONDecodeError as error:
+            details["reason"] = reasons.get(error.msg, "invalid_json")
+    elif details["category"] == "schema_mismatch":
+        try:
+            Review.model_validate_json(text)
+        except ValidationError as error:
+            names = set()
+
+            def properties(node):
+                if isinstance(node, dict):
+                    names.update(node.get("properties", {}))
+                    for value in node.values():
+                        properties(value)
+                elif isinstance(node, list):
+                    for value in node:
+                        properties(value)
+
+            properties(Review.model_json_schema())
+            kinds = {"missing", "extra_forbidden", "string_type", "int_type", "bool_type",
+                     "list_type", "dict_type", "literal_error", "enum", "too_long", "too_short"}
+            details["fields"] = [{
+                "path": ".".join(str(part) if type(part) is int and 0 <= part < 10000
+                                 else part if isinstance(part, str) and part in names
+                                 else "[unknown]" for part in item["loc"][:12]),
+                "reason": item["type"] if item["type"] in kinds else "schema_invalid",
+            } for item in error.errors(include_input=False, include_context=False)[:8]]
     return json.dumps(details)
+
+
+def report_feedback(diagnostics):
+    return (
+        "\nServer validation diagnostics (fixed labels and coordinates only): "
+        + diagnostics + ". Generate a COMPLETE valid JSON report using the supplied evidence. "
+        "Escape quotes, backslashes and line breaks in JSON strings. Preserve all registered "
+        "scope items and disclose insufficient evidence; no tools, Markdown or fabricated evidence."
+    )
 
 
 def final_report_input(input):
@@ -202,6 +249,20 @@ class StageModel(Model):
         self.force_closing = False
         self.prepare_review = prepare_review
         self.finalization_reserve = finalization_reserve
+
+    async def request(self, system_instructions, input, **kwargs):
+        """Every delegated call, including closing corrections, reserves durable quota."""
+        remaining = (self.deadline - time.monotonic() if self.deadline is not None
+                     else REQUEST_TIMEOUT_SECONDS)
+        if remaining <= 0:
+            raise AnalysisFailure("analysis_deadline_exceeded")
+        self.event("analysis_retry_budget", json.dumps(asdict(self.retries)))
+        allowance = self.event("analysis_request", self.role)
+        if isinstance(allowance, dict):
+            remaining = min(remaining, allowance["remaining_seconds"])
+        return await asyncio.wait_for(self.delegate.get_response(
+            system_instructions=system_instructions, input=input, **kwargs,
+        ), timeout=min(REQUEST_TIMEOUT_SECONDS, remaining))
 
     def handoff_validation(self, response, expected):
         calls = [item for item in response.output if item.type == "function_call"]
@@ -331,23 +392,25 @@ class StageModel(Model):
                     and kwargs["tools"] else kwargs
                 )
                 # Bound the entire call too, not just the transport's idle-read timeout.
-                response = await asyncio.wait_for(self.delegate.get_response(
+                response = await self.request(
                     system_instructions=(system_instructions or "") + remaining + correction,
                     input=call_input, **model_kwargs,
-                ), timeout=min(REQUEST_TIMEOUT_SECONDS, remaining_seconds))
+                )
                 if correction and any(item.type == "function_call" for item in response.output):
                     raise AnalysisFailure("analysis_finalization_not_followed")
                 if review_schema is not None:
                     issue = report_output_issue(response, review_schema)
                     if issue:
                         self.event("report_validation", issue)
-                        self.event("report_diagnostics", report_diagnostics(response))
+                        diagnostics = report_diagnostics(response)
+                        self.event("report_diagnostics", diagnostics)
                         if self.retries.format_used >= MAX_FORMAT_RETRIES:
                             raise AnalysisFailure(
                                 "analysis_json_invalid" if issue == "invalid_json"
                                 else "analysis_report_invalid",
                             )
                         self.retries.format_used += 1
+                        self.event("analysis_retry_budget", json.dumps(asdict(self.retries)))
                         self.event("format_retry", self.role)
                         kwargs["tools"] = []
                         kwargs["model_settings"] = replace(
@@ -367,7 +430,7 @@ class StageModel(Model):
                             "Exploration is closed. "
                             "Return the COMPLETE JSON report matching the schema above, not "
                             "a patch, a tool request or a description of the correction."
-                        )
+                        ) + report_feedback(diagnostics)
                         continue
                     parts = [part for item in response.output if item.type == "message"
                              for part in item.content]
@@ -386,6 +449,7 @@ class StageModel(Model):
                             if self.retries.evidence_used >= MAX_EVIDENCE_RETRIES:
                                 raise ValueError("analysis_evidence_unverified")
                             self.retries.evidence_used += 1
+                            self.event("analysis_retry_budget", json.dumps(asdict(self.retries)))
                             self.event("evidence_retry", self.role)
                             kwargs["tools"] = []
                             kwargs["model_settings"] = replace(
@@ -420,6 +484,7 @@ class StageModel(Model):
                     raise AnalysisFailure("analysis_provider_timeout_exhausted") from None
                 timeout_retried = True
                 self.retries.used += 1
+                self.event("analysis_retry_budget", json.dumps(asdict(self.retries)))
                 if review_schema is not None and self.final_input is not None:
                     kwargs["tools"] = []
                     kwargs["model_settings"] = replace(
@@ -437,6 +502,7 @@ class StageModel(Model):
                     raise AnalysisFailure("analysis_output_truncated") from None
                 output_retried = True
                 self.retries.output_used += 1
+                self.event("analysis_retry_budget", json.dumps(asdict(self.retries)))
                 kwargs["model_settings"] = replace(
                     kwargs["model_settings"], max_tokens=min(tokens * 2, MAX_OUTPUT_TOKENS),
                 )
@@ -476,7 +542,7 @@ class StageModel(Model):
                         if isinstance(system_instructions, str)
                         else [*system_instructions, reminder]
                     )
-                    response = await self.delegate.get_response(
+                    response = await self.request(
                         retry_instructions, call_input, **kwargs,
                     )
                     calls, accepted = self.handoff_validation(response, handoff_name)
@@ -558,6 +624,7 @@ def initialize(db):
             created REAL NOT NULL
         );
     """)
+    report_scheduler.initialize(db)
 
 
 def source_snapshot(source):
@@ -864,8 +931,14 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
         "in the rationale. Never change human confirmation or authorize repairs/publication. "
     )
     tools = [read_source_file, read_execution_records, register_task_scope]
-    retries = RetryBudget()
-    deadline = time.monotonic() + ANALYSIS_TIMEOUT_SECONDS
+    saved_budget = context.get("_analysis_retry_budget", {})
+    retries = RetryBudget(**{
+        key: saved_budget.get(key, 0) for key in RetryBudget.__dataclass_fields__
+    })
+    deadline = time.monotonic() + min(
+        ANALYSIS_TIMEOUT_SECONDS,
+        context.get("_analysis_remaining_seconds", ANALYSIS_TIMEOUT_SECONDS),
+    )
 
     def review_state(transcript):
         if resume is not None:
@@ -950,6 +1023,9 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
     agent, run_input = analyst, json.dumps(intro, ensure_ascii=False)
     if resume is not None:
         agent, run_input = reviewer, final_input(context, resume)
+        diagnostics = context.get("_report_diagnostics")
+        if diagnostics:
+            reviewer.instructions += report_feedback(json.dumps(diagnostics))
         models[ROLES[-1]].force_closing = True
         event("report_resumed", "saved_reads_and_handoffs")
     recovered = set()
@@ -1011,9 +1087,10 @@ class Analyses:
 
     def event(self, analysis_id, kind, agent):
         with self.store.connection() as db:
+            limit = (4096 if kind == "report_diagnostics" else 1024 if kind == "failure" else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
-                (analysis_id, kind, agent[:1024 if kind == "failure" else 240], time.time()),
+                (analysis_id, kind, agent[:limit], time.time()),
             )
 
     def model_identity(self):
@@ -1078,6 +1155,73 @@ class Analyses:
         except (ValueError, TypeError):
             pass
         return None
+
+    def schedule_report_recovery(self, db, row, code, now):
+        """Reserve a continuation transactionally; never scan legacy failed tasks."""
+        saved = report_scheduler.row(db, row["id"])
+        if not saved or saved["state"] not in ("active", "waiting"):
+            return False
+        reason = report_scheduler.limit_reason(saved, now)
+        if not reason and code in ("analysis_stale", "analysis_model_changed",
+                                   "analysis_recovery_basis_changed"):
+            reason = "basis_changed"
+        if not reason and code == "analysis_cancelled":
+            reason = "pipeline_stopped"
+        context = json.loads(row["context"] or "{}")
+        if not reason and code not in report_scheduler.RECOVERABLE:
+            reason = "non_recoverable"
+        if not reason and saved["stage"] != ROLES[-1]:
+            reason = "review_not_started"
+        if not reason and saved["resumptions"] >= len(report_scheduler.RECOVERY_DELAYS):
+            reason = "resumption_limit"
+        if not reason and not self.current(row):
+            reason = "basis_changed"
+        if not reason and not self.review_checkpoint(db, row, context, self.model_identity()):
+            reason = "checkpoint_invalid"
+        pipeline_id = context.get("pipeline_id")
+        if not reason and pipeline_id and not db.execute(
+            "SELECT 1 FROM execution_pipelines p JOIN github_configuration c "
+            "ON c.active_account_id=p.account_id JOIN github_accounts a ON a.id=p.account_id "
+            "WHERE p.id=? AND a.state='verified' AND p.stage='analysis' "
+            "AND p.state IN ('waiting_analysis','waiting_model')", (pipeline_id,),
+        ).fetchone():
+            reason = "pipeline_stopped"
+        delay = report_scheduler.RECOVERY_DELAYS[min(
+            saved["resumptions"], len(report_scheduler.RECOVERY_DELAYS) - 1,
+        )]
+        if not reason and now + delay >= saved["deadline"]:
+            reason = "total_deadline"
+        if reason:
+            db.execute(
+                "UPDATE analysis_report_recovery SET state='stopped',stop_reason=?,"
+                "last_error=?,retry_after=0 WHERE analysis_id=?", (reason, code, row["id"]),
+            )
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (row["id"], "report_recovery_stopped", reason, now),
+            )
+            return False
+        changed = db.execute(
+            "UPDATE repository_analyses SET status=?,error=NULL,version=version+1,"
+            "lease=0,updated=? "
+            "WHERE id=? AND version=? AND status IN ('failed','interrupted')",
+            ("queued" if self.engine.status()["enabled"] else "waiting_model", now,
+             row["id"], row["version"]),
+        ).rowcount
+        if not changed:
+            return False
+        db.execute(
+            "UPDATE analysis_report_recovery SET state='waiting',resumptions=resumptions+1,"
+            "retry_after=?,last_error=?,stop_reason=NULL WHERE analysis_id=?",
+            (now + delay, code, row["id"]),
+        )
+        db.execute(
+            "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+            (row["id"], "report_recovery_scheduled", json.dumps({
+                "attempt": saved["resumptions"] + 1, "delay_seconds": delay,
+            }), now),
+        )
+        return True
 
     def enqueue(self, env_id, version=None, *, pipeline_id=None, manual=False, issue=None):
         with self.store.connection() as db:
@@ -1233,6 +1377,9 @@ class Analyses:
                 row["status"] in ("failed", "interrupted")
                 and self.review_checkpoint(db, row, context, self.model_identity())
             )}
+            result["automatic_recovery"] = report_scheduler.public_state(
+                report_scheduler.row(db, analysis_id), time.time(),
+            )
             result["historical_review"] = historical_results(context, result["report"])
             review = result["historical_review"]
             if review and review.get("items"):
@@ -1276,6 +1423,10 @@ class Analyses:
                 raise Conflict("analysis_changed")
             if not self.current(row):
                 raise Conflict("analysis_stale")
+            recovery = report_scheduler.row(db, analysis_id)
+            if recovery and (report_scheduler.limit_reason(recovery, time.time())
+                             or recovery["resumptions"] >= len(report_scheduler.RECOVERY_DELAYS)):
+                raise Conflict("analysis_recovery_budget_exhausted")
             pipeline_id = json.loads(row["context"] or "{}").get("pipeline_id")
             if pipeline_id:
                 pipeline = db.execute("SELECT * FROM execution_pipelines WHERE id=?",
@@ -1289,6 +1440,10 @@ class Analyses:
                     raise Conflict("pipeline_account_changed")
                 db.execute("UPDATE execution_pipelines SET state='waiting_analysis',error=NULL,"
                            "version=version+1,updated=? WHERE id=?", (time.time(), pipeline_id))
+            if recovery:
+                db.execute("UPDATE analysis_report_recovery SET state='active',"
+                           "resumptions=resumptions+1,retry_after=0,stop_reason=NULL "
+                           "WHERE analysis_id=?", (analysis_id,))
             db.execute(
                 "UPDATE repository_analyses SET status=?,error=NULL,version=version+1,updated=? "
                 "WHERE id=?", ("queued" if self.engine.status()["enabled"] else "waiting_model",
@@ -1319,6 +1474,7 @@ class Analyses:
             ).fetchone():
                 raise Conflict("analysis_busy")
             context = request_scope_review(db, row)
+            report_scheduler.new_scope_review(db, analysis_id, time.time())
             db.execute(
                 "UPDATE repository_analyses SET status=?,error=NULL,version=version+1,"
                 "context=?,updated=? WHERE id=?",
@@ -1439,11 +1595,41 @@ class Analyses:
                 ("queued" if enabled else "waiting_model",
                  "waiting_model" if enabled else "queued"),
             )
+            expired = db.execute(
+                "SELECT a.id FROM repository_analyses a JOIN analysis_report_recovery r "
+                "ON r.analysis_id=a.id WHERE a.status IN ('queued','waiting_model') "
+                "AND r.deadline<=?", (now,),
+            ).fetchall()
+            for item in expired:
+                db.execute(
+                    "UPDATE repository_analyses SET status='failed',"
+                    "error='analysis_recovery_budget_exhausted',version=version+1,updated=? "
+                    "WHERE id=?", (now, item["id"]),
+                )
+                db.execute(
+                    "UPDATE analysis_report_recovery SET state='stopped',retry_after=0,"
+                    "stop_reason='total_deadline' WHERE analysis_id=?", (item["id"],),
+                )
+                db.execute(
+                    "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                    (item["id"], "report_recovery_stopped", "total_deadline", now),
+                )
+            interrupted = db.execute(
+                "SELECT a.* FROM repository_analyses a JOIN analysis_report_recovery r "
+                "ON r.analysis_id=a.id WHERE a.status='interrupted' "
+                "AND r.state IN ('active','waiting')",
+            ).fetchall()
+            for interrupted_row in interrupted:
+                self.schedule_report_recovery(db, interrupted_row, "analysis_interrupted", now)
             row = db.execute(
-                "SELECT * FROM repository_analyses WHERE status='queued' ORDER BY created LIMIT 1"
+                "SELECT a.* FROM repository_analyses a LEFT JOIN analysis_report_recovery r "
+                "ON r.analysis_id=a.id WHERE a.status='queued' "
+                "AND (r.analysis_id IS NULL OR r.retry_after<=? OR r.deadline<=?) "
+                "ORDER BY a.created LIMIT 1", (now, now),
             ).fetchone()
             if not row:
                 return False
+            recovery = report_scheduler.begin(db, row["id"], now)
             db.execute(
                 "UPDATE repository_analyses SET status='running',lease=?,version=version+1,"
                 "updated=? WHERE id=?", (now + ANALYSIS_TIMEOUT_SECONDS + 30, now, row["id"]),
@@ -1477,8 +1663,38 @@ class Analyses:
 
         def record(kind, agent):
             nonlocal stage, saved_binding
-            if kind == "agent":
-                stage = agent
+            if kind in ("agent", "analysis_request", "analysis_retry_budget", "report_diagnostics"):
+                if not active():
+                    raise AnalysisFailure("analysis_cancelled")
+                if kind == "analysis_request":
+                    if self.model_identity() != model_identity:
+                        raise AnalysisFailure("analysis_model_changed")
+                    if not self.current(row):
+                        raise AnalysisFailure("analysis_stale")
+                with self.store.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    live = db.execute("SELECT status,version FROM repository_analyses WHERE id=?",
+                                      (row["id"],)).fetchone()
+                    if live["status"] != "running" or live["version"] != run_version:
+                        raise AnalysisFailure("analysis_cancelled")
+                    if kind == "analysis_request":
+                        saved = report_scheduler.row(db, row["id"])
+                        if report_scheduler.limit_reason(saved, time.time()):
+                            raise AnalysisFailure("analysis_recovery_budget_exhausted")
+                        db.execute("UPDATE analysis_report_recovery SET requests=requests+1 "
+                                   "WHERE analysis_id=?", (row["id"],))
+                        return {"remaining_seconds": saved["deadline"] - time.time()}
+                    if kind == "analysis_retry_budget":
+                        report_scheduler.save_budget(db, row["id"], json.loads(agent))
+                        return
+                    if kind == "agent":
+                        stage = agent
+                        db.execute("UPDATE analysis_report_recovery SET stage=? "
+                                   "WHERE analysis_id=?",
+                                   (agent, row["id"]))
+                    else:
+                        db.execute("UPDATE analysis_report_recovery SET diagnostics=? "
+                                   "WHERE analysis_id=?", (agent, row["id"]))
             if kind == "scope_proposal":
                 with self.store.connection() as db:
                     db.execute("BEGIN IMMEDIATE")
@@ -1505,6 +1721,8 @@ class Analyses:
                     if live["status"] != "running" or live["version"] != run_version:
                         return
                     saved_binding = self.review_binding(db, row, context, model_identity)
+                    db.execute("UPDATE analysis_report_recovery SET binding=? WHERE analysis_id=?",
+                               (saved_binding, row["id"]))
                     db.execute(
                         "INSERT INTO analysis_review_checkpoints VALUES(?,?,?,?,?) "
                         "ON CONFLICT(analysis_id) DO UPDATE SET binding=excluded.binding,"
@@ -1520,6 +1738,8 @@ class Analyses:
 
         record("attempt", str(row["version"] + 1))
         try:
+            if report_scheduler.limit_reason(recovery, time.time()):
+                raise AnalysisFailure("analysis_recovery_budget_exhausted")
             if not self.current(row):
                 raise Conflict("analysis_stale")
             context = json.loads(row["context"])
@@ -1583,14 +1803,34 @@ class Analyses:
                 if invalidated:
                     db.execute("DELETE FROM analysis_review_checkpoints WHERE analysis_id=?",
                                (row["id"],))
+            if recovery["state"] == "waiting" and (
+                not resume or recovery["binding"] != saved_binding
+            ):
+                raise AnalysisFailure("analysis_recovery_basis_changed")
             if invalidated:
                 record("report_checkpoint_invalidated", "basis_changed")
             if resume:
                 context["_review_resume"] = resume
+            with self.store.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                live = db.execute("SELECT status,version FROM repository_analyses WHERE id=?",
+                                  (row["id"],)).fetchone()
+                if live["status"] != "running" or live["version"] != run_version:
+                    raise AnalysisFailure("analysis_cancelled")
+                db.execute("UPDATE analysis_report_recovery SET state='active',retry_after=0 "
+                           "WHERE analysis_id=?", (row["id"],))
+                recovery = report_scheduler.row(db, row["id"])
+            context["_analysis_retry_budget"] = json.loads(recovery["retry_budget"])
+            context["_analysis_remaining_seconds"] = recovery["deadline"] - time.time()
+            diagnostics = json.loads(recovery["diagnostics"])
+            context["_report_diagnostics"] = ({
+                "last_failure": recovery["last_error"], "last_report_validation": diagnostics,
+            } if recovery["last_error"] else diagnostics)
             context["_review_model_identity"] = model_identity
             task = asyncio.create_task(self.engine.analyze(context, record))
             try:
-                deadline = started + ANALYSIS_TIMEOUT_SECONDS
+                deadline = min(started + ANALYSIS_TIMEOUT_SECONDS,
+                               time.monotonic() + context["_analysis_remaining_seconds"])
                 while not task.done():
                     if not active():
                         raise AnalysisFailure("analysis_cancelled")
@@ -1634,6 +1874,8 @@ class Analyses:
                         or not self.scope_current(db, row, context)
                         or self.review_binding(db, row, context, model_identity) != saved_binding):
                     raise Conflict("analysis_stale")
+                if time.time() >= recovery["deadline"]:
+                    raise AnalysisFailure("analysis_recovery_budget_exhausted")
                 existing_findings = {}
                 for entry in db.execute("SELECT id,data FROM analysis_findings WHERE analysis_id=?",
                                         (row["id"],)):
@@ -1668,6 +1910,8 @@ class Analyses:
                 )
                 db.execute("DELETE FROM analysis_review_checkpoints WHERE analysis_id=?",
                            (row["id"],))
+                db.execute("UPDATE analysis_report_recovery SET state='completed',retry_after=0,"
+                           "stop_reason=NULL,last_error=NULL WHERE analysis_id=?", (row["id"],))
         except Exception as exc:
             code = failure_code(exc)
             # Do not store exception messages, request bodies, headers or provider responses.
@@ -1679,6 +1923,7 @@ class Analyses:
                 "Repository analysis %s failed: %s (stage=%s)", row["id"], code, stage,
             )
             with self.store.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
                 if code in ("analysis_cancelled", "analysis_stale", "analysis_model_changed"):
                     db.execute("DELETE FROM analysis_review_checkpoints WHERE analysis_id=?",
                                (row["id"],))
@@ -1687,6 +1932,14 @@ class Analyses:
                     "version=version+1,updated=? WHERE id=? AND status='running' AND version=?",
                     (code, time.time(), row["id"], run_version),
                 )
+                failed = db.execute("SELECT * FROM repository_analyses WHERE id=?",
+                                    (row["id"],)).fetchone()
+                if failed["status"] == "failed" and failed["version"] == run_version + 1:
+                    self.schedule_report_recovery(db, failed, code, time.time())
+                elif failed["status"] in ("cancelled", "superseded"):
+                    db.execute("UPDATE analysis_report_recovery SET state='stopped',"
+                               "stop_reason='pipeline_stopped',retry_after=0 WHERE analysis_id=?",
+                               (row["id"],))
         return True
 
     async def run(self):

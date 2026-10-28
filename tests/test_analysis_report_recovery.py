@@ -5,7 +5,7 @@ import copy
 import json
 
 import pytest
-from agents import ModelResponse, Usage
+from agents import ModelResponse, ModelSettings, Usage
 from openai.types.responses import ResponseFunctionToolCall
 from test_execution import service  # noqa: F401
 from test_repository_analysis import ReviewModel, prepare_tested
@@ -18,7 +18,14 @@ from repowatch.report_recovery import (
     output_budget,
     valid_checkpoint,
 )
-from repowatch.repository_analysis import ROLES, Analyses, AnalysisFailure, run_analysis
+from repowatch.repository_analysis import (
+    ROLES,
+    Analyses,
+    AnalysisFailure,
+    StageBudget,
+    StageModel,
+    run_analysis,
+)
 from repowatch.store import Conflict
 
 
@@ -35,10 +42,13 @@ def state(value):
 def test_output_budget_grows_with_scope_and_historical_items_and_stays_bounded():
     small = output_budget(context())
     scoped = output_budget({"task_scope": {"items": [{}] * 6}})
+    medium = output_budget({"task_scope": {"items": [{}] * 6},
+                            "historical_findings": {"items": [{}] * 8}})
     large = output_budget({"task_scope": {"items": [{}] * 6},
-                           "historical_findings": {"items": [{}] * 8}})
+                           "historical_findings": {"items": [{}] * 200}})
     assert small == {"max_tokens": 5000, "reserve_seconds": 260, "review_items": 0}
-    assert small["max_tokens"] < scoped["max_tokens"] < large["max_tokens"] == 12000
+    assert small["max_tokens"] < scoped["max_tokens"] < medium["max_tokens"] == 12800
+    assert medium["max_tokens"] < large["max_tokens"] == 100000
     assert 240 < scoped["reserve_seconds"] <= large["reserve_seconds"] <= 360
 
 
@@ -76,8 +86,9 @@ def test_checkpoint_observations_are_bounded_and_clipping_is_explicit():
 
 
 class RecoveryEngine:
-    def __init__(self, fail=True, invented=False):
+    def __init__(self, fail=True, invented=False, fail_code="analysis_authentication_failed"):
         self.fail, self.invented, self.version = fail, invented, 1
+        self.fail_code = fail_code
         self.requests = []
 
     def status(self):
@@ -94,7 +105,7 @@ class RecoveryEngine:
         async def respond(system_instructions, input, **kwargs):
             self.requests.append((input, kwargs))
             if kwargs.get("output_schema") is not None and self.fail:
-                raise AnalysisFailure("analysis_provider_timeout_exhausted")
+                raise AnalysisFailure(self.fail_code)
             return await original(system_instructions, input, **kwargs)
 
         model.get_response = respond
@@ -204,7 +215,8 @@ def test_resume_still_rejects_fabricated_evidence_and_persists_no_findings(servi
     analyses.retry(failed["id"], failed["version"])
     asyncio.run(analyses.tick())
     result = analyses.get(failed["id"])
-    assert result["status"] == "failed" and result["error"] == "analysis_evidence_unverified"
+    assert result["status"] == "queued"
+    assert result["automatic_recovery"]["state"] == "waiting"
     assert result["report"] is None and not result["findings"]
     assert len(engine.requests) == 2
 
@@ -230,15 +242,9 @@ def test_optional_scope_version_and_current_analysis_are_bound(service):  # noqa
         row = db.execute("SELECT * FROM repository_analyses WHERE id=?",
                          (failed["id"],)).fetchone()
         value = json.loads(row["context"])
-        db.executescript("""
-            CREATE TABLE task_scopes(id TEXT, version INTEGER, analysis_id TEXT,
-                                     revision TEXT, original_digest TEXT);
-            CREATE TABLE analysis_task_scopes(analysis_id TEXT, scope_id TEXT);
-        """)
-        db.execute("INSERT INTO task_scopes VALUES('scope_fixture',1,?,?,?)",
-                   (row["id"], row["revision"], "original_digest"))
-        db.execute("INSERT INTO analysis_task_scopes VALUES(?,'scope_fixture')", (row["id"],))
-        value["task_scope"] = {"id": "scope_fixture", "version": 1, "items": [{"key": "cn"}]}
+        scope = analyses.scope_basis(db, row)
+        value["task_scope"] = {"id": scope["id"], "version": scope["version"],
+                               "items": [{"key": "cn"}]}
         saved = state(value)
         saved["read_ranges"] = {"app.py": [[1, 1]]}
         binding = analyses.review_binding(db, row, value, analyses.model_identity())
@@ -248,10 +254,17 @@ def test_optional_scope_version_and_current_analysis_are_bound(service):  # noqa
                    (binding, json.dumps(saved), digest(saved)))
     assert analyses.get(failed["id"])["report_recovery"]["available"]
     with analyses.store.connection() as db:
-        db.execute("UPDATE task_scopes SET version=2")
+        db.execute("UPDATE task_scopes SET version=version+1 WHERE id=?", (scope["id"],))
     assert not analyses.get(failed["id"])["report_recovery"]["available"]
     with analyses.store.connection() as db:
-        db.execute("UPDATE task_scopes SET version=1,analysis_id='other_analysis'")
+        db.execute(
+            "INSERT INTO repository_analyses(id,env_id,repo_id,revision,fingerprint,trigger_key,"
+            "status,context,created,updated) SELECT 'other_analysis',env_id,repo_id,revision,"
+            "fingerprint,'other_trigger',status,context,created,updated "
+            "FROM repository_analyses WHERE id=?", (failed["id"],),
+        )
+        db.execute("UPDATE task_scopes SET version=?,analysis_id='other_analysis' WHERE id=?",
+                   (scope["version"], scope["id"]))
     assert not analyses.get(failed["id"])["report_recovery"]["available"]
 
 
@@ -338,11 +351,16 @@ def test_reviewer_reads_refresh_checkpoint_before_the_next_request():
     assert sum(kind == "source" for kind, _ in events) == 2
 
 
-@pytest.mark.parametrize("error,limit", [(OutputTruncated, 12000), (TimeoutError, 7600)])
-def test_finalization_retry_uses_compact_input_and_bounded_budget(monkeypatch, error, limit):
+@pytest.mark.parametrize("error,items,initial,limit", [
+    (OutputTruncated, 6, 7600, 15200),
+    (TimeoutError, 6, 7600, 7600),
+])
+def test_finalization_retry_uses_compact_input_and_bounded_budget(
+    monkeypatch, error, items, initial, limit,
+):
     monkeypatch.setattr("repowatch.repository_analysis.RETRY_DELAY_SECONDS", 0)
     value, calls, events = context(), [], []
-    value["task_scope"] = {"items": [{"key": f"item_{i}"} for i in range(6)]}
+    value["task_scope"] = {"items": [{"key": f"item_{i}"} for i in range(items)]}
     model = ReviewModel()
     original = model.get_response
 
@@ -356,12 +374,35 @@ def test_finalization_retry_uses_compact_input_and_bounded_budget(monkeypatch, e
     model.get_response = respond
     report = asyncio.run(run_analysis(model, value, lambda *event: events.append(event)))
     assert len(calls) == 2 and len(report["handoffs"]) == 3
-    assert calls[0]["model_settings"].max_tokens == 7600
+    assert calls[0]["model_settings"].max_tokens == initial
     assert calls[1]["model_settings"].max_tokens == limit
     assert calls[1]["model_settings"].tool_choice == "none" and not calls[1]["tools"]
     packet = json.loads(calls[1]["input"])
-    assert len(packet["run_context"]["task_scope"]["items"]) == 6
+    assert len(packet["run_context"]["task_scope"]["items"]) == items
     assert any(kind == "review_checkpoint" for kind, _ in events)
+
+
+def test_large_output_retry_is_capped_without_oversizing_the_task_scope():
+    model = ReviewModel()
+    model.calls = 5
+    original = model.get_response
+    requested = []
+
+    async def respond(*args, **kwargs):
+        requested.append(kwargs["model_settings"].max_tokens)
+        if len(requested) == 1:
+            raise OutputTruncated("fixture finalization failure")
+        return await original(*args, **kwargs)
+
+    model.get_response = respond
+    stage = StageModel(model, ROLES[-1], StageBudget(), lambda *_: None)
+    result = asyncio.run(stage.get_response(
+        "Trusted final-review instructions", json.dumps(context()),
+        tools=[], handoffs=[], output_schema=None,
+        model_settings=ModelSettings(max_tokens=60000),
+    ))
+    assert result.output
+    assert requested == [60000, 100000]
 
 
 @pytest.mark.parametrize("field,value", [
