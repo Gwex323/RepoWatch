@@ -5,7 +5,7 @@ import copy
 import json
 
 import pytest
-from agents import ModelResponse, Usage
+from agents import ModelResponse, ModelSettings, Usage
 from openai.types.responses import ResponseFunctionToolCall
 from test_execution import service  # noqa: F401
 from test_repository_analysis import ReviewModel, prepare_tested
@@ -18,7 +18,14 @@ from repowatch.report_recovery import (
     output_budget,
     valid_checkpoint,
 )
-from repowatch.repository_analysis import ROLES, Analyses, AnalysisFailure, run_analysis
+from repowatch.repository_analysis import (
+    ROLES,
+    Analyses,
+    AnalysisFailure,
+    StageBudget,
+    StageModel,
+    run_analysis,
+)
 from repowatch.store import Conflict
 
 
@@ -346,7 +353,6 @@ def test_reviewer_reads_refresh_checkpoint_before_the_next_request():
 
 @pytest.mark.parametrize("error,items,initial,limit", [
     (OutputTruncated, 6, 7600, 15200),
-    (OutputTruncated, 90, 62200, 100000),
     (TimeoutError, 6, 7600, 7600),
 ])
 def test_finalization_retry_uses_compact_input_and_bounded_budget(
@@ -374,6 +380,29 @@ def test_finalization_retry_uses_compact_input_and_bounded_budget(
     packet = json.loads(calls[1]["input"])
     assert len(packet["run_context"]["task_scope"]["items"]) == items
     assert any(kind == "review_checkpoint" for kind, _ in events)
+
+
+def test_large_output_retry_is_capped_without_oversizing_the_task_scope():
+    model = ReviewModel()
+    model.calls = 5
+    original = model.get_response
+    requested = []
+
+    async def respond(*args, **kwargs):
+        requested.append(kwargs["model_settings"].max_tokens)
+        if len(requested) == 1:
+            raise OutputTruncated("fixture finalization failure")
+        return await original(*args, **kwargs)
+
+    model.get_response = respond
+    stage = StageModel(model, ROLES[-1], StageBudget(), lambda *_: None)
+    result = asyncio.run(stage.get_response(
+        "Trusted final-review instructions", json.dumps(context()),
+        tools=[], handoffs=[], output_schema=None,
+        model_settings=ModelSettings(max_tokens=60000),
+    ))
+    assert result.output
+    assert requested == [60000, 100000]
 
 
 @pytest.mark.parametrize("field,value", [
