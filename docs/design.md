@@ -27,8 +27,14 @@ remain outstanding. Scope acceptance has additional limits described in the READ
 
 Central coordination is a separate six-stage effort (#77). Stage 1, unified fault
 recording (#78), was merged in PR #84 on 2026-10-28; recording alone does not
-execute recovery. Stages 2-6 (#79-#83), including unified recovery, the coordinator
-role, self-maintenance, deployment recovery and complete acceptance, remain open.
+execute recovery. Stage 2 (#79) is implemented and verified on
+`feature/workflow-recovery-79`, based on `ba043b1`: shared ownership and budgets,
+atomic scope batches and opt-in rule recovery (disabled by default). Final backend
+regression: 1088 passed, 0 failed, 12 opt-in Docker cases skipped; browser checks:
+4 passed; frontend build, Ruff and independent review passed. Delivery PR #90 is
+open; it is not merged or deployed.
+Stages 3-6 (#80-#83) remain unimplemented. See the
+[stage 2 policy](workflow-recovery-79.md) and [validation](workflow-recovery-79-validation.md).
 Merge does not establish deployment to the running workbench. See
 [stage 1 validation](system-fault-records-78-validation.md).
 
@@ -36,7 +42,10 @@ Issue #88 aligns the repair/review regression fixtures and assertions with the
 existing backend-controlled SDK handoff and evidence-read contract. On
 `feature/main-regression-88`, backend regression verification reports 1061 passed,
 0 failed and 12 skipped (opt-in real Docker integration tests). Production logic
-is unchanged; this change is verified on its branch, not merged or deployed.
+is unchanged; PR #89 was merged into the default branch as `ba043b1` on
+2026-10-28. An additional Docker run passed 11 cases with one cached-desktop
+case skipped, giving 1072 passed, 0 failed and 1 skipped across that validation.
+Deployment to the running workbench has not been verified.
 See [the regression validation](main-regression-88-validation.md) for the original
 35 failures, preserved negative gates and acceptance limits.
 

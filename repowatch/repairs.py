@@ -8,6 +8,7 @@ import re
 import threading
 import time
 
+from . import recovery as recovery_ledger
 from .diagnosis import redact, redact_values
 from .environment_recovery import EnvironmentRecovery
 from .github_accounts import GitHubError
@@ -705,7 +706,43 @@ class Repairs(EnvironmentRecovery):
                 "previous_model": previous, "model": selected["model"],
                 "model_identity": digest(selected), "attempt": row["attempt"] + 1}
 
-    def retry(self, repair_id, version, *, model_change_note=None):
+    def _recovery_binding(self, db, row):
+        account = db.execute(
+            "SELECT a.id,a.version FROM github_accounts a JOIN github_configuration c "
+            "ON c.active_account_id=a.id WHERE a.state='verified'",
+        ).fetchone()
+        scope = scope_packet(db, row["analysis_id"])
+        return digest([self.engine.status().get("role_models", {}),
+                       list(account) if account else None, row["revision"],
+                       {key: scope[key] for key in ("id", "version", "revision", "original")}])
+
+    def _queue_automatic_recovery(self):
+        if (self.closing.is_set() or self.execution.closing.is_set()
+                or not self.engine or not self.engine.status()["enabled"]):
+            return
+        with self.store.connection() as db:
+            policy = recovery_ledger.state(db)
+            if (not policy["enabled"] or not db.execute(
+                    "SELECT enabled FROM repair_settings WHERE id=1").fetchone()[0]):
+                return
+            errors = sorted(recovery_ledger.AUTOMATIC_ERRORS)
+            slots = ",".join("?" for _ in errors)
+            query = ("SELECT id,version FROM repair_tasks WHERE status IN ('failed','interrupted') "
+                     f"AND updated>=? AND error IN ({slots}) ORDER BY updated,id LIMIT 32 OFFSET ?")
+            cursor = getattr(self, "_recovery_cursor", 0)
+            rows = db.execute(query, (policy["enabled_since"], *errors, cursor)).fetchall()
+            if not rows and cursor:
+                cursor = 0
+                rows = db.execute(query, (policy["enabled_since"], *errors, cursor)).fetchall()
+            self._recovery_cursor = cursor+len(rows)
+        for row in rows:
+            try:
+                self.retry(row["id"], row["version"], automatic=True)
+            except Conflict:
+                continue
+            return
+
+    def retry(self, repair_id, version, *, model_change_note=None, automatic=False):
         with self.store.connection() as db:
             previous = db.execute("SELECT * FROM repair_tasks WHERE id=?", (repair_id,)).fetchone()
         if (previous and previous["version"] == version
@@ -751,6 +788,12 @@ class Repairs(EnvironmentRecovery):
             if not self.current(db, row):
                 raise Conflict("repair_stale")
             context = json.loads(row["context"])
+            if automatic:
+                context["_automatic_recovery_version"] = recovery_ledger.authorize_automatic(
+                    db, row, self._recovery_binding(db, row),
+                )
+            else:
+                context.pop("_automatic_recovery_version", None)
             if model_authorization:
                 context.update(owner_model_retry_used=True,
                                owner_model_retry=model_authorization)
@@ -883,8 +926,9 @@ class Repairs(EnvironmentRecovery):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             for row in db.execute(
-                "SELECT id FROM repair_tasks WHERE status='running' AND lease<?", (now,)
+                "SELECT id,analysis_id FROM repair_tasks WHERE status='running' AND lease<?", (now,)
             ).fetchall():
+                recovery_ledger.expire(db, row["analysis_id"], now)
                 db.execute(
                     "UPDATE repair_tasks SET status='interrupted',error='repair_interrupted',"
                     "lease=0,version=version+1,updated=? WHERE id=?", (now, row["id"]),
@@ -904,6 +948,12 @@ class Repairs(EnvironmentRecovery):
             if not row:
                 return None
             context = json.loads(row["context"])
+            try:
+                recovery_ledger.automatic_guard(db, context)
+            except Conflict:
+                db.execute("UPDATE repair_tasks SET status='failed',error='recovery_disabled',"
+                           "version=version+1,updated=? WHERE id=?", (now, row["id"]))
+                return None
             if candidate.get("preflight_source_digest"):
                 context["preflight_source_digest"] = candidate["preflight_source_digest"]
             publication_resume = (
@@ -931,7 +981,20 @@ class Repairs(EnvironmentRecovery):
             context["review_feedback_policy"] = REVIEW_FEEDBACK_POLICY
             if not self._verified(row):
                 context["task_scope"] = scope_packet(db, row["analysis_id"])
+            if (context.get("_automatic_recovery_version") is not None
+                    and context.get("_recovery_binding") != self._recovery_binding(db, row)):
+                db.execute("UPDATE repair_tasks SET status='failed',error='repair_basis_changed',"
+                           "version=version+1,updated=? WHERE id=?", (now, row["id"]))
+                return None
+            context["_recovery_binding"] = self._recovery_binding(db, row)
             encoded_context = json.dumps(context, ensure_ascii=False)
+            action = recovery_ledger.claim(
+                db, "repair", row, row["attempt"]+1,
+                [row["revision"], self.engine.status().get("role_models", {}),
+                 context.get("task_scope")], self.owner, now+REPAIR_TIMEOUT_SECONDS+30,
+            )
+            if not action:
+                return None
             db.execute(
                 "UPDATE repair_tasks SET status='running',stage=?,attempt=attempt+1,"
                 "owner=?,lease=?,version=version+1,updated=?,context=? WHERE id=?",
@@ -939,11 +1002,12 @@ class Repairs(EnvironmentRecovery):
                  now + REPAIR_TIMEOUT_SECONDS + 30, now, encoded_context, row["id"]),
             )
             return {**dict(row), "context": encoded_context, "owner": self.owner,
-                    "attempt": row["attempt"] + 1}
+                    "attempt": row["attempt"] + 1, "_recovery_action": action}
 
     async def tick(self):
         self.backfill()
         await asyncio.to_thread(self._queue_review_feedback_recovery)
+        await asyncio.to_thread(self._queue_automatic_recovery)
         row = await asyncio.to_thread(
             self.claim, allow_work=bool(self.engine and self.engine.status()["enabled"]),
         )
@@ -961,6 +1025,8 @@ class Repairs(EnvironmentRecovery):
             if time.monotonic() - started > REPAIR_TIMEOUT_SECONDS:
                 raise Conflict("repair_deadline_exceeded")
             with self.store.connection() as db:
+                recovery_ledger.require(db, row["_recovery_action"], self.owner)
+                recovery_ledger.automatic_guard(db, json.loads(row["context"]))
                 settings = db.execute("SELECT enabled FROM repair_settings WHERE id=1").fetchone()
                 latest = db.execute(
                     "SELECT * FROM repair_tasks WHERE id=?", (row["id"],)
@@ -974,6 +1040,9 @@ class Repairs(EnvironmentRecovery):
                     raise Conflict("repair_changed")
                 if not self.current(db, latest):
                     raise Conflict("repair_stale")
+                if (json.loads(row["context"]).get("_recovery_binding")
+                        != self._recovery_binding(db, latest)):
+                    raise Conflict("repair_basis_changed")
                 authorization = json.loads(latest["context"]).get("owner_model_retry")
                 if (authorization and authorization["attempt"] == latest["attempt"]
                         and authorization["model_identity"] != digest(
@@ -989,9 +1058,17 @@ class Repairs(EnvironmentRecovery):
             with self.store.connection() as db:
                 context.update(repair_origin(db, row))
             def event(kind, value=""):
+                with self.store.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    if kind != "usage":
+                        recovery_ledger.require(db, row["_recovery_action"], self.owner)
+                    recovery_ledger.observe(db, row["_recovery_action"], self.owner, kind, value)
+                if kind == "usage":
+                    return
                 self.event(row["id"], kind, value)
                 if kind in ("patch", "verification_round", "review_round") and workspace:
-                    self._save_artifacts(row["id"], workspace)
+                    self._save_artifacts(row["id"], workspace, action=row["_recovery_action"],
+                                         attempt=row["attempt"])
                 if kind in ("verification_feedback", "review_feedback"):
                     with self.store.connection() as db:
                         db.execute("UPDATE repair_tasks SET stage='repair_agent',updated=? "
@@ -1103,7 +1180,8 @@ class Repairs(EnvironmentRecovery):
                     except (asyncio.CancelledError, Exception):
                         pass
             check()
-            self._save_artifacts(row["id"], workspace, review)
+            self._save_artifacts(row["id"], workspace, review, action=row["_recovery_action"],
+                                 attempt=row["attempt"])
             if not review["approved"]:
                 raise Conflict("repair_review_rejected")
             if not workspace.verification or not workspace.verification.get("passed"):
@@ -1113,8 +1191,12 @@ class Repairs(EnvironmentRecovery):
                 ready = dict(db.execute(
                     "SELECT * FROM repair_tasks WHERE id=?", (row["id"],)
                 ).fetchone())
+            ready["_recovery_action"] = row["_recovery_action"]
             await asyncio.to_thread(self.publish, ready, check)
         except Exception as exc:
+            with self.store.connection() as db:
+                if not recovery_ledger.active(db, row["_recovery_action"], self.owner, now=0):
+                    return True
             code = self._error_code(exc, workspace)
             self.event(row["id"], "failure_details", json.dumps({
                 "code": code, **repair_failure_details(exc),
@@ -1122,16 +1204,20 @@ class Repairs(EnvironmentRecovery):
                 "attempt_timeout_seconds": REPAIR_TIMEOUT_SECONDS, "timing_scope": "attempt",
             }))
             if workspace:
-                self._save_artifacts(row["id"], workspace)
+                self._save_artifacts(row["id"], workspace, action=row["_recovery_action"],
+                                     attempt=row["attempt"])
             with self.store.connection() as db:
                 db.execute(
                     "UPDATE repair_tasks SET status=?,error=?,lease=0,version=version+1,updated=? "
-                    "WHERE id=? AND owner=?",
+                    "WHERE id=? AND owner=? AND attempt=? AND status='running'",
                     ("interrupted" if code == "repair_interrupted" else "failed",
-                     code[:80], time.time(), row["id"], self.owner),
+                     code[:80], time.time(), row["id"], self.owner, row["attempt"]),
                 )
             self.event(row["id"], "failure", code)
             logging.getLogger(__name__).warning("Repair %s failed: %s", row["id"], code)
+        finally:
+            recovery_ledger.release(self.store, row["_recovery_action"], self.owner,
+                             "repair_tasks", row["id"])
         return True
 
     @staticmethod
@@ -1151,7 +1237,7 @@ class Repairs(EnvironmentRecovery):
                 return "repair_tests_failed"
         return code
 
-    def _save_artifacts(self, repair_id, workspace, review=None):
+    def _save_artifacts(self, repair_id, workspace, review=None, *, action=None, attempt=None):
         if workspace.patch is None:
             return
         current_review = review if review is not None else workspace.review
@@ -1170,6 +1256,14 @@ class Repairs(EnvironmentRecovery):
                     b"blob " + str(len(raw)).encode() + b"\0" + raw
                 ).hexdigest()
         with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if action and not recovery_ledger.active(db, action, self.owner):
+                return
+            if action and not db.execute(
+                "SELECT 1 FROM repair_tasks WHERE id=? AND owner=? AND attempt=? "
+                "AND status='running'", (repair_id, self.owner, attempt),
+            ).fetchone():
+                return
             db.execute(
                 "UPDATE repair_tasks SET patch=?,diff=?,verification=?,"
                 "review=?,updated=? WHERE id=?",
@@ -1206,6 +1300,9 @@ class Repairs(EnvironmentRecovery):
         task = {**dict(row), "account_id": context["account_id"],
                 "account_version": context["account_version"]}
         with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if row.get("_recovery_action"):
+                recovery_ledger.require(db, row["_recovery_action"], self.owner)
             self.scopes.record_repair(db, row)
         results = "\n".join(
             f"- {key}: exit {value['exit_code']}"
@@ -1228,10 +1325,15 @@ class Repairs(EnvironmentRecovery):
             task, json.loads(row["patch"]), redact_values(body), check=check,
         )
         with self.store.connection() as current:
+            current.execute("BEGIN IMMEDIATE")
+            if row.get("_recovery_action"):
+                recovery_ledger.require(current, row["_recovery_action"], self.owner)
             current.execute(
                 "UPDATE repair_tasks SET status='pr_created',stage='pr_created',remote=?,"
-                "lease=0,error=NULL,version=version+1,updated=? WHERE id=? AND owner=?",
-                (json.dumps(remote, ensure_ascii=False), time.time(), row["id"], self.owner),
+                "lease=0,error=NULL,version=version+1,updated=? WHERE id=? AND owner=? "
+                "AND attempt=? AND status='running'",
+                (json.dumps(remote, ensure_ascii=False), time.time(), row["id"], self.owner,
+                 row["attempt"]),
             )
         self.event(row["id"], "pr_created", remote["pr"]["url"])
         return self.get(row["id"])

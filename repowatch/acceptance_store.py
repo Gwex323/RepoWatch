@@ -6,6 +6,9 @@ from .task_scopes import digest
 
 
 def initialize(db):
+    from .recovery import initialize as initialize_recovery
+
+    initialize_recovery(db)
     db.executescript("""
         CREATE TABLE IF NOT EXISTS scope_acceptance_runs (
             id TEXT PRIMARY KEY, scope_id TEXT NOT NULL REFERENCES task_scopes(id),

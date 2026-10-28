@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, SecretStr
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from . import recovery
 from .acceptance import Acceptance
 from .analysis_model import AnalysisModel
 from .diagnosis import AnalysisModelDiagnoser
@@ -469,6 +470,7 @@ def create_app(
             "tracing_export": telemetry.status()["enabled"],
             "langfuse": telemetry.status(),
             "system_faults": faults.health(),
+            "workflow_recovery": recovery_status(),
             "storage": "SQLite",
             "runtime": "Python",
             "platform": platform.system(),
@@ -481,6 +483,17 @@ def create_app(
     @app.get("/api/system/faults/health")
     def fault_health():
         return faults.health()
+
+    @app.get("/api/system/recovery")
+    def recovery_status():
+        with store.connection() as db:
+            return recovery.state(db)
+
+    @app.post("/api/system/recovery/settings")
+    def recovery_settings(body: FaultSettingsBody):
+        with store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
+            return recovery.configure(db, body.enabled, body.version)
 
     @app.post("/api/system/faults/import-history")
     def fault_import(body: FaultImportBody):

@@ -23,6 +23,7 @@ type History = { id: number; occurrence_id: string; state: string; actor: string
   evidence: string | null; created: number; details: Record<string, unknown> };
 type Health = { enabled: boolean | null; version: number; error: string | null; pending: number | null;
   sources: { source: string; error: string | null; failures: number; last_success: number | null }[] };
+type Recovery = { enabled: boolean; version: number; max_requests: number; max_seconds: number };
 
 const states: Record<string, string> = {
   pending: '待诊断', diagnosing: '诊断中', recovering: '恢复中', verifying: '验证中',
@@ -85,6 +86,7 @@ export function SystemFaults({ api, repositories, onSource }: {
   const [offset, setOffset] = useState(0);
   const [list, setList] = useState<Page<Group> | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
+  const [recovery, setRecovery] = useState<Recovery | null>(null);
   const [selected, setSelected] = useState('');
   const [detail, setDetail] = useState<Detail | null>(null);
   const [detailOffset, setDetailOffset] = useState(0);
@@ -103,10 +105,11 @@ export function SystemFaults({ api, repositories, onSource }: {
   const queryString = query.toString();
   queryRef.current = queryString;
   const refresh = useCallback(async () => {
-    const [next, status] = await Promise.all([
+    const [next, status, policy] = await Promise.all([
       api<Page<Group>>(`/system/faults?${queryString}`), api<Health>('/system/faults/health'),
+      api<Recovery>('/system/recovery'),
     ]);
-    if (queryRef.current === queryString) { setList(next); setHealth(status); }
+    if (queryRef.current === queryString) { setList(next); setHealth(status); setRecovery(policy); }
   }, [api, queryString]);
   useEffect(() => {
     let alive = true;
@@ -130,18 +133,31 @@ export function SystemFaults({ api, repositories, onSource }: {
     catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
+  const changeRecovery = (enabled: boolean) => {
+    if (!recovery) return;
+    const previous = recovery;
+    setRecovery({ ...previous, enabled });
+    void action(async () => {
+      try { await api('/system/recovery/settings', { version: previous.version, enabled }); }
+      catch (e) { setRecovery(previous); throw e; }
+    });
+  };
   const reset = () => { setOffset(0); setSelected(''); setDetailOffset(0); setTimelineOffset(0); };
   return <section className="fault-page" aria-label="统一故障记录">
     <div className="fault-health" role="status">
       <div><strong>{health?.error || health?.sources.some(item => item.error) ? '故障采集异常' :
         health?.enabled === false ? '故障采集已停用' : '本地故障台账'}</strong>
-        <p>仅采集与展示。原任务按原有策略运行；历史补录只添加记录。</p>
         <small>待入账 {health?.pending ?? '未知'} 条{health?.error && ` · ${health.error}`}</small></div>
       <div className="execution-actions"><button className="button secondary" disabled={busy}
         onClick={() => void action(refresh)}><RefreshCw size={15} />刷新</button>
         <button className="button secondary" disabled={busy || !health?.enabled}
           onClick={() => void action(() => api('/system/faults/import-history', { limit: 200 }))}>补录一批历史故障</button></div>
     </div>
+    {recovery && <div className="execution-actions">
+      <label className="checkbox-label"><input type="checkbox" checked={recovery.enabled} disabled={busy}
+        onChange={e => changeRecovery(e.target.checked)} />自动恢复新发生的流程故障</label>
+      <span className="action-hint">根任务上限：{recovery.max_requests} 次请求 / {recovery.max_seconds} 秒</span>
+    </div>}
     {health && <div className="execution-actions"><button className="text-link" disabled={busy}
       onClick={() => void action(() => api('/system/faults/settings', { version: health.version, enabled: !health.enabled }))}>
       {health.enabled ? '停用故障采集' : '启用故障采集'}</button>

@@ -14,6 +14,7 @@ from .repository_source import ExecutionError
 from .store import Conflict
 
 LOCAL_CODES = {
+    "recovery_budget_exhausted", "recovery_ownership_changed", "recovery_disabled",
     "acceptance_basis_changed", "acceptance_budget_exhausted", "acceptance_context_limit",
     "acceptance_coverage_required", "acceptance_deadline_exceeded", "acceptance_evidence_invalid",
     "acceptance_model_budget", "acceptance_model_changed", "acceptance_output_invalid",

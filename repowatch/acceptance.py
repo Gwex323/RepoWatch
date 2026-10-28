@@ -9,6 +9,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import recovery
 from .acceptance_evidence import (
     AcceptanceEvidenceError,
     correction_hints,
@@ -267,6 +268,13 @@ class Acceptance:
                 attempt = run["attempt"] + (run["state"] in ("queued", "retry_wait"))
                 if attempt > MAX_RESUMES + run["additional_attempts"]:
                     continue
+                action = recovery.claim(
+                    db, "acceptance", run, [attempt, run["updated"]],
+                    [json.loads(run["basis"]), model_identity], self.owner,
+                    now+MAX_SECONDS+30,
+                )
+                if not action:
+                    continue
                 db.execute(
                     "UPDATE scope_acceptance_runs SET state='running',owner=?,lease=?,"
                     "attempt=?,deadline=COALESCE(deadline,?),"
@@ -282,11 +290,13 @@ class Acceptance:
                         run["id"],
                     ),
                 )
-                return dict(
+                result = dict(
                     db.execute(
                         "SELECT * FROM scope_acceptance_runs WHERE id=?", (run["id"],)
                     ).fetchone()
                 )
+                result["_recovery_action"] = action
+                return result
         return None
 
     def retry(self, analysis_id, version, additional_attempt=False, run_id=None):
@@ -357,6 +367,8 @@ class Acceptance:
         if digest(status.get("role_models", {})) != model_identity:
             raise Conflict("acceptance_model_changed")
         with self.store.connection() as db:
+            if run.get("_recovery_action"):
+                recovery.require(db, run["_recovery_action"], self.owner)
             live = db.execute(
                 "SELECT * FROM scope_acceptance_runs WHERE id=?", (run["id"],)
             ).fetchone()
@@ -375,6 +387,8 @@ class Acceptance:
                 raise Conflict("acceptance_basis_changed")
 
     def _require_live(self, db, run):
+        if run.get("_recovery_action"):
+            recovery.require(db, run["_recovery_action"], self.owner)
         live = db.execute("SELECT * FROM scope_acceptance_runs WHERE id=?", (run["id"],)).fetchone()
         analysis = db.execute(
             "SELECT * FROM repository_analyses WHERE id=?", (run["analysis_id"],)
@@ -393,7 +407,7 @@ class Acceptance:
         # Keep only bounded protocol metadata, never provider text or request bodies.
         if kind not in ("agent", "request_started", "request_completed", "format_retry",
                         "output_retry", "provider_response", "provider_rejection",
-                        "model_configuration"):
+                        "model_configuration", "usage"):
             return
         metadata = {}
         if kind == "model_configuration":
@@ -421,6 +435,8 @@ class Acceptance:
                 metadata["finish_reason"] = value["finish_reason"]
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if run.get("_recovery_action"):
+                recovery.observe(db, run["_recovery_action"], self.owner, kind, value)
             if kind == "request_started":
                 changed = db.execute(
                     "UPDATE scope_acceptance_runs SET model_calls=model_calls+1 WHERE id=? "
@@ -1135,6 +1151,9 @@ class Acceptance:
                             "workbench_version": self.store.workbench_version})
         except Exception as exc:
             self._stop(run, exc)
+        finally:
+            recovery.release(self.store, run["_recovery_action"], self.owner,
+                             "scope_acceptance_runs", run["id"], "state")
         return True
 
     def _stop(self, run, exc):

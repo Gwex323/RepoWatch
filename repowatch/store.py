@@ -89,6 +89,9 @@ class Store:
             from .system_faults import initialize as initialize_faults
 
             initialize_faults(db)
+            from .recovery import initialize as initialize_recovery
+
+            initialize_recovery(db)
             health = db.execute("SELECT failures FROM system_fault_ingestion "
                                 "WHERE source='source_capture'").fetchone()
             if health:

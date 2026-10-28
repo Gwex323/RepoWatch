@@ -282,9 +282,11 @@ def test_scope_is_registered_successfully_before_first_handoff():
             return await super().get_response(*args, **kwargs)
     def event(kind, value):
         events.append((kind, value))
-        if kind == "scope_proposal":
-            registered.extend(json.loads(value))
-            return {"version": 2, "items": list(registered), "execution_limits": []}
+        if kind == "scope_batch_check":
+            return []
+        if kind == "scope_batch_execute":
+            registered.extend(json.loads(value)["batches"][0])
+            return [{"version": 2, "items": list(registered), "execution_limits": []}]
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [],
                "test_result": None, "task_scope": {"version": 1, "items": []}}
     report = asyncio.run(run_analysis(Scoped(), context, event))
@@ -415,8 +417,11 @@ def test_missing_scope_report_is_corrected_from_same_real_evidence(persistent):
             return result
     def event(kind, value):
         events.append((kind, value))
-        if kind == "scope_proposal":
-            return {"version": 2, "items": json.loads(value), "execution_limits": []}
+        if kind == "scope_batch_check":
+            return []
+        if kind == "scope_batch_execute":
+            return [{"version": 2, "items": json.loads(value)["batches"][0],
+                     "execution_limits": []}]
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [],
                "test_result": None, "task_scope": {"version": 1, "items": []}}
     if persistent:
