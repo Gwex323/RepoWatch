@@ -27,7 +27,7 @@ const icons: Record<string, typeof FolderGit2> = {
   repository_analyst: FolderGit2, problem_investigator: Search,
   reproduction_assistant: Terminal, repair_agent: Code2, independent_reviewer: ShieldCheck,
 };
-const flowNames: Record<string, string> = { analysis: '仓库分析', diagnosis: '环境诊断', repair: '自动修复' };
+const flowNames: Record<string, string> = { analysis: '仓库分析', diagnosis: '环境诊断', repair: '自动修复', coordination: '系统协调' };
 const errors: Record<string, string> = {
   ...providerErrors,
   analysis_model_invalid: '请检查模型名称、服务地址、接口类型和推理强度。',
@@ -113,7 +113,7 @@ function AgentModelForm({ value, catalog, disabled, onSave, onSelect }: {
     }}>
       <label>{value.name}供应商与模型<select disabled={disabled} value={choice}
         onChange={e => setChoice(e.target.value)}>
-        <option value="">使用默认模型（未设置时使用原有配置）</option>
+        <option value="">{value.role === 'system_coordinator' ? '未选择供应商（仅使用此角色独立配置）' : '使用默认模型（未设置时使用原有配置）'}</option>
         <option value="direct">使用此角色独立配置</option>
         <ProviderOptions catalog={catalog} />
       </select></label>
@@ -218,16 +218,14 @@ export function AgentModelSettings({ api, onChange }: { api: Api; onChange: () =
     } finally { setBusy(false); }
   };
   return <><nav className="section-nav secondary-nav" aria-label="模型配置步骤">{[['providers', '1. 连接供应商'], ['roles', '2. 分配模型']].map(([key, label]) => <button key={key} aria-current={section === key ? 'page' : undefined} className={section === key ? 'active' : ''} onClick={() => setSection(key)}>{label}</button>)}</nav>
-  <p className="section-intro">先添加或导入供应商，再选择默认模型。五个角色可共用默认模型，也可单独指定。</p>
   <div hidden={section !== 'providers'}><ModelProvidersSettings api={api} catalog={catalog} onChange={catalogChanged} disabled={busy} /></div>
   <section hidden={section !== 'roles'} className="analysis-model-section" aria-labelledby="agent-model-heading">
     <div className="section-heading"><h2 id="agent-model-heading"><Workflow size={18} />智能体模型配置</h2>
-      <span className="section-meta">{config?.roles.length ?? 5} 个 Agent 角色 · 分别选择模型</span>
+      <span className="section-meta">{config?.roles.length ?? 6} 个 Agent 角色 · 分别选择模型</span>
       <button className="button secondary small" disabled={busy} onClick={load}>
         <RefreshCw size={14} />刷新配置
       </button>
     </div>
-    <p className="diagnosis-meta">五个角色分别选择「连接供应商」中已保存的模型，也可以共用默认模型。同名角色在分析、诊断和修复中共用选择。</p>
     {catalog && <DefaultModelForm key={catalog.version} catalog={catalog} disabled={busy} onSelect={select} />}
     {config && <>
       <div className="agent-model-switch"><label className="checkbox-label">

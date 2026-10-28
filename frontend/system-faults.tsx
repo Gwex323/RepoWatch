@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
+import { CoordinationPanel } from './coordination';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Repo = { id: string; name: string };
@@ -87,7 +88,7 @@ export function SystemFaults({ api, repositories, onSource }: {
   const [list, setList] = useState<Page<Group> | null>(null);
   const [health, setHealth] = useState<Health | null>(null);
   const [recovery, setRecovery] = useState<Recovery | null>(null);
-  const [selected, setSelected] = useState('');
+  const [selected, setSelected] = useState(initial.get('fault_id') ?? '');
   const [detail, setDetail] = useState<Detail | null>(null);
   const [detailOffset, setDetailOffset] = useState(0);
   const [timelineOffset, setTimelineOffset] = useState(0);
@@ -164,6 +165,7 @@ export function SystemFaults({ api, repositories, onSource }: {
       <details><summary>采集健康详情</summary>{health.sources.map(item => <p key={item.source}>
         {item.source} · 累计采集异常 {item.failures} 次 · {item.error ?? '正常'} · 最近成功 {item.last_success ? stamp(item.last_success) : '尚未采集'}
       </p>)}</details></div>}
+    <CoordinationPanel api={api} faultId={selected} />
     {error && <p className="error-inline" role="alert">{error}</p>}
     <div className="fault-filters">
       <label>仓库<select aria-label="仓库" value={repo} onChange={e => { setRepo(e.target.value); reset(); }}>

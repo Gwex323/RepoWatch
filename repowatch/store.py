@@ -92,6 +92,9 @@ class Store:
             from .recovery import initialize as initialize_recovery
 
             initialize_recovery(db)
+            from .coordination import initialize as initialize_coordination
+
+            initialize_coordination(db)
             health = db.execute("SELECT failures FROM system_fault_ingestion "
                                 "WHERE source='source_capture'").fetchone()
             if health:

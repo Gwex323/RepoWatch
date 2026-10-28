@@ -1,7 +1,7 @@
 # Implementation Plan
 
 Date: 2026-10-09
-Status updated: 2026-10-28
+Status updated: 2026-10-29
 
 ## Current Delivery Status
 
@@ -14,13 +14,20 @@ Status updated: 2026-10-28
 - Central coordination (#77) is a separate six-stage effort. Unified fault
   recording (#78) was merged via PR #84 on 2026-10-28. Automatic recovery (#79)
   is implemented and verified on `feature/workflow-recovery-79`
-  (base `ba043b1`), delivered for review in PR #90, not merged or deployed.
+  (base `ba043b1`), merged in PR #90 as `367baff` on 2026-10-28; deployment unverified.
   Final backend regression: 1088 passed,
   0 failed, 12 opt-in Docker cases skipped; browser checks: 4 passed. Frontend
   build, Ruff and independent review passed. New rule recovery is disabled by
   default. See the [policy](workflow-recovery-79.md)
-  and [validation](workflow-recovery-79-validation.md). The coordinator (#80),
-  self-maintenance (#81), deployment/service recovery (#82), and full acceptance
+  and [validation](workflow-recovery-79-validation.md). The coordinator (#80) is
+  implemented on `feature/system-coordinator-80` (base `367baff`). Targeted
+  validation and independent review passed: 24 coordinator cases, a real-source
+  adapter recheck, 59 earlier related cases, one browser smoke, build and Ruff.
+  No new full regression was run, as requested by the owner. PR submission is
+  pending; it is not merged or deployed. See the
+  [coordinator policy](system-coordinator-80.md) and
+  [validation](system-coordinator-80-validation.md).
+  Self-maintenance (#81), deployment/service recovery (#82), and full acceptance
   (#83) remain unimplemented. A merged change is not proof
   that the running workbench has been deployed.
 - Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend

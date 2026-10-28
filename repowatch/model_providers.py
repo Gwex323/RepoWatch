@@ -3,7 +3,7 @@
 import json
 
 from .model_urls import valid_model_base_url
-from .roles import FLOW_ROLES, ROLE_DETAILS, ROLES
+from .roles import BUSINESS_ROLES, COORDINATOR, FLOW_ROLES, ROLE_DETAILS, ROLES
 from .store import Conflict, Missing, uid
 
 REASONING_EFFORTS = {"auto", "default", "low", "medium", "high", "max"}
@@ -48,7 +48,7 @@ def initialize(db):
     legacy_config = json.loads(legacy["config"]) if legacy else {}
     legacy_config.pop("enabled", None)
     flow_names = {"analysis": "仓库分析", "repair": "自动修复", "diagnosis": "环境诊断"}
-    for role in ROLES:
+    for role in BUSINESS_ROLES:
         choices = [("角色", old[role])] if old.get(role) else []
         choices.extend((flow_names[flow], old[f"{flow}.{role}"])
                        for flow in ("analysis", "repair", "diagnosis")
@@ -140,7 +140,7 @@ class ModelProviders:
                    **saved.get(role, {}), "provider_id": None,
                    "provider_name": "角色独立配置", "provider_version": 0,
                    "selection_choice": routes.get(role), "routing_version": settings["version"]}
-            choice = routes.get(role) or routes.get("default")
+            choice = routes.get(role) or (routes.get("default") if role != COORDINATOR else None)
             if choice and not choice.get("direct"):
                 try:
                     resolved = cls.resolve(db, choice)
@@ -154,11 +154,12 @@ class ModelProviders:
         return rows
 
     @staticmethod
-    def bump_revision(db):
+    def bump_revision(db, *, business=True):
         db.execute("UPDATE agent_model_settings SET version=version+1 WHERE id=1")
-        db.execute("INSERT INTO analysis_model VALUES(1,?, '',1) ON CONFLICT(id) "
-                   "DO UPDATE SET version=analysis_model.version+1",
-                   (json.dumps({"enabled": False}),))
+        if business:
+            db.execute("INSERT INTO analysis_model VALUES(1,?, '',1) ON CONFLICT(id) "
+                       "DO UPDATE SET version=analysis_model.version+1",
+                       (json.dumps({"enabled": False}),))
 
     @staticmethod
     def touch_roles(db, roles):
@@ -207,6 +208,7 @@ class ModelProviders:
         if old and old["base_url"] != value["base_url"] and not value["api_key"]:
             raise Conflict("analysis_model_new_key_required")
         routes = json.loads(self.settings(db)["routes"])
+        routes.update(self.coordination_routes(db))
         names = {m["model"] for m in value["models"]}
         if provider_id and any(r and r.get("provider_id") == provider_id
                                and r.get("model") not in names for r in routes.values()):
@@ -250,13 +252,21 @@ class ModelProviders:
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             settings = self.check_version(db, version)
-            if any(r and r.get("provider_id") == provider_id
-                   for r in json.loads(settings["routes"]).values()):
+            routes = {**json.loads(settings["routes"]), **self.coordination_routes(db)}
+            if any(r and r.get("provider_id") == provider_id for r in routes.values()):
                 raise Conflict("model_provider_in_use")
             if not db.execute("DELETE FROM model_providers WHERE id=?", (provider_id,)).rowcount:
                 raise Missing("Model provider not found.")
             self.bump_revision(db)
         return self.state()
+
+    @staticmethod
+    def coordination_routes(db):
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='coordination_configuration'").fetchone():
+            return {}
+        row = db.execute("SELECT fallback FROM coordination_configuration WHERE id=1").fetchone()
+        return {"coordination_fallback": json.loads(row[0])} if row and row[0] else {}
 
     def configure(self, *, version, enabled, routes):
         if set(routes) - {"default", *AGENT_ROLES}:
@@ -265,6 +275,9 @@ class ModelProviders:
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             settings = self.check_version(db, version)
+            old = json.loads(settings["routes"])
+            if COORDINATOR not in routes and COORDINATOR in old:
+                routes[COORDINATOR] = old[COORDINATOR]
             self._set_routes(db, settings, routes)
             legacy = self.legacy(db)
             config = json.loads(legacy["config"])
@@ -283,10 +296,12 @@ class ModelProviders:
                 raise Conflict("analysis_model_key_required")
         old = json.loads(settings["routes"])
         changed = [role for role in ROLES if old.get(role) != routes.get(role)
-                   or not routes.get(role) and old.get("default") != routes.get("default")]
+                   or role != COORDINATOR and not routes.get(role)
+                   and old.get("default") != routes.get("default")]
         cls.touch_roles(db, changed)
         db.execute("UPDATE agent_model_settings SET routes=? WHERE id=1", (json.dumps(routes),))
-        cls.bump_revision(db)
+        cls.bump_revision(db, business=any(role != COORDINATOR for role in changed)
+                          or old.get("default") != routes.get("default"))
 
     def select(self, *, version, role, choice):
         if role not in (*ROLES, "default"):
@@ -312,5 +327,7 @@ class ModelProviders:
 
     @staticmethod
     def legacy_changed(db, enabled):
+        routes = json.loads(ModelProviders.settings(db)["routes"])
+        preserved = {COORDINATOR: routes[COORDINATOR]} if COORDINATOR in routes else {}
         db.execute("UPDATE agent_model_settings SET enabled=?,routes=?,version=version+1 "
-                   "WHERE id=1", (int(enabled), "{}"))
+                   "WHERE id=1", (int(enabled), json.dumps(preserved)))

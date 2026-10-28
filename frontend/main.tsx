@@ -15,6 +15,7 @@ import { AgentModelSettings, AgentRoleCards } from './agent-models';
 import type { AgentModels } from './agent-models';
 import { RepairSettings } from './repair';
 import { SystemFaults } from './system-faults';
+import { type CoordinationNotice, coordinationStates } from './coordination';
 
 type View = 'overview' | 'repositories' | 'findings' | 'memory' | 'activity' | 'faults' | 'settings';
 type Session = { authenticated: boolean; setup_required: boolean; csrf: string | null };
@@ -190,6 +191,7 @@ function App() {
   const [data, setData] = useState<Dashboard>({ repositories: [], findings: [], events: [], counts: { waiting: 0, active: 0, published_prs: 0 } });
   const [system, setSystem] = useState<System | null>(null);
   const [analysisNotices, setAnalysisNotices] = useState<AnalysisNotice[]>([]);
+  const [coordinationNotices, setCoordinationNotices] = useState<CoordinationNotice[]>([]);
   const [scheduleOverview, setScheduleOverview] = useState<ScheduleOverview[]>([]);
   const [scheduleHistories, setScheduleHistories] = useState<Record<string, ScheduleHistory[]>>({});
   const [scheduleHistoryErrors, setScheduleHistoryErrors] = useState<Record<string, string>>({});
@@ -222,13 +224,15 @@ function App() {
   useEffect(() => { void api<Session>('/session').then(s => { csrf = s.csrf; setSession(s); })
     .catch(e => setError(e.message)); }, []);
   const refresh = useCallback(async () => {
-    const [dashboard, config, notices, schedules] = await Promise.all([
+    const [dashboard, config, notices, schedules, coordination] = await Promise.all([
       api<Dashboard>('/dashboard'), api<System>('/system'),
       api<AnalysisNotice[]>('/analysis-notifications'),
       api<ScheduleOverview[]>('/schedules'),
+      api<CoordinationNotice[]>('/system/coordination/notifications'),
     ]);
     setData(dashboard); setSystem(config); setLoaded(true);
     setAnalysisNotices(notices);
+    setCoordinationNotices(coordination);
     setScheduleOverview(schedules);
   }, []);
   useEffect(() => {
@@ -320,9 +324,10 @@ function App() {
         <div className="breadcrumb">工作空间<ChevronRight size={13} /><strong>{nav.find(n => n[0] === view)?.[1]}</strong></div>
         <label className="global-search"><Search size={16} /><input aria-label="搜索仓库或问题" placeholder="搜索仓库或问题"
           value={query} onChange={e => { setQuery(e.target.value); if (view === 'repositories') setExecutionRepo(null); if (!['repositories', 'findings', 'activity'].includes(view)) setView('findings'); }} /></label>
-        <button className="icon-button notifications" title={`${attention.length} 个问题待处理`} onClick={() => {
-          setFilter('attention'); navigate('findings');
-        }}><Bell size={18} />{attention.length > 0 && <i />}</button>
+        <button className="icon-button notifications" title={`${attention.length + coordinationNotices.length} 条待处理通知`} onClick={() => {
+          if (coordinationNotices.length) navigate('faults');
+          else { setFilter('attention'); navigate('findings'); }
+        }}><Bell size={18} />{attention.length + coordinationNotices.length > 0 && <i />}</button>
         <div className="top-avatar">L</div>
       </header>
       {error && <div className="global-error" role="alert"><XCircle size={17} /><span>{error}</span>
@@ -338,6 +343,13 @@ function App() {
           </div>
         </div>
         {!loaded ? <div className="loading"><Loader2 className="spin" size={22} />正在载入工作空间</div> : <>
+          {['overview', 'faults'].includes(view) && coordinationNotices.map(notice => <div className="analysis-notice" key={notice.id} role="status">
+            <ShieldCheck size={17} /><span>系统协调 · {coordinationStates[notice.state] ?? notice.state}</span>
+            <button className="text-link" onClick={() => { navigate('faults');
+              location.hash = `system-faults?fault_id=${notice.fault_id}`; }}>查看故障<ArrowRight size={14} /></button>
+            <button className="icon-button" title="标记协调通知已读" onClick={() => void action(() =>
+              api(`/system/coordination/notifications/${notice.id}/acknowledge`, {}))}><CheckCircle2 size={16} /></button>
+          </div>)}
           {view === 'overview' && analysisNotices.filter(n => n.status === 'waiting_model' || n.status === 'failed' || n.repair_failed).slice(0, 3).map(notice => <div className="analysis-notice" key={notice.repo_id}>
             <FileCode2 size={17} /><span><strong>{notice.repository}</strong> · {
               notice.status === 'waiting_model' ? '分析已排队，等待模型配置' :
@@ -526,7 +538,7 @@ function App() {
             </div><div hidden={settingsSection !== 'accounts'}><p className="section-intro">连接用于读取仓库和提交修复的账号，并检查仓库访问权限。</p>
             <GitHubAccounts api={api} repositories={data.repositories}
               publicationEnabled={system?.automatic_repair?.enabled} />
-                        </div><div hidden={settingsSection !== 'about'}><details className="disclosure"><summary>了解五个智能体的分工</summary>
+                        </div><div hidden={settingsSection !== 'about'}><details className="disclosure"><summary>智能体分工</summary>
               <div className="section-heading"><h2><Workflow size={18} />Agent 角色</h2>
                 <span className="section-meta">{registeredRoles.length} 个角色<span className="divider-dot">·</span>按流程复用</span></div>
               <AgentRoleCards models={system?.agent_models} onConfigure={() => setSettingsSection('models')} />
