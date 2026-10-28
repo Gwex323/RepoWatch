@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ExternalLink, Loader2, RefreshCw, Save, Wrench } from 'lucide-react';
 import { agentModelEvent } from './agent-models';
+import { AutomaticAcceptance, type AcceptanceProgress } from './task-scope';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Settings = { enabled: boolean; model_enabled: boolean; version: number; max_attempts: number };
@@ -20,17 +21,21 @@ type Repair = {
   verification_recovery_available?: boolean;
   review_evidence_recovery_available?: boolean;
   handoff_recovery_available?: boolean;
+  review_feedback_recovery_available?: boolean;
   verification_resume_available?: boolean;
   publication_retry_available?: boolean;
   docker_recovery_available?: boolean;
   source_kind?: 'discovered' | 'existing_issue' | null;
   source_issue?: { number: number; url: string } | null;
   source_error?: string | null;
-  task_scope?: { total: number; done: number; complete: boolean; reviewed: boolean; combination_pending: boolean };
+  task_scope?: { total: number; done: number; complete: boolean; reviewed: boolean;
+    combination_pending: boolean; automation?: AcceptanceProgress | null };
   context: { finding: { title: string }; publication_retries?: number };
   patch: { summary: string; edits: { path: string }[] } | null;
   diff: string; verification: Verification | null;
   verification_rounds?: { revision: number; diff: string; verification: Verification }[];
+  review_rounds?: { revision: number; patch_digest: string;
+    review: { approved: boolean; summary: string; risks: string[] } }[];
   review: { approved: boolean; summary: string; risks: string[] } | null;
   remote: { branch: string; pr: { number: number; url: string }; issue: { number: number; url: string } } | null;
   events: { kind: string; value: string; created: number }[];
@@ -84,7 +89,7 @@ const errors: Record<string, string> = {
   repair_tests_failed: '回归测试未满足修复前失败、修复后通过及完整测试通过的要求。',
   repair_verification_required: '补丁尚未完成真实测试验证，已阻止提前进入独立审查。',
   repair_setup_failed: '修复验证环境安装失败，请查看测试日志。',
-  repair_review_rejected: '独立审查未批准补丁，请查看审查结论。',
+  repair_review_rejected: '补丁仍未获独立审查批准，自动返工已结束，请查看各轮结论及停止原因。',
   repair_review_required: '缺少通过的测试或独立审查，未提交 PR。',
   repair_patch_unchanged: '补丁未发生实质变化，需要先分析失败原因再修改。',
   repair_unsafe_path: '文件路径未通过保护检查。',
@@ -226,6 +231,14 @@ const verificationEvent = (kind: string, value: string) => {
     return `根据第 ${item.revision} 版失败日志分析并纠正 · 还可生成 ${item.corrections_remaining} 版补丁`;
   } catch { return '修复验证记录'; }
 };
+const reviewEvent = (kind: string, value: string) => {
+  try {
+    const item = JSON.parse(value);
+    if (!Number.isInteger(item.revision)) return '独立审查记录';
+    if (kind === 'review_round') return `第 ${item.revision} 版审查${item.approved ? '批准' : '未批准'}`;
+    return `根据第 ${item.revision} 版审查结论自动修改补丁 · 还可返工 ${item.corrections_remaining} 轮`;
+  } catch { return '独立审查记录'; }
+};
 const providerEvent = (value: string) => {
   try {
     const item = JSON.parse(value);
@@ -339,6 +352,7 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
     <div className="content-card-grid">{tasks.filter(publication).map(task => <article key={task.id}>
       <div className="section-heading"><h4>{task.context.finding.title}</h4><span className="tag neutral">{task.remote ? '已创建 PR' : task.status === 'queued' ? '等待发布' : task.status === 'running' ? '正在发布' : '发布未完成'}</span></div>
       {task.task_scope && <p>任务验收 {task.task_scope.done} / {task.task_scope.total} 项 · {task.task_scope.complete ? '范围已核验' : '仍有待验收项'}</p>}
+      <AutomaticAcceptance progress={task.task_scope?.automation} />
       {task.remote ? <><code>{task.remote.branch}</code><div className="execution-actions">
         <a className="button primary" href={task.remote.pr.url} target="_blank" rel="noopener noreferrer">打开 PR #{task.remote.pr.number}<ExternalLink size={14} /></a>
         <a className="text-link" href={task.remote.issue.url} target="_blank" rel="noopener noreferrer">关联 Issue #{task.remote.issue.number}</a>
@@ -370,6 +384,7 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
       {task.task_scope && !['false_positive', 'superseded'].includes(task.finding_status ?? '') && <p className="diagnosis-meta">任务验收 {task.task_scope.done} / {task.task_scope.total} 项
         {' · '}{task.task_scope.complete ? '当前范围已核验' : task.task_scope.reviewed
           ? '整体尚未完成，部分修复不关闭原 Issue' : '完整性未核验，不自动关闭原 Issue'}</p>}
+      <AutomaticAcceptance progress={task.task_scope?.automation} />
       {task.status === 'running' && <p><Loader2 size={14} className="spin" />正在处理修复任务</p>}
       {task.error && task.finding_status !== 'false_positive' && !publication(task) && task.status !== 'waiting_environment' && <p role="alert">
         {task.error === 'docker_unavailable' && '上次失败：'}{message(task.output_recovery_available
@@ -380,6 +395,8 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
         <p>补丁已通过测试，但旧版审查遗漏证据读取。可额外恢复一次：重新验证已保存补丁后继续独立审查。</p>}
       {task.handoff_recovery_available && task.can_retry &&
         <p>补丁已验证，旧版模型未完成交接。可恢复一次：保留当前补丁和历史，复验后由系统触发独立审查。</p>}
+      {task.review_feedback_recovery_available && task.can_retry &&
+        <p>旧版任务在审查拒绝后直接停止。自动修复启用且证据仍有效时，系统将自动续办一次，保留原记录。</p>}
       {task.timeout_recovery_available && task.can_retry &&
         <p>超时策略已更新，此任务可额外重试一次。</p>}
       {task.source_read_recovery_available && task.can_retry &&
@@ -415,6 +432,9 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
       {task.events.filter(event => event.kind === 'verification_round' || event.kind === 'verification_feedback')
         .slice(-3).map((event, i) => <p className="diagnosis-meta" key={`verify-${i}`}>
           {verificationEvent(event.kind, event.value)}</p>)}
+      {task.events.filter(event => event.kind === 'review_round' || event.kind === 'review_feedback')
+        .slice(-3).map((event, i) => <p className="diagnosis-meta" key={`review-${i}`}>
+          {reviewEvent(event.kind, event.value)}</p>)}
       {task.events.filter(event => event.kind === 'repair_unresolved').slice(-1).map((event, i) =>
         <p key={`unresolved-${i}`}>未解决说明（模型判断，验证未通过）：{event.value}</p>)}
       {task.events.filter(event => event.kind === 'source_path_rejected').slice(-2).map((event, i) =>
@@ -426,6 +446,13 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
         <ul>{task.patch.edits.map(edit => <li key={edit.path}><code>{edit.path}</code></li>)}</ul></>}
       {task.review && <p className="diagnosis-summary">独立审查：{task.review.summary}</p>}
       {task.review && task.review.risks.length > 0 && <ul>{task.review.risks.map((risk, i) => <li key={i}>{risk}</li>)}</ul>}
+      {!!task.review_rounds?.length && <details><summary>各轮独立审查</summary>
+        {task.review_rounds.map(round => <div key={round.revision}>
+          <strong>第 {round.revision} 版 · {round.review.approved ? '已批准' : '未批准'}</strong>
+          <p>{round.review.summary}</p>
+          {round.review.risks.length > 0 && <ul>{round.review.risks.map((risk, i) => <li key={i}>{risk}</li>)}</ul>}
+        </div>)}
+      </details>}
       {publication(task) && <button className="button secondary" onClick={() => onNavigate?.('pr')}>查看 PR 与发布状态 →</button>}
       {task.can_retry && !publication(task) && <button className="button secondary" disabled={!!busy || !task.enabled}
         onClick={() => {
@@ -455,6 +482,8 @@ export function RepairPanel({ envId, api, view = 'repair', onNavigate }: { envId
           {' · '}{event.kind === 'failure' ? message(event.value) :
             event.kind === 'failure_details' ? failureDetails(event.value) :
             event.kind === 'verification_round' || event.kind === 'verification_feedback' ? verificationEvent(event.kind, event.value) :
+            event.kind === 'review_round' || event.kind === 'review_feedback' ? reviewEvent(event.kind, event.value) :
+            event.kind === 'review_feedback_recovery' ? '已自动续办旧版审查拒绝任务，按原结论修订补丁' :
             event.kind === 'repair_unresolved' ? `未解决说明（模型判断）：${event.value}` :
             event.kind === 'provider_response' ? providerEvent(event.value) :
             event.kind === 'model_configuration' ? agentModelEvent(event.value) :

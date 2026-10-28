@@ -12,6 +12,7 @@ FLOW_ROLES = {
     "analysis": (ROLES[0], ROLES[1], ROLES[2], ROLES[4]),
     "diagnosis": (ROLES[0], ROLES[2], ROLES[4]),
     "repair": (ROLES[3], ROLES[4]),
+    "acceptance": (ROLES[4],),
 }
 
 ROLE_DETAILS = {
