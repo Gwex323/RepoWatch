@@ -46,7 +46,7 @@ It adds separately authorized, evidence-bound RepoWatch maintenance through a
 Chinese Issue, isolated feature workspace, verified patch, independent review
 and Chinese PR. Targeted validation passed: 13 backend cases, one desktop/mobile
 browser smoke, frontend build and Ruff; independent review passed. No full
-regression was run, per owner request. Delivery PR is pending; no merge or
+regression was run, per owner request. Submitted as PR #92; no merge or
 deployment is claimed. Automatic patches currently cover Python implementation
 and new Python regressions only; see the [policy](system-maintenance-81.md) and
 [validation](system-maintenance-81-validation.md).

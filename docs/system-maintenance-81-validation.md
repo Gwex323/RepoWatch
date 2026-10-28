@@ -21,7 +21,7 @@
 | 4.4 隔离 worktree | 真实本地 Git 夹具，实际默认分支与 feature 分支；已有脏目录拒绝覆盖，用户改动保留 |
 | 4.5 验证与独立反馈 | 真实 SDK 的拒绝→新补丁→重新验证→再审；验证失败或批准后树被改动均被 gate 拒绝 |
 | 4.6 中文发布 | GitHub REST 替身检查五部分及 Issue 引用；丢失 PR 响应的发布重试只有一次 POST；分支被改动阻止新 PR |
-| 4.7 文档与 review | 本说明、维护策略、README、总设计和实施计划同步；独立 review 通过，中文交付 PR 待创建 |
+| 4.7 文档与 review | 本说明、维护策略、README、总设计和实施计划同步；独立 review 通过，中文交付 PR #92 已创建 |
 
 完整正向用例使用真实 SQLite、真实 Agents SDK runner/工具/原生交接、真实 RepairWorkspace 和替代 Docker/GitHub：内部证据分类→中文 Issue→隔离候选→第一次独立拒绝→重新测试→再审批准→中文 PR。Git fetch/worktree 本身另用本地测试仓库验证，未把本地 file 协议带入生产 Git 适配器。
 
@@ -41,3 +41,5 @@ review 另用一个全替身/临时库场景复现分支改动漏洞，未运行
 ## 剩余边界
 
 真实模型、真实维护写入、Docker 依赖安装、Linux 和部署均未验证。维护自动补丁仅覆盖 Python 实现及新增 Python 回归；其他语言和受保护文件拒绝。部分源码安全筛查、来源额度或已过期限会使任务受阻，这是停止门禁，不伪装完成。阶段五、六未实施，OpenSpec 整体不归档。
+
+实现提交：`e666ee1`；交付：[PR #92](https://github.com/Gwex323/RepoWatch/pull/92)，关联 #81。GitHub 状态为开放，尚未合并或部署。OpenSpec 第四阶段 4.1–4.7 已有交付证据，完整六阶段仅完成 36/51 项，不代表第五、六阶段完成。

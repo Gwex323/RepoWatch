@@ -32,7 +32,7 @@ Status updated: 2026-10-29
   evidence-based Issue/PR reuse, isolated feature workspaces and existing
   verification/review gates. Targeted validation passed: 13 backend cases,
   one desktop/mobile browser smoke, frontend build and Ruff. Independent review
-  passed; no full regression was run, as requested. Chinese delivery PR is pending;
+  passed; no full regression was run, as requested. Chinese delivery PR #92 is open;
   not merged or deployed. The automatic patch boundary is Python implementation
   and new Python regressions. See the [policy](system-maintenance-81.md) and
   [validation](system-maintenance-81-validation.md).
