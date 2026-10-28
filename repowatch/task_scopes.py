@@ -6,8 +6,9 @@ import re
 import time
 
 from .analysis_basis import analysis_current
+from .analysis_tools import tool_allowed
 from .diagnosis import redact, redact_values
-from .scope_models import ScopeRequirement, ScopeReview
+from .scope_models import ScopeRequirement, ScopeReview, scope_mapping_issues
 from .store import Conflict, Missing, uid
 
 MAX_ITEMS = 32
@@ -183,6 +184,12 @@ def _requirements(db, scope):
     )]
 
 
+def current_scope_findings(db, analysis_id):
+    return [{"id": row["id"], "status": row["status"], "data": json.loads(row["data"])}
+            for row in db.execute("SELECT * FROM analysis_findings WHERE analysis_id=?",
+                                  (analysis_id,))]
+
+
 def request_scope_review(db, analysis):
     scope = _bound(db, analysis["id"])
     if scope["analysis_id"] != analysis["id"]:
@@ -197,11 +204,7 @@ def request_scope_review(db, analysis):
         context["issue"] = {key: cached[key] for key in (
             "id", "repo_id", "number", "title", "body", "state", "author", "url", "updated_at",
         )}
-    context["current_scope_findings"] = [
-        {"id": row["id"], "status": row["status"], "data": json.loads(row["data"])}
-        for row in db.execute("SELECT * FROM analysis_findings WHERE analysis_id=?",
-                              (analysis["id"],))
-    ]
+    context["current_scope_findings"] = current_scope_findings(db, analysis["id"])
     _, original = original_request({**dict(analysis), "context": json.dumps(context)})
     db.execute(
         "UPDATE task_scopes SET original=?,original_digest=?,status='draft',"
@@ -213,7 +216,7 @@ def request_scope_review(db, analysis):
 
 
 def register_scope(db, analysis, proposals, actor):
-    if actor not in ("repository_analyst", "problem_investigator", "independent_reviewer", "owner"):
+    if actor != "owner" and not tool_allowed(actor, "register_task_scope"):
         raise Conflict("scope_role_required")
     scope = _bound(db, analysis["id"])
     allowed_status = ("completed", "failed", "interrupted") if actor == "owner" else ("running",)
@@ -256,15 +259,18 @@ def save_scope_review(db, analysis, review, findings):
     if scope["analysis_id"] != analysis["id"]:
         raise Conflict("scope_changed")
     requirements = {item["key"]: item for item in _requirements(db, scope)}
+    parsed = ScopeReview.model_validate(review).model_dump() if review is not None else None
+    allowed = {row[0] for row in db.execute(
+        "SELECT id FROM analysis_findings WHERE analysis_id=?", (analysis["id"],),
+    )}
+    if scope_mapping_issues([data for _, data in findings], parsed, requirements, allowed):
+        raise Conflict("scope_mapping_invalid")
     for finding_id, data in findings:
         for key in set(data.get("scope_keys", [])):
-            if key not in requirements:
-                raise Conflict("scope_mapping_invalid")
             db.execute("INSERT OR IGNORE INTO task_scope_findings VALUES(?,?,?)",
                        (scope["id"], key, finding_id))
     if review is None:
         return
-    parsed = ScopeReview.model_validate(review).model_dump()
     keys = [item["key"] for item in parsed["items"]]
     if (parsed["version"] != scope["version"] or set(keys) != set(requirements)
             or len(keys) != len(set(keys))):
@@ -286,12 +292,7 @@ def save_scope_review(db, analysis, review, findings):
                 for target in item["required_keys"]
             ):
                 raise Conflict("scope_review_incomplete")
-    allowed = {row[0] for row in db.execute(
-        "SELECT id FROM analysis_findings WHERE analysis_id=?", (analysis["id"],),
-    )}
     for item in parsed["items"]:
-        if not set(item["finding_ids"]) <= allowed:
-            raise Conflict("scope_mapping_invalid")
         for finding_id in set(item["finding_ids"]):
             db.execute("INSERT OR IGNORE INTO task_scope_findings VALUES(?,?,?)",
                        (scope["id"], item["key"], finding_id))

@@ -27,6 +27,7 @@ from .github_issues import GitHubIssues
 from .memory import Memory
 from .memory_evaluation import MemoryEvaluations
 from .model_providers import ModelProviders
+from .observability import Telemetry
 from .provider_probe import ProviderProbe
 from .repairs import REPAIR_MAX_ATTEMPTS, Repairs
 from .repository_analysis import MAX_TURNS, Analyses
@@ -241,7 +242,8 @@ def create_app(
     github = GitHubAccounts(store, client=github_client, vault=credential_vault)
     issues = GitHubIssues(store, github)
     task_scopes = TaskScopes(store)
-    analysis_model = AnalysisModel(store, github)
+    telemetry = Telemetry.from_environment()
+    analysis_model = AnalysisModel(store, github, telemetry=telemetry)
     model_providers = ModelProviders(store, github)
     provider_probe = ProviderProbe(model_providers, transport=provider_probe_transport)
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
@@ -292,6 +294,7 @@ def create_app(
             schedule_worker.cancel()
             with suppress(asyncio.CancelledError):
                 await schedule_worker
+        await asyncio.to_thread(telemetry.shutdown)
 
     app = FastAPI(title="RepoWatch", lifespan=lifespan, docs_url=None, redoc_url=None)
     app.state.store = store
@@ -428,7 +431,8 @@ def create_app(
                 "discovered": "human", "existing_issue": "human", "merge": "owner_only",
             },
             "schedule": schedules.summary(),
-            "tracing_export": False,
+            "tracing_export": telemetry.status()["enabled"],
+            "langfuse": telemetry.status(),
             "storage": "SQLite",
             "runtime": "Python",
             "platform": platform.system(),
