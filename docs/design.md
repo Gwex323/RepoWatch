@@ -1,19 +1,36 @@
 # Multi-Agent GitHub Maintenance System
 
-Status: local execution, analysis and confirmed-discovery repair/publication implemented;
-real Issue intake and daily scheduling remain planned
-Updated: 2026-10-14
+Status: local execution, real Issue intake, daily checks and controlled repair/publication
+implemented; central coordination is in staged development
+Updated: 2026-10-28
 
 ## Goal
 
-Current repair implementation: see ADR 0018 for bounded native SDK repair/review,
-isolated regression evidence, installation-level opt-in, trusted GitHub writes
-and uncertain-publication recovery. This increment does not enable real
-existing-Issue intake, daily scheduling, automatic merging or repair-memory
-writeback. Live provider/publication acceptance is still pending.
-
 Design a multi-agent system that analyzes GitHub repositories, identifies
 project problems, opens issues, fixes bugs, and submits pull requests.
+
+## Current Status
+
+The local single-user workbench supports fixed-revision Docker execution, model-based
+analysis, GitHub Issue synchronization and Issue-based analysis, daily repository
+checks, and controlled repair and publication. System discoveries still require
+personal reproduction; existing Issues retain their own validation and evidence
+gates. The owner performs merges; the application has no merge interface.
+Merged repair experience can be written back to repository memory after owner
+disposition and merge verification. See the [README](../README.md) and the later
+ADRs for current behavior and limitations.
+
+The main discovery-to-publication path has been accepted on Windows with a real
+model and real GitHub writes. This does not validate every provider, repository
+or operating system; independent live-provider diagnosis and Linux acceptance
+remain outstanding. Scope acceptance has additional limits described in the README.
+
+Central coordination is a separate six-stage effort (#77). Stage 1, unified fault
+recording (#78), was merged in PR #84 on 2026-10-28; recording alone does not
+execute recovery. Stages 2-6 (#79-#83), including unified recovery, the coordinator
+role, self-maintenance, deployment recovery and complete acceptance, remain open.
+Merge does not establish deployment to the running workbench. See
+[stage 1 validation](system-fault-records-78-validation.md).
 
 ## Confirmed Requirements
 
@@ -57,8 +74,7 @@ project problems, opens issues, fixes bugs, and submits pull requests.
   style findings, and unverified suspected problems remain in the analysis
   report.
 - The system supports recurring scheduled repository checks after intake.
-  The default frequency is once per day. The execution time, timezone, and
-  other scheduling rules remain undecided.
+  Daily checks use each repository's configured local time.
 - Version one runs on the user's current Windows host. A later deployment
   will migrate to a Linux server; portability is a design requirement.
 - The user imposes no model-provider or model-family restriction. Specific
@@ -66,7 +82,7 @@ project problems, opens issues, fixes bugs, and submits pull requests.
   establish that any provider credentials are already configured.
 - Implement the agent backend in Python using the Python OpenAI Agents SDK,
   including native handoffs for responsibility transfers between agents.
-  The exact Python runtime and SDK package versions remain to be pinned.
+  The current SDK is pinned to 0.23.1; see the project configuration for runtime requirements.
 - The current budget policy has no daily model-call spending cap across
   repositories. This is the initial configuration preference, not a permanent
   requirement to prohibit budget limits.
@@ -80,7 +96,7 @@ project problems, opens issues, fixes bugs, and submits pull requests.
   only. Email and external messaging notifications are not required.
 - Version one serves a single user. Team roles and multi-user collaboration
   are outside the initial scope; authentication and network exposure still
-  need to be defined.
+  remain important boundaries; the current service is local-only.
 - The expected initial workload is three registered repositories checked
   daily. This is a sizing assumption, not a hard repository-count limit or
   a decision to execute three runs concurrently.
@@ -95,8 +111,7 @@ project problems, opens issues, fixes bugs, and submits pull requests.
   These commands execute in the project's Docker environment, subject to
   the detailed isolation policy.
 
-These are requirements for the future system, not authorization to modify
-any particular repository during this design session.
+These requirements do not authorize modification of any particular repository.
 
 The reproduction checkpoint is mandatory for system discoveries. Existing
 Issues are exempt from human reproduction, not from automatic validation or
@@ -118,6 +133,10 @@ machine. Agent-assisted evidence collection is allowed before the human
 checkpoint but cannot satisfy it on its own.
 
 ## Open Questions
+
+This section preserves the original design questions as a historical checklist.
+Some have since been answered or implemented; current decisions and remaining
+limits are recorded in the README and subsequent ADRs.
 
 - What discovery evidence and execution checks should be used for project
   commands, and how should WebUI overrides be validated and retained?
