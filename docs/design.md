@@ -39,9 +39,18 @@ server-authorized actions, bounded fallback, progress and deduplicated notificat
 Targeted validation and independent review passed: 24 coordinator cases, one
 real-source adapter recheck, 59 related cases from the earlier check, one browser
 smoke, frontend build and Ruff. Per owner request, no new full regression was run.
-Submitted as PR #91; it is not merged or deployed. See the
+PR #91 was merged as `74b0918` on 2026-10-29 (Asia/Shanghai); deployment is unverified. See the
 [stage 3 policy](system-coordinator-80.md) and [validation](system-coordinator-80-validation.md).
-Stages 4-6 (#81-#83) remain unimplemented. See the
+Stage 4 (#81) is implemented on `feature/system-maintenance-81`, based on `74b0918`.
+It adds separately authorized, evidence-bound RepoWatch maintenance through a
+Chinese Issue, isolated feature workspace, verified patch, independent review
+and Chinese PR. Targeted validation passed: 13 backend cases, one desktop/mobile
+browser smoke, frontend build and Ruff; independent review passed. No full
+regression was run, per owner request. Submitted as PR #92; no merge or
+deployment is claimed. Automatic patches currently cover Python implementation
+and new Python regressions only; see the [policy](system-maintenance-81.md) and
+[validation](system-maintenance-81-validation.md).
+Stages 5-6 (#82-#83) remain unimplemented. See the
 [stage 2 policy](workflow-recovery-79.md) and [validation](workflow-recovery-79-validation.md).
 Merge does not establish deployment to the running workbench. See
 [stage 1 validation](system-fault-records-78-validation.md).

@@ -95,6 +95,9 @@ class Store:
             from .coordination import initialize as initialize_coordination
 
             initialize_coordination(db)
+            from .maintenance import initialize as initialize_maintenance
+
+            initialize_maintenance(db)
             health = db.execute("SELECT failures FROM system_fault_ingestion "
                                 "WHERE source='source_capture'").fetchone()
             if health:

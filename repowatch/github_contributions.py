@@ -32,6 +32,9 @@ def remote_link(item, repository, kind):
 
 
 class GitHubPublisher:
+    operation_table = "repair_remote_operations"
+    operation_owner = "repair_id"
+
     def __init__(self, github):
         self.github, self.store = github, github.store
         self.scopes = TaskScopes(self.store)
@@ -41,7 +44,8 @@ class GitHubPublisher:
         payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         with self.store.connection() as db:
             row = db.execute(
-                "SELECT * FROM repair_remote_operations WHERE repair_id=? AND operation=?",
+                f"SELECT * FROM {self.operation_table} "
+                f"WHERE {self.operation_owner}=? AND operation=?",
                 (task_id, key),
             ).fetchone()
         if row and row["payload_hash"] != payload_hash:
@@ -67,9 +71,10 @@ class GitHubPublisher:
     def _save_operation(self, task_id, key, payload_hash, state, result=None):
         with self.store.connection() as db:
             db.execute(
-                "INSERT INTO repair_remote_operations"
-                "(repair_id,operation,payload_hash,state,result,updated) VALUES(?,?,?,?,?,?) "
-                "ON CONFLICT(repair_id,operation) DO UPDATE SET state=excluded.state,"
+                f"INSERT INTO {self.operation_table}"
+                f"({self.operation_owner},operation,payload_hash,state,result,updated) "
+                "VALUES(?,?,?,?,?,?) "
+                f"ON CONFLICT({self.operation_owner},operation) DO UPDATE SET state=excluded.state,"
                 "result=excluded.result,updated=excluded.updated",
                 (task_id, key, payload_hash, state,
                  json.dumps(result) if result is not None else None, time.time()),

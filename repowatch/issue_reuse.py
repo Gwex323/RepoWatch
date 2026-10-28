@@ -85,12 +85,12 @@ def similar_issue(request, repository, finding):
             "paths": shared_paths, "score": round(score, 4)}
 
 
-def issue_comment(request, repository, number, marker, account_id, body):
+def issue_comment(request, repository, number, marker, account_id, body, *, kind="issues"):
     """Return lookup/write callbacks for the publisher's persisted POST intent."""
     path = f"/repos/{repository}/issues/{number}/comments"
 
     def validate(item):
-        expected = f"https://github.com/{repository}/issues/{number}#issuecomment-"
+        expected = f"https://github.com/{repository}/{kind}/{number}#issuecomment-"
         if (not isinstance(item, dict) or type(item.get("id")) is not int
                 or item["id"] < 1 or item.get("user", {}).get("id") != account_id
                 or item.get("body") != body

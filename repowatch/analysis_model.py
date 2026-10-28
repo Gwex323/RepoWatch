@@ -503,6 +503,9 @@ class ModelFlow:
     async def coordinate(self, *args, **kwargs):
         return await self.parent.coordinate(*args, **kwargs)
 
+    async def classify_maintenance(self, *args, **kwargs):
+        return await self.parent.classify_maintenance(*args, **kwargs)
+
 
 class AnalysisModel:
     def __init__(self, store, credentials, *, telemetry=None):
@@ -685,6 +688,11 @@ class AnalysisModel:
 
         return await self._run(run_coordination, context, event, flow="coordination",
                                route_override=fallback)
+
+    async def classify_maintenance(self, context, event):
+        from .maintenance_model import classify_maintenance
+
+        return await self._run(classify_maintenance, context, event, flow="repair")
 
     async def _run(self, runner, context, event, *, flow,
                    request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):

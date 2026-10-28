@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
 import { CoordinationPanel } from './coordination';
+import { MaintenancePanel } from './maintenance';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Repo = { id: string; name: string };
@@ -166,6 +167,7 @@ export function SystemFaults({ api, repositories, onSource }: {
         {item.source} · 累计采集异常 {item.failures} 次 · {item.error ?? '正常'} · 最近成功 {item.last_success ? stamp(item.last_success) : '尚未采集'}
       </p>)}</details></div>}
     <CoordinationPanel api={api} faultId={selected} />
+    <MaintenancePanel api={api} faultId={selected} />
     {error && <p className="error-inline" role="alert">{error}</p>}
     <div className="fault-filters">
       <label>仓库<select aria-label="仓库" value={repo} onChange={e => { setRepo(e.target.value); reset(); }}>
