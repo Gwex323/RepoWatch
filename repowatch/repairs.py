@@ -742,7 +742,8 @@ class Repairs(EnvironmentRecovery):
                 continue
             return
 
-    def retry(self, repair_id, version, *, model_change_note=None, automatic=False):
+    def retry(self, repair_id, version, *, model_change_note=None, automatic=False,
+              coordination=None):
         with self.store.connection() as db:
             previous = db.execute("SELECT * FROM repair_tasks WHERE id=?", (repair_id,)).fetchone()
         if (previous and previous["version"] == version
@@ -788,6 +789,11 @@ class Repairs(EnvironmentRecovery):
             if not self.current(db, row):
                 raise Conflict("repair_stale")
             context = json.loads(row["context"])
+            if coordination is not None:
+                coordinator, job = coordination
+                context["_coordination_version"] = coordinator.authorize_retry(db, job, row)
+            else:
+                context.pop("_coordination_version", None)
             if automatic:
                 context["_automatic_recovery_version"] = recovery_ledger.authorize_automatic(
                     db, row, self._recovery_binding(db, row),

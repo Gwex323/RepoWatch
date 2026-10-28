@@ -76,7 +76,7 @@ test('fault ledger fits mobile width and preserves read-only phase boundaries', 
   const after = await (await page.request.get('/api/dashboard')).json();
   expect(after).toEqual(before);
   const config = await (await page.request.get('/api/system')).json();
-  expect(config.roles).toHaveLength(5);
+  expect(config.roles).toHaveLength(6);
   expect(config.system_faults.mode).toBe('record_only');
   expect(config.external_model_calls).toBe(false);
 });

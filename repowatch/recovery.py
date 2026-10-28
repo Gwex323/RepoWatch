@@ -14,7 +14,7 @@ MAX_ACTIONS = 3
 MAX_CORRECTIONS = 32
 MAX_RESUMPTIONS = 12
 DELAYS = (10, 30, 60)
-FLOWS = {"analysis", "repair", "acceptance"}
+FLOWS = {"analysis", "repair", "acceptance", "coordination"}
 AUTOMATIC_ERRORS = {
     "repair_model_timeout",
     "repair_provider_unreachable",
@@ -361,6 +361,13 @@ def snapshot(db, root):
 
 
 def automatic_guard(db, context):
+    version = context.get("_coordination_version")
+    if version is not None:
+        settings = db.execute(
+            "SELECT enabled,version FROM coordination_configuration WHERE id=1",
+        ).fetchone()
+        if not settings or not settings[0] or settings[1] != version:
+            raise Conflict("recovery_disabled")
     version = context.get("_automatic_recovery_version")
     if version is not None:
         settings = state(db)

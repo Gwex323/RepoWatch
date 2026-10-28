@@ -15,7 +15,7 @@ from openai.types.chat import ChatCompletionMessageFunctionToolCall
 from .model_providers import ModelProviders, validate_model_config
 from .observability import Telemetry, model_observation, record_event, record_usage
 from .report_recovery import digest
-from .roles import FLOW_ROLES, ROLE_DETAILS, ROLES
+from .roles import BUSINESS_ROLES, COORDINATOR, FLOW_ROLES, ROLE_DETAILS, ROLES
 from .store import Conflict
 
 REQUEST_TIMEOUT_SECONDS = 120
@@ -456,7 +456,7 @@ def initialize(db):
         config = json.loads(legacy["config"])
         if config.get("model"):
             config.pop("enabled", None)
-            for role in ROLES:
+            for role in BUSINESS_ROLES:
                 db.execute("INSERT OR IGNORE INTO agent_models VALUES(?,?,?,?)",
                            (role, json.dumps(config), legacy["encrypted_key"], legacy["version"]))
 
@@ -500,6 +500,9 @@ class ModelFlow:
     async def acceptance(self, *args, **kwargs):
         return await self.parent.acceptance(*args, **kwargs)
 
+    async def coordinate(self, *args, **kwargs):
+        return await self.parent.coordinate(*args, **kwargs)
+
 
 class AnalysisModel:
     def __init__(self, store, credentials, *, telemetry=None):
@@ -519,7 +522,8 @@ class AnalysisModel:
         # Hash encrypted credentials as well: even a key-only replacement must
         # invalidate recovery. Neither keys nor encrypted values leave this hash.
         return digest({"settings": dict(row) if row else None,
-                       "roles": {role: dict(rows[role]) if role in rows else None
+                       "roles": {role: {k: v for k, v in rows[role].items()
+                                        if k != "routing_version"} if role in rows else None
                                  for role in FLOW_ROLES["analysis"]}})
 
     def recovery_identity(self):
@@ -611,7 +615,8 @@ class AnalysisModel:
                 (role, json.dumps(config), encrypted, version + 1),
             )
             global_row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
-            self._bump_version(db, global_row)
+            if role != COORDINATOR:
+                self._bump_version(db, global_row)
             ModelProviders.direct_changed(db, role)
         return self.configuration()
 
@@ -636,7 +641,7 @@ class AnalysisModel:
                 (json.dumps(config), encrypted, version + 1),
             )
             role_config = {key: value for key, value in config.items() if key != "enabled"}
-            for role in ROLES:
+            for role in BUSINESS_ROLES:
                 db.execute(
                     "INSERT INTO agent_models VALUES(?,?,?,1) ON CONFLICT(role) DO UPDATE SET "
                     "config=excluded.config,encrypted_key=excluded.encrypted_key,"
@@ -675,6 +680,12 @@ class AnalysisModel:
 
         return await self._run(runner, context, event or (lambda *_: None), flow="diagnosis")
 
+    async def coordinate(self, context, event, *, fallback=None):
+        from .coordination_model import run_coordination
+
+        return await self._run(run_coordination, context, event, flow="coordination",
+                               route_override=fallback)
+
     async def _run(self, runner, context, event, *, flow,
                    request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
         with self.telemetry.workflow(flow, context, event):
@@ -684,12 +695,17 @@ class AnalysisModel:
             )
 
     async def _run_models(self, runner, context, event, *, flow,
-                          request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
+                          request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, route_override=None,
+                          **options):
         required = FLOW_ROLES[flow]
         with self.store.connection() as db:
             db.execute("BEGIN")
             row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
             rows = ModelProviders.role_rows(db)
+            if flow == "coordination" and route_override is not None:
+                rows[COORDINATOR] = {**rows[COORDINATOR],
+                                     **ModelProviders.resolve(db, route_override)}
+                rows[COORDINATOR]["config"] = json.dumps(rows[COORDINATOR]["config"])
             if (not row or not json.loads(row["config"]).get("enabled")
                     or any(role not in rows or not public_model(role, rows[role])["configured"]
                            for role in required)):

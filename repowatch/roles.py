@@ -1,21 +1,28 @@
 """Public roles implemented by the real analysis, diagnosis and repair flows."""
 
-ROLES = (
+BUSINESS_ROLES = (
     "repository_analyst",
     "problem_investigator",
     "reproduction_assistant",
     "repair_agent",
     "independent_reviewer",
 )
+COORDINATOR = "system_coordinator"
+ROLES = (*BUSINESS_ROLES, COORDINATOR)
 
 FLOW_ROLES = {
     "analysis": (ROLES[0], ROLES[1], ROLES[2], ROLES[4]),
     "diagnosis": (ROLES[0], ROLES[2], ROLES[4]),
     "repair": (ROLES[3], ROLES[4]),
     "acceptance": (ROLES[4],),
+    "coordination": (COORDINATOR,),
 }
 
 ROLE_DETAILS = {
+    COORDINATOR: {
+        "name": "系统协调", "description": "依据脱敏故障提出受限计划，执行仍由服务端校验。",
+        "flows": ["系统协调"],
+    },
     "repository_analyst": {
         "name": "仓库分析", "description": "拆解原始任务范围、入口和平台，梳理源码与执行证据。",
         "flows": ["仓库分析", "环境诊断"],

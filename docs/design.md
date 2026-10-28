@@ -2,7 +2,7 @@
 
 Status: local execution, real Issue intake, daily checks and controlled repair/publication
 implemented; central coordination is in staged development
-Updated: 2026-10-28
+Updated: 2026-10-29
 
 ## Goal
 
@@ -31,9 +31,17 @@ execute recovery. Stage 2 (#79) is implemented and verified on
 `feature/workflow-recovery-79`, based on `ba043b1`: shared ownership and budgets,
 atomic scope batches and opt-in rule recovery (disabled by default). Final backend
 regression: 1088 passed, 0 failed, 12 opt-in Docker cases skipped; browser checks:
-4 passed; frontend build, Ruff and independent review passed. Delivery PR #90 is
-open; it is not merged or deployed.
-Stages 3-6 (#80-#83) remain unimplemented. See the
+4 passed; frontend build, Ruff and independent review passed. Delivery PR #90 was
+merged as `367baff` on 2026-10-28; deployment remains unverified.
+Stage 3 (#80) is implemented on `feature/system-coordinator-80`,
+based on `367baff`: independently configured coordinator, evidence-bound plans,
+server-authorized actions, bounded fallback, progress and deduplicated notifications.
+Targeted validation and independent review passed: 24 coordinator cases, one
+real-source adapter recheck, 59 related cases from the earlier check, one browser
+smoke, frontend build and Ruff. Per owner request, no new full regression was run.
+Submitted as PR #91; it is not merged or deployed. See the
+[stage 3 policy](system-coordinator-80.md) and [validation](system-coordinator-80-validation.md).
+Stages 4-6 (#81-#83) remain unimplemented. See the
 [stage 2 policy](workflow-recovery-79.md) and [validation](workflow-recovery-79-validation.md).
 Merge does not establish deployment to the running workbench. See
 [stage 1 validation](system-fault-records-78-validation.md).

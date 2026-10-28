@@ -1,5 +1,6 @@
 """Isolated browser fixture server; no business workers, model calls or external writes."""
 
+import asyncio
 import json
 import os
 import sys
@@ -17,11 +18,29 @@ from repowatch.system_faults import enqueue, record_worker_failure  # noqa: E402
 from repowatch.task_scopes import ensure_scope  # noqa: E402
 
 
+class BrowserCoordinator:
+    def status(self):
+        return {"enabled": True}
+
+    async def coordinate(self, packet, event, **_):
+        event("request_started", "")
+        event("usage", 7)
+        return {
+            "occurrence_id": packet["occurrence_id"], "basis": packet["basis"],
+            "category": "protocol", "diagnosis": "调用数量超过上限，未执行工具。",
+            "facts": list(packet["facts"]), "unknowns": ["根因尚未确认"],
+            "action": "request_authorization", "expected": "原步骤重新验证后才能恢复。",
+            "verification": "source_verification",
+        }
+
+
 def main():
     os.environ["REPOWATCH_LANGFUSE_ENABLED"] = "0"
     os.environ["OPENAI_AGENTS_DISABLE_TRACING"] = "1"
     with TemporaryDirectory(prefix="repowatch-fault-e2e-") as temporary:
-        app = create_app(Path(temporary) / "faults.db", start_worker=False)
+        coordination_fixture = os.environ.get("REPOWATCH_COORDINATION_TEST") == "1"
+        app = create_app(Path(temporary) / "faults.db", start_worker=False,
+                         coordinator_engine=BrowserCoordinator() if coordination_fixture else None)
         store = app.state.store
         store.setup_password("qa-only-owner-password")
         repo = store.add_repository("owner/fault-fixture", "https://github.com/owner/fault-fixture")
@@ -126,8 +145,16 @@ def main():
                         },
                     ),
                 )
-        record_worker_failure(store, "fixture_worker")
+        if not coordination_fixture:
+            record_worker_failure(store, "fixture_worker")
         app.state.faults.tick()
+        if coordination_fixture:
+            coordinator = app.state.coordinator
+            coordinator.configure(version=1, enabled=True)
+            with store.connection() as db:
+                db.execute("UPDATE coordination_configuration SET enabled_since=0")
+            asyncio.run(coordinator.tick())
+            coordinator.configure(version=2, enabled=False)
         uvicorn.run(
             app, host="127.0.0.1", port=int(os.environ.get("REPOWATCH_FAULT_TEST_PORT", "8778"))
         )

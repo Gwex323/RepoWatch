@@ -1,0 +1,33 @@
+import { test, expect } from '@playwright/test';
+
+test('coordination notification, progress and opt-in controls fit desktop and mobile', async ({ page }) => {
+  const errors: string[] = [];
+  page.on('pageerror', error => errors.push(error.message));
+  await page.goto('/');
+  await page.getByLabel('管理密码', { exact: true }).fill('qa-only-owner-password');
+  await page.getByRole('button', { name: '进入工作空间' }).click();
+  const notice = page.getByRole('status').filter({ hasText: '系统协调 · 需要新增授权' });
+  await expect(notice).toHaveCount(1);
+  await notice.getByRole('button', { name: '查看故障' }).click();
+  await expect(page.getByLabel('故障详情')).toBeVisible();
+  const panel = page.getByRole('region', { name: '系统协调', exact: true });
+  await expect(panel).toContainText('调用数量超过上限，未执行工具。');
+  await expect(panel).toContainText('已报告令牌 7');
+  await expect(panel).toContainText('费用 未知');
+  const toggle = panel.getByRole('checkbox', { name: '协调新发生的系统故障' });
+  await expect(toggle).not.toBeChecked();
+  const before = await (await page.request.get('/api/dashboard')).json();
+  await toggle.check();
+  await expect(toggle).toBeEnabled();
+  await toggle.uncheck();
+  await expect(toggle).toBeEnabled();
+  expect(await (await page.request.get('/api/dashboard')).json()).toEqual(before);
+  await page.screenshot({ path: 'data/qa-80/coordination-desktop.png', fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBeTruthy();
+  await expect(panel).toContainText('需要新增授权');
+  await page.screenshot({ path: 'data/qa-80/coordination-mobile.png', fullPage: true, animations: 'disabled' });
+  await notice.getByRole('button', { name: '标记协调通知已读' }).click();
+  await expect(notice).toHaveCount(0);
+  expect(errors).toEqual([]);
+});

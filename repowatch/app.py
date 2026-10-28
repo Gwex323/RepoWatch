@@ -22,6 +22,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from . import recovery
 from .acceptance import Acceptance
 from .analysis_model import AnalysisModel
+from .coordination import Coordinator
 from .diagnosis import AnalysisModelDiagnoser
 from .execution import Execution
 from .github_accounts import GitHubAccounts, GitHubError
@@ -251,10 +252,21 @@ class FaultSettingsBody(StrictBody):
     enabled: bool = Field(strict=True)
 
 
+class CoordinationFallbackBody(StrictBody):
+    provider_id: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+
+
+class CoordinationSettingsBody(FaultSettingsBody):
+    fallback: CoordinationFallbackBody | None = None
+    fallback_authorized: bool = Field(default=False, strict=True)
+
+
 def create_app(
     db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
     execution_runtime=None, repository_source=None, execution_diagnoser=None, analysis_engine=None,
     repair_engine=None, repair_publisher=None, provider_probe_transport=None,
+    coordinator_engine=None,
 ) -> FastAPI:
     # Windows registry MIME mappings may label .js as text/plain.
     mimetypes.add_type("text/javascript", ".js")
@@ -280,6 +292,9 @@ def create_app(
     schedules = RepositorySchedules(store, execution)
     repairs.analyses = analyses
     acceptance = Acceptance(analyses, repairs, analysis_model.for_flow("acceptance"))
+    coordinator = Coordinator(
+        store, coordinator_engine or analysis_model.for_flow("coordination"), repairs,
+    )
     login_attempts: dict[str, deque] = defaultdict(deque)
 
     @asynccontextmanager
@@ -295,7 +310,11 @@ def create_app(
         acceptance_worker = asyncio.create_task(acceptance.run()) if start_worker else None
         issue_worker = asyncio.create_task(issues.run()) if start_worker else None
         schedule_worker = asyncio.create_task(schedules.run()) if start_worker else None
+        coordinator_worker = asyncio.create_task(coordinator.run()) if start_worker else None
         yield
+        coordinator.closing.set()
+        if coordinator_worker:
+            await coordinator_worker
         execution.closing.set()
         acceptance.closing.set()
         if acceptance_worker:
@@ -338,6 +357,7 @@ def create_app(
     app.state.memory_evaluations = memory_evaluations
     app.state.repairs = repairs
     app.state.acceptance = acceptance
+    app.state.coordinator = coordinator
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
     @app.middleware("http")
@@ -455,7 +475,9 @@ def create_app(
             "model_mode": "configured_provider",
             "external_model_calls": (execution.diagnoses.engine.status()["enabled"]
                                      or analyses.engine.status()["enabled"]
-                                     or repairs.settings()["model_enabled"]),
+                                     or repairs.settings()["model_enabled"]
+                                     or coordinator.state()["enabled"]
+                                     and coordinator.state()["model_ready"]),
             "repository_analysis": analyses.engine.status(),
             "execution_diagnosis": execution.diagnoses.engine.status(),
             "github_publication": repairs.settings()["enabled"],
@@ -471,6 +493,7 @@ def create_app(
             "langfuse": telemetry.status(),
             "system_faults": faults.health(),
             "workflow_recovery": recovery_status(),
+            "coordination": coordinator.state(),
             "storage": "SQLite",
             "runtime": "Python",
             "platform": platform.system(),
@@ -494,6 +517,26 @@ def create_app(
         with store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             return recovery.configure(db, body.enabled, body.version)
+
+    @app.get("/api/system/coordination")
+    def coordination_status():
+        return coordinator.state()
+
+    @app.post("/api/system/coordination/settings")
+    def coordination_settings(body: CoordinationSettingsBody):
+        return coordinator.configure(**body.model_dump())
+
+    @app.get("/api/system/coordination/jobs")
+    def coordination_jobs(fault_id: str | None = Query(default=None, max_length=100)):
+        return coordinator.list(fault_id)
+
+    @app.get("/api/system/coordination/notifications")
+    def coordination_notifications():
+        return coordinator.notifications()
+
+    @app.post("/api/system/coordination/notifications/{notification_id}/acknowledge")
+    def coordination_acknowledge(notification_id: int):
+        return coordinator.acknowledge(notification_id)
 
     @app.post("/api/system/faults/import-history")
     def fault_import(body: FaultImportBody):
