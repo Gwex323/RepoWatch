@@ -12,9 +12,15 @@ Status updated: 2026-10-28
   This is not universal provider or repository acceptance; independent live
   diagnosis and Linux migration acceptance remain outstanding.
 - Central coordination (#77) is a separate six-stage effort. Unified fault
-  recording (#78) was merged via PR #84 on 2026-10-28. Automatic recovery (#79),
-  the coordinator (#80), self-maintenance (#81), deployment/service recovery
-  (#82), and full acceptance (#83) remain open. A merged change is not proof
+  recording (#78) was merged via PR #84 on 2026-10-28. Automatic recovery (#79)
+  is implemented and verified on `feature/workflow-recovery-79`
+  (base `ba043b1`), not merged or deployed. Final backend regression: 1088 passed,
+  0 failed, 12 opt-in Docker cases skipped; browser checks: 4 passed. Frontend
+  build, Ruff and independent review passed. New rule recovery is disabled by
+  default. See the [policy](workflow-recovery-79.md)
+  and [validation](workflow-recovery-79-validation.md). The coordinator (#80),
+  self-maintenance (#81), deployment/service recovery (#82), and full acceptance
+  (#83) remain unimplemented. A merged change is not proof
   that the running workbench has been deployed.
 - Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend
   tests. The same 35 failures appeared on its unmodified base; no new failures
@@ -24,8 +30,10 @@ Status updated: 2026-10-28
   `feature/main-regression-88`. The full backend run now reports 1061 passed,
   0 failed and 12 skipped; the skipped cases require explicit real Docker
   integration opt-in. Production behavior and recovery budgets are unchanged.
-  This regression cleanup is implemented and verified on its branch, not merged
-  or deployed. See [the regression validation](main-regression-88-validation.md).
+  PR #89 was merged as `ba043b1` on 2026-10-28. A subsequent real Docker run
+  passed 11 cases, leaving one cached-desktop case skipped: 1072 passed, 0 failed,
+  1 skipped across that validation. Production deployment remains unverified.
+  See [the regression validation](main-regression-88-validation.md).
 - Automatic merging is not available; the project owner merges on GitHub.
   See the [README](../README.md) for current operational limits.
 

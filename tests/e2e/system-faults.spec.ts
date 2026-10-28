@@ -8,6 +8,24 @@ async function enter(page: Page) {
   await expect(page.getByRole('heading', { name: '系统故障', exact: true })).toBeVisible();
 }
 
+test('automatic recovery is opt-in, persists and can be disabled without changing tasks', async ({ page }) => {
+  await enter(page);
+  const toggle = page.getByRole('checkbox', { name: '自动恢复新发生的流程故障' });
+  await expect(toggle).not.toBeChecked();
+  const before = await (await page.request.get('/api/dashboard')).json();
+  await toggle.check();
+  await expect(toggle).toBeEnabled();
+  await page.reload();
+  await page.getByRole('button', { name: '系统故障', exact: true }).click();
+  await expect(toggle).toBeChecked();
+  await toggle.uncheck();
+  await expect(toggle).toBeEnabled();
+  await expect(toggle).not.toBeChecked();
+  const after = await (await page.request.get('/api/dashboard')).json();
+  expect(after).toEqual(before);
+  expect((await (await page.request.get('/api/system/recovery')).json()).enabled).toBe(false);
+});
+
 test('fault ledger filters, diagnoses, closes with reason and links the original task', async ({ page }) => {
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));

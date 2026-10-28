@@ -229,6 +229,15 @@ class OutputTruncated(ModelBehaviorError):
     """The provider explicitly ended generation at its output-token limit."""
 
 
+def report_tokens(event, *, response=None, delegate=None):
+    """Charge reported usage once, including truncated responses; never invent a price."""
+    tokens = (getattr(getattr(response, "usage", None), "total_tokens", None)
+              if response is not None else
+              getattr(delegate, "observation", {}).get("charged_tokens"))
+    if type(tokens) is int and 0 < tokens <= 10000000:
+        event("usage", tokens)
+
+
 class ObservedModel(Model):
     """Observe safe completion metadata before accepting SDK-decoded output."""
 
@@ -412,6 +421,9 @@ async def observe_response(response, observation, event):
     details = {"finish_reason": finish, "truncated": truncated}
     usage = body.get("usage")
     if isinstance(usage, dict):
+        total = usage.get("total_tokens")
+        if type(total) is int and 0 <= total <= 10000000:
+            observation["charged_tokens"] = total
         tokens = usage.get("completion_tokens", usage.get("output_tokens"))
         token_details = usage.get("completion_tokens_details", usage.get("output_tokens_details"))
         if type(tokens) is int and 0 <= tokens <= 10000000:

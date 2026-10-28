@@ -112,6 +112,10 @@ def initialize(db):
             status TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
             created REAL NOT NULL, updated REAL NOT NULL, UNIQUE(repo_id,origin)
         );
+        CREATE TABLE IF NOT EXISTS task_scope_batches (
+            analysis_id TEXT NOT NULL, batch_id TEXT NOT NULL, fingerprint TEXT NOT NULL,
+            receipts TEXT NOT NULL, PRIMARY KEY(analysis_id,batch_id)
+        );
         CREATE TABLE IF NOT EXISTS analysis_task_scopes (
             analysis_id TEXT PRIMARY KEY REFERENCES repository_analyses(id),
             scope_id TEXT NOT NULL REFERENCES task_scopes(id)
@@ -216,6 +220,39 @@ def request_scope_review(db, analysis, *, actor="owner"):
     )
     _event(db, _bound(db, analysis["id"]), "reassessment_requested", actor, {})
     return context
+
+
+def register_scope_batch(db, analysis, batches, actor, batch_id, version, *, validate=False):
+    """Validate and commit the entire SDK batch, retaining per-call ordered receipts."""
+    if not 1 <= len(batches) <= 2 or any(not 1 <= len(items) <= 3 for items in batches):
+        raise Conflict("scope_batch_limit")
+    fingerprint = digest([batches, actor, version])
+    scope = _bound(db, analysis["id"])
+    if scope["analysis_id"] != analysis["id"] or analysis["status"] != "running":
+        raise Conflict("scope_changed")
+    prior = db.execute("SELECT * FROM task_scope_batches WHERE analysis_id=? AND batch_id=?",
+                       (analysis["id"], batch_id)).fetchone()
+    if prior:
+        if prior["fingerprint"] != fingerprint:
+            raise Conflict("scope_batch_changed")
+        return json.loads(prior["receipts"])
+    if scope["version"] != version:
+        raise Conflict("scope_changed")
+    db.execute("SAVEPOINT scope_batch")
+    try:
+        receipts = [register_scope(db, analysis, proposals, actor) for proposals in batches]
+        if validate:
+            db.execute("ROLLBACK TO scope_batch")
+        else:
+            db.execute("INSERT INTO task_scope_batches VALUES(?,?,?,?)", (
+                analysis["id"], batch_id, fingerprint, json.dumps(receipts, ensure_ascii=False),
+            ))
+    except Exception:
+        db.execute("ROLLBACK TO scope_batch")
+        raise
+    finally:
+        db.execute("RELEASE scope_batch")
+    return receipts
 
 
 def register_scope(db, analysis, proposals, actor):

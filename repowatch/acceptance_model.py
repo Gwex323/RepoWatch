@@ -10,7 +10,7 @@ from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 
 from .acceptance_output import AcceptanceOutputError, validation_feedback
-from .analysis_model import OutputTruncated
+from .analysis_model import OutputTruncated, report_tokens
 from .repository_analysis import report_output_issue
 from .roles import model_for_role, reasoning_for_role
 from .scope_models import RepairScopeCoverage, ScopeReview
@@ -84,7 +84,9 @@ class AcceptanceModel(Model):
                     ),
                     timeout=450,
                 )
+                report_tokens(self.event, response=response)
             except OutputTruncated:
+                report_tokens(self.event, delegate=self.delegate)
                 if attempt:
                     raise Conflict("acceptance_output_truncated") from None
                 settings = kwargs["model_settings"]
@@ -102,6 +104,9 @@ class AcceptanceModel(Model):
                 )
                 self.event("output_retry", "independent_reviewer")
                 continue
+            except Exception:
+                report_tokens(self.event, delegate=self.delegate)
+                raise
             if any(item.type == "function_call" for item in response.output):
                 raise Conflict("acceptance_output_invalid")
             if report_output_issue(response, schema) is None:

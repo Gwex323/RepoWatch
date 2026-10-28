@@ -32,7 +32,12 @@ from openai.types.responses import ResponseFunctionToolCall
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .analysis_model import REPAIR_REQUEST_TIMEOUT_SECONDS, OutputTruncated, ToolCallProtocolError
+from .analysis_model import (
+    REPAIR_REQUEST_TIMEOUT_SECONDS,
+    OutputTruncated,
+    ToolCallProtocolError,
+    report_tokens,
+)
 from .diagnosis import redact
 from .github_accounts import GitHubError
 from .observability import TracingHooks
@@ -137,6 +142,9 @@ def repair_failure_code(exc):
     for error in chain:
         if isinstance(error, (Conflict, GitHubError, ExecutionError)):
             code = getattr(error, "code", None) or str(error)
+            if code in {"recovery_budget_exhausted", "recovery_ownership_changed",
+                        "recovery_disabled"}:
+                return code
             if isinstance(code, str) and re.fullmatch(r"(?:repair|github|docker)_[a-z_]+", code):
                 return code
     for error in chain:
@@ -284,6 +292,7 @@ class RepairStageModel(Model):
                     system_instructions=(system_instructions or "") + instruction,
                     input=input, **kwargs,
                 ), timeout=REPAIR_REQUEST_TIMEOUT_SECONDS)
+                report_tokens(self.event, response=response)
             except (TimeoutError, APITimeoutError):
                 self.event("request_timeout", json.dumps({
                     **details, "elapsed_seconds": round(time.monotonic() - started, 1),
@@ -296,6 +305,7 @@ class RepairStageModel(Model):
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
                 continue
             except OutputTruncated:
+                report_tokens(self.event, delegate=self.delegate)
                 self.event("output_truncated", self.role)
                 if output_retried or self.budget.get("outputs", 0) >= 2:
                     raise Conflict("repair_output_truncated") from None
@@ -317,6 +327,9 @@ class RepairStageModel(Model):
                 )
                 self.event("output_retry", self.role)
                 continue
+            except Exception:
+                report_tokens(self.event, delegate=self.delegate)
+                raise
             calls = [item for item in response.output if item.type == "function_call"]
             allowed = {tool.name for tool in kwargs["tools"]}
             allowed.update(item.tool_name for item in kwargs["handoffs"])

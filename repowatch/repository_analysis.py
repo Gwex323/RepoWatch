@@ -24,12 +24,14 @@ from openai import (
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from . import recovery as recovery_ledger
 from . import report_scheduler
 from .analysis_basis import analysis_current, execution_trigger
 from .analysis_model import (
     REQUEST_TIMEOUT_SECONDS,
     OutputTruncated,
     ToolCallProtocolError,
+    report_tokens,
     sdk_response_structure,
 )
 from .analysis_tools import (
@@ -67,6 +69,7 @@ from .task_scopes import (
     current_scope_findings,
     ensure_scope,
     register_scope,
+    register_scope_batch,
     request_scope_review,
     save_scope_review,
     scope_packet,
@@ -262,7 +265,7 @@ class StageModel(Model):
                  separate_schema_from_tools=False,
                  prepare_review=None, finalization_reserve=FINALIZATION_RESERVE_SECONDS,
                  tool_parameter_models=None, review_contract=None, evidence_sources=None,
-                 scope_context=None):
+                 scope_context=None, scope_batch=None):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
@@ -278,6 +281,7 @@ class StageModel(Model):
         self.review_contract = review_contract
         self.evidence_sources = evidence_sources
         self.scope_context = scope_context
+        self.scope_batch = scope_batch
 
     async def request(self, system_instructions, input, *, request_timeout=None, **kwargs):
         """Every delegated call, including closing corrections, reserves durable quota."""
@@ -294,9 +298,11 @@ class StageModel(Model):
         timeout = min(REQUEST_TIMEOUT_SECONDS, remaining)
         started = time.monotonic()
         try:
-            return await asyncio.wait_for(self.delegate.get_response(
+            response = await asyncio.wait_for(self.delegate.get_response(
                 system_instructions=system_instructions, input=input, **kwargs,
             ), timeout=timeout)
+            report_tokens(self.event, response=response)
+            return response
         except (TimeoutError, APITimeoutError):
             self.event("model_request_failed", json.dumps({
                 "role": self.role, "request_timeout_seconds": timeout,
@@ -305,6 +311,9 @@ class StageModel(Model):
                 "budget": allowance if isinstance(allowance, dict) else {},
                 "retry_budget": asdict(self.retries),
             }))
+            raise
+        except Exception:
+            report_tokens(self.event, delegate=self.delegate)
             raise
 
     def handoff_validation(self, response, expected):
@@ -332,7 +341,8 @@ class StageModel(Model):
         structure = sdk_response_structure(response)
         calls = [item for item in response.output if item.type == "function_call"]
         matching = sum(call.name == required for call in calls)
-        limit = max(0, reads - self.budget.reads) if required == "read_source_file" else 1
+        limit = (max(0, reads - self.budget.reads) if required == "read_source_file"
+                 else 2 if required == "register_task_scope" else 1)
         accepted = (bool(calls) and len(calls) <= limit and matching == len(calls)
                     and not structure["refusals"])
         reason = ("refusal" if structure["refusals"] else "accepted" if accepted
@@ -917,6 +927,8 @@ class StageModel(Model):
                     call_input = self.final_input(input)
                     self.event("report_finalization", self.role)
                 self.event("output_retry", self.role)
+        if self.scope_batch is not None:
+            self.scope_batch(response)
         return response
 
     async def stream_response(self, *args, **kwargs):
@@ -1214,6 +1226,7 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
     budgets = {role: StageBudget() for role in ROLES}
     active_role = ROLES[0]
     tool_parameter_models = {}
+    scope_batches = {}
     scope_required = isinstance(context.get("task_scope"), dict)
     scope_registered = bool((context.get("task_scope") or {}).get("items"))
 
@@ -1225,6 +1238,19 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
         async def checked_invoke(ctx, arguments):
             if not tool_allowed(active_role, tool.name):
                 raise AnalysisFailure("analysis_tool_not_allowed")
+            batch = scope_batches.get(getattr(ctx, "tool_call_id", None))
+            if tool.name == "register_task_scope" and batch is not None:
+                nonlocal scope_registered
+                if batch["receipts"] is None:
+                    batch["receipts"] = event("scope_batch_execute", json.dumps(batch["packet"]))
+                receipts = batch["receipts"]
+                if not isinstance(receipts, list) or len(receipts) != len(batch["ids"]):
+                    raise AnalysisFailure("analysis_scope_unregistered")
+                context["task_scope"] = receipts[-1]
+                scope_registered = bool(receipts[-1].get("items"))
+                index = batch["ids"].index(ctx.tool_call_id)
+                event("scope_registered", str(len(receipts[index].get("items", []))))
+                return json.dumps(receipts[index], ensure_ascii=False)
             return await invoke(ctx, arguments)
 
         tool.on_invoke_tool = checked_invoke
@@ -1292,6 +1318,25 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
         scope_registered = bool(result.get("items"))
         event("scope_registered", str(len(result.get("items", []))))
         return result
+
+    def prepare_scope_batch(response):
+        calls = [item for item in response.output if item.type == "function_call"]
+        scopes = [item for item in calls if item.name == "register_task_scope"]
+        if not scopes:
+            return
+        if len(scopes) != len(calls) or len(scopes) > 2:
+            raise AnalysisFailure("analysis_scope_batch_invalid")
+        ids = [item.call_id for item in calls]
+        if len(set(ids)) != len(ids):
+            raise AnalysisFailure("analysis_scope_batch_invalid")
+        # Validation has no durable writes. Actual SDK invocation commits the whole batch.
+        packet = {"id": digest(ids), "version": context["task_scope"]["version"],
+                  "batches": [json.loads(item.arguments)["items"] for item in calls]}
+        if not isinstance(event("scope_batch_check", json.dumps(packet)), list):
+            raise AnalysisFailure("analysis_scope_unregistered")
+        batch = {"packet": packet, "ids": ids, "receipts": None}
+        for call_id in ids:
+            scope_batches[call_id] = batch
 
     class Audit(TracingHooks):
         async def on_agent_start(self, context, agent):
@@ -1433,6 +1478,7 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
                 "files_read": sorted(inspected), "read_ranges": ranges,
             })) if role == ROLES[-1] else None,
             scope_context=(lambda: context) if role == ROLES[-1] else None,
+            scope_batch=prepare_scope_batch if scope_required else None,
         )
         for role in ROLES
     }
@@ -1830,6 +1876,7 @@ class Analyses:
             ]
             context = json.loads(row["context"] or "{}")
             result["task_scope"] = scope_snapshot(db, analysis_id)
+            result["recovery_ledger"] = recovery_ledger.snapshot(db, analysis_id)
             result["report_recovery"] = {"available": bool(
                 row["status"] in ("failed", "interrupted")
                 and self.review_checkpoint(db, row, context, self.model_identity())
@@ -2091,6 +2138,13 @@ class Analyses:
             if not row:
                 return False
             recovery = report_scheduler.begin(db, row["id"], now)
+            action = recovery_ledger.claim(
+                db, "analysis", row, row["version"]+1,
+                [row["revision"], row["fingerprint"], self.model_identity()],
+                row["id"]+":"+str(row["version"]+1), now+ANALYSIS_TIMEOUT_SECONDS+30,
+            )
+            if not action:
+                return False
             db.execute(
                 "UPDATE repository_analyses SET status='running',lease=?,version=version+1,"
                 "updated=? WHERE id=?", (now + ANALYSIS_TIMEOUT_SECONDS + 30, now, row["id"]),
@@ -2108,6 +2162,9 @@ class Analyses:
 
         def active():
             with self.store.connection() as db:
+                if not recovery_ledger.active(db, action, row["id"]+":"+str(run_version)):
+                    return False
+                recovery_ledger.require(db, action, row["id"]+":"+str(run_version))
                 latest = db.execute("SELECT status,version FROM repository_analyses WHERE id=?",
                                     (row["id"],)).fetchone()
                 pipeline_id = json.loads(row["context"] or "{}").get("pipeline_id")
@@ -2127,6 +2184,14 @@ class Analyses:
 
         def record(kind, agent):
             nonlocal stage, saved_binding
+            if kind in {"analysis_request", "usage"} or kind.endswith("_retry"):
+                with self.store.connection() as db:
+                    db.execute("BEGIN IMMEDIATE")
+                    recovery_ledger.observe(
+                        db, action, row["id"]+":"+str(run_version), kind, agent,
+                    )
+                if kind == "usage":
+                    return
             if kind in ("agent", "analysis_request", "analysis_retry_budget", "report_diagnostics"):
                 if not active():
                     raise AnalysisFailure("analysis_cancelled")
@@ -2166,14 +2231,24 @@ class Analyses:
                     else:
                         db.execute("UPDATE analysis_report_recovery SET diagnostics=? "
                                    "WHERE analysis_id=?", (agent, row["id"]))
-            if kind == "scope_proposal":
+            if kind in ("scope_proposal", "scope_batch_check", "scope_batch_execute"):
+                if (not active() or not self.current(row)
+                        or self.model_identity() != model_identity):
+                    raise Conflict("scope_changed")
                 with self.store.connection() as db:
                     db.execute("BEGIN IMMEDIATE")
+                    recovery_ledger.require(db, action, row["id"]+":"+str(run_version))
                     current = db.execute("SELECT * FROM repository_analyses WHERE id=?",
                                          (row["id"],)).fetchone()
                     if current["status"] != "running" or current["version"] != run_version:
                         raise Conflict("scope_changed")
-                    return register_scope(db, current, json.loads(agent), stage)
+                    if kind == "scope_proposal":
+                        return register_scope(db, current, json.loads(agent), stage)
+                    packet = json.loads(agent)
+                    return register_scope_batch(
+                        db, current, packet["batches"], stage, packet["id"], packet["version"],
+                        validate=kind == "scope_batch_check",
+                    )
             if kind == "review_checkpoint":
                 # The callback is internal; full checkpoint data never goes to
                 # the event API. Save only while this exact attempt owns the row.
@@ -2426,6 +2501,11 @@ class Analyses:
                     db.execute("UPDATE analysis_report_recovery SET state='stopped',"
                                "stop_reason='pipeline_stopped',retry_after=0 WHERE analysis_id=?",
                                (row["id"],))
+        finally:
+            recovery_ledger.release(
+                self.store, action, row["id"]+":"+str(run_version),
+                "repository_analyses", row["id"],
+            )
         return True
 
     async def run(self):
