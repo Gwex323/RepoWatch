@@ -56,19 +56,24 @@
 | 完整回归组 0 | 348 | 348 | 0 | 0 |
 | 完整回归组 1 | 374 | 374 | 0 | 0 |
 | 完整回归组 2 | 351 | 339 | 0 | 12 |
-| 合计 | 1073 | 1061 | 0 | 12 |
+| 原全量合计 | 1073 | 1061 | 0 | 12 |
+
+启动 Docker Desktop 并允许测试进程访问 Linux 引擎后，单独重跑此前跳过的
+`tests/test_execution_docker.py`：**11 项通过、0 失败、1 项跳过**，耗时 420.91 秒。
+唯一跳过是桌面离线测试的 `cached_desktop_project` 场景，因本机验证未提供明确的缓存
+桌面项目路径。结合原全量结果，本次完整覆盖总计 **1072 项通过、0 失败、1 项跳过**。
 
 另按阶段一的原 35 项失败标识逐项映射（包含重命名及参数更新），均对应本次通过的
 测试用例；三组共 1073 个用例标识无重复。
 
 单独的证据审查验证为 24 项通过。Ruff 检查和 `git diff --check` 通过。
 原始本机 XML 位于忽略的 `data/qa-88/`，包括 `baseline-representative.xml`、
-`review-evidence.xml` 和 `full-shard-0.xml` 至 `full-shard-2.xml`；本报告保留可提交摘要。
+`review-evidence.xml`、`full-shard-0.xml` 至 `full-shard-2.xml` 和
+`docker-integration.xml`；本报告保留可提交摘要。
 
-12 项跳过均来自 `tests/test_execution_docker.py`，原因为未设置
-`REPOWATCH_DOCKER_TESTS=1`，包括三语言真实安装/启动、修复前后验证、依赖快照复用，
-以及自动流水线与桌面离线运行。不能将此结果称为真实 Docker、真实供应商或浏览器验收。
-本次没有前端变更，未运行前端构建或浏览器测试。
+原全量中的 12 项 Docker 跳过随后已有 11 项通过 Docker 引擎实测；剩余 1 项需要特定
+缓存桌面项目路径。没有运行真实供应商或浏览器验收。本次没有前端变更，未运行前端
+构建或浏览器测试。
 
 ## Review 记录
 
