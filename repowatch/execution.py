@@ -370,6 +370,8 @@ class Execution(EnvironmentReuse, ExecutionPipeline):
     def claim(self):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.store.draining(db):
+                return None
             row = db.execute(
                 "SELECT * FROM execution_jobs WHERE state='queued' ORDER BY created LIMIT 1"
             ).fetchone()
@@ -617,6 +619,9 @@ class Execution(EnvironmentReuse, ExecutionPipeline):
                             error="cleanup_pending")
 
     def tick(self):
+        with self.store.connection() as db:
+            if self.store.draining(db):
+                return False
         self.reconcile()
         self.reconcile_pipelines()
         job = self.claim()

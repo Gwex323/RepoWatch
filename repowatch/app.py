@@ -33,6 +33,8 @@ from .memory_evaluation import MemoryEvaluations
 from .model_providers import ModelProviders
 from .observability import Telemetry
 from .provider_probe import ProviderProbe
+from .release_manifest import Manifest
+from .releases import Releases
 from .repairs import REPAIR_MAX_ATTEMPTS, Repairs
 from .repository_analysis import MAX_TURNS, Analyses
 from .repository_source import ExecutionError
@@ -299,6 +301,13 @@ def create_app(
     )
     maintenance = Maintenance(execution, maintenance_engine or analysis_model.for_flow("repair"),
         github, repairs, target=maintenance_target, workspace_factory=maintenance_workspace_factory)
+    manifest_path = os.getenv("REPOWATCH_RELEASE_MANIFEST")
+    manifest = Manifest.load(manifest_path) if manifest_path else None
+    if manifest:
+        from .release_runtime import runtime_health
+
+        runtime_health(store, telemetry, manifest, False)
+    releases = Releases(store, maintenance, analyses, repairs, acceptance, manifest)
     login_attempts: dict[str, deque] = defaultdict(deque)
 
     @asynccontextmanager
@@ -316,7 +325,13 @@ def create_app(
         schedule_worker = asyncio.create_task(schedules.run()) if start_worker else None
         coordinator_worker = asyncio.create_task(coordinator.run()) if start_worker else None
         maintenance_worker = asyncio.create_task(maintenance.run()) if start_worker else None
+        release_worker = asyncio.create_task(releases.run()) if start_worker else None
+        app.state.ready = True
         yield
+        app.state.ready = False
+        releases.closing.set()
+        if release_worker:
+            await release_worker
         maintenance.closing.set()
         if maintenance_worker:
             await maintenance_worker
@@ -367,6 +382,8 @@ def create_app(
     app.state.acceptance = acceptance
     app.state.coordinator = coordinator
     app.state.maintenance = maintenance
+    app.state.releases = releases
+    app.state.ready = False
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost"])
 
     @app.middleware("http")
@@ -376,7 +393,7 @@ def create_app(
             origin = request.headers.get("origin")
             if origin and origin != f"{request.url.scheme}://{request.headers.get('host')}":
                 return JSONResponse({"detail": "Cross-origin requests are not allowed."}, 403)
-        public = path in ("/api/session", "/api/setup", "/api/login")
+        public = path in ("/api/session", "/api/setup", "/api/login", "/api/release-health")
         session = store.session(request.cookies.get("rw_session", ""))
         if path.startswith("/api/") and not public:
             if not session:
@@ -385,6 +402,10 @@ def create_app(
                 request.headers.get("x-csrf-token", ""), session["csrf"]
             ):
                 return JSONResponse({"detail": "Invalid confirmation session."}, 403)
+        if path.startswith("/api/") and request.method not in ("GET", "HEAD", "OPTIONS"):
+            with store.connection() as db:
+                if store.draining(db) and path not in ("/api/login", "/api/logout"):
+                    return JSONResponse({"detail": "release_draining"}, 503)
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["Referrer-Policy"] = "no-referrer"
@@ -470,6 +491,20 @@ def create_app(
     async def dashboard():
         return store.dashboard()
 
+    @app.get("/api/release-health")
+    def release_health(request: Request):
+        expected = os.getenv("REPOWATCH_RELEASE_TOKEN", "")
+        if (not manifest or not expected or not secrets.compare_digest(
+                expected, request.headers.get("X-RepoWatch-Health", ""))):
+            raise HTTPException(404)
+        from .release_runtime import runtime_health
+
+        return runtime_health(store, telemetry, manifest, app.state.ready)
+
+    @app.get("/api/system/releases")
+    def release_status():
+        return releases.state()
+
     @app.get("/api/schedules")
     def schedule_overview():
         return schedules.list()
@@ -506,6 +541,7 @@ def create_app(
             "workflow_recovery": recovery_status(),
             "coordination": coordinator.state(),
             "system_maintenance": maintenance.state(),
+            "releases": releases.state(),
             "storage": "SQLite",
             "runtime": "Python",
             "platform": platform.system(),

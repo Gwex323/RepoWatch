@@ -474,11 +474,16 @@ class Diagnoses:
                 self.record(db, job, row["error"], row["log"], manifests)
 
     async def tick(self):
+        with self.store.connection() as db:
+            if self.store.draining(db):
+                return False
         self.backfill()
         now = time.time()
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             # Remote advice has no side effects; interrupted attempts fall back to local evidence.
+            if self.store.draining(db):
+                return False
             stale = db.execute(
                 "SELECT job_id,report FROM execution_diagnoses WHERE state='running' AND lease<?",
                 (now,),

@@ -98,11 +98,20 @@ class Store:
             from .maintenance import initialize as initialize_maintenance
 
             initialize_maintenance(db)
+            from .release_state import initialize as initialize_release
+
+            initialize_release(db)
             health = db.execute("SELECT failures FROM system_fault_ingestion "
                                 "WHERE source='source_capture'").fetchone()
             if health:
                 self.fault_capture_failures = health[0]
         self.faults_ready = True
+
+    @staticmethod
+    def draining(db):
+        from .release_state import draining
+
+        return draining(db)
 
     @contextmanager
     def connection(self):

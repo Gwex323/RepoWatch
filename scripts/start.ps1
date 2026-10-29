@@ -1,10 +1,15 @@
 param(
     [int]$Port = 8765,
     [string]$Database = "data/repowatch.db",
-    [switch]$Background
+    [switch]$Background,
+    [string]$Manifest
 )
 
 $ErrorActionPreference = "Stop"
+if ($Manifest) {
+    & (Join-Path $PSScriptRoot "managed-start.ps1") -Manifest $Manifest -Background:$Background
+    exit $LASTEXITCODE
+}
 $root = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $root ".venv/Scripts/python.exe"
 if (-not (Test-Path -LiteralPath $python)) {

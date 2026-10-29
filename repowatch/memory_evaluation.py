@@ -298,6 +298,8 @@ class MemoryEvaluations:
     def _claim(self):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.store.draining(db):
+                return None
             row = db.execute(
                 "SELECT * FROM memory_evaluations WHERE status='queued' "
                 "ORDER BY created LIMIT 1"

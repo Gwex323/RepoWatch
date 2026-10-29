@@ -177,6 +177,8 @@ class Maintenance:
     def claim(self):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.store.draining(db):
+                return None
             for old in db.execute(
                 "SELECT * FROM maintenance_tasks WHERE state='running' AND lease<=?", (time.time(),)
             ).fetchall():

@@ -223,6 +223,8 @@ class Coordinator:
     def claim(self):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.store.draining(db):
+                return None
             self._reconcile(db)
             config = settings(db)
             if not config["enabled"] or self.closing.is_set():

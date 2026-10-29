@@ -61,6 +61,8 @@ class GitHubIssues:
 
     def sync(self, repo_id):
         with self.store.connection() as db:
+            if self.store.draining(db):
+                return self.list(repo_id)
             repository = self._repository(db, repo_id)
             account = self._active_account(db)
         token, _ = self.github.validated_identity(account["id"], account["version"])
@@ -80,6 +82,8 @@ class GitHubIssues:
         now = time.time()
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.store.draining(db):
+                return self.list(repo_id)
             self._repository(db, repo_id)
             active_account = self._active_account(db)
             if (
