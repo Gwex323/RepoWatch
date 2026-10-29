@@ -44,11 +44,20 @@ Status updated: 2026-10-29
   event delivery, data-preserving rollback and original-adapter resumption.
   Eight focused backend cases, one desktop/mobile smoke, frontend build,
   Ruff and independent review passed. The native-process release/restart/rollback
-  drill passed; Chinese delivery PR #93 is open. No merge, production
-  deployment or default enablement is claimed. No full regression was run.
+  drill passed; Chinese delivery PR #93 was merged as `599de39` on 2026-10-29
+  (Asia/Shanghai). Production deployment and enablement are unverified.
+  No full regression was run.
   See the [release policy](workbench-release-82.md) and
   [validation](workbench-release-82-validation.md).
-  Full acceptance (#83) remains unimplemented.
+  Full acceptance (#83) is implemented on `feature/central-acceptance-83`,
+  based on `599de39`: a cross-stage offline journey, a fixed 16-case runner,
+  machine-readable evidence, a specification matrix, staged operations and
+  precise cross-version source verification. All 16 focused cases, Ruff and
+  independent code/documentation review passed. Chinese delivery PR #94
+  is open; this branch is not merged or deployed. No full regression,
+  production database/permission changes, live model calls or GitHub business
+  writes were performed. Isolated acceptance is not production acceptance;
+  parent #77 remains open. See the [matrix and limits](central-acceptance-83.md).
   A merged change is not proof
   that the running workbench has been deployed.
 - Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend

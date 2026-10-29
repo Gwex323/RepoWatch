@@ -1,0 +1,134 @@
+{
+  "format": 1,
+  "issue": 83,
+  "recorded_at": "2026-10-29T01:48:57.880621+00:00",
+  "base_commit": "599de3919cbafc9e015f187d8f47d466f6eb66e5",
+  "worktree_dirty": true,
+  "scope": "isolated_offline_acceptance",
+  "live_model_calls": 0,
+  "live_github_writes": 0,
+  "production_deployed": false,
+  "native_process_drill_rerun": false,
+  "full_regression": false,
+  "expected": 16,
+  "passed": 16,
+  "result": "passed",
+  "exit_code": 0,
+  "tests": [
+    {
+      "case": "tests.test_central_acceptance::test_fault_to_reviewed_release_to_original_verification",
+      "result": "passed",
+      "seconds": 6.203,
+      "acceptance_trace": [
+        "source_fault_recorded_without_partial_scope",
+        "coordinator_blocked_without_inventing_analysis_retry",
+        "issue_feature_patch_rejected_corrected_reviewed_pr_reconciled",
+        "reopen_and_replay_preserve_one_publication_and_root_budget",
+        "separate_merge_grant_and_lost_receipt_reconciled_once",
+        "authorized_deploy_queues_original_once_without_resolving_fault",
+        "original_two_scopes_native_handoff_and_review_verify_fault"
+      ],
+      "acceptance_metrics": {
+        "source_faults": 1,
+        "source_verified": 1,
+        "requests_before": 3,
+        "requests_after": 17,
+        "tokens_reported": 0,
+        "token_usage_complete": false,
+        "known_cost": null,
+        "duration_seconds": 5.10793890000059,
+        "issue_posts": 1,
+        "pr_posts": 1,
+        "merge_puts": 1,
+        "explicit_grants": [
+          "rules",
+          "coordinator",
+          "maintenance",
+          "merge_head",
+          "deploy_manifest"
+        ],
+        "owner_reconciliations": [
+          "lost_pr_receipt",
+          "lost_merge_receipt"
+        ],
+        "live_models": false,
+        "native_runtime": false
+      }
+    },
+    {
+      "case": "tests.test_analysis_auto_recovery::test_valid_checkpoint_is_automatically_resumed_without_manual_retry",
+      "result": "passed",
+      "seconds": 2.038
+    },
+    {
+      "case": "tests.test_workflow_recovery::test_two_connections_compete_in_business_transaction",
+      "result": "passed",
+      "seconds": 0.3
+    },
+    {
+      "case": "tests.test_workflow_recovery::test_crashed_repair_settles_unknown_receipt_then_resumes",
+      "result": "passed",
+      "seconds": 1.821
+    },
+    {
+      "case": "tests.test_coordination::test_model_outage_without_backup_is_bounded_and_local_ledger_survives",
+      "result": "passed",
+      "seconds": 0.421
+    },
+    {
+      "case": "tests.test_analysis_handoff_recovery::test_cancel_after_early_stop_cannot_publish_late_recovered_report",
+      "result": "passed",
+      "seconds": 1.377
+    },
+    {
+      "case": "tests.test_workflow_recovery::test_queued_automatic_retry_rechecks_immutable_basis[model]",
+      "result": "passed",
+      "seconds": 1.825
+    },
+    {
+      "case": "tests.test_analysis_report_recovery::test_new_execution_cannot_resume_stale_review",
+      "result": "passed",
+      "seconds": 1.795
+    },
+    {
+      "case": "tests.test_coordination::test_in_flight_diagnosis_loses_authority_and_records_usage[disabled]",
+      "result": "passed",
+      "seconds": 0.397
+    },
+    {
+      "case": "tests.test_coordination::test_source_gate_stops_before_model_invocation[budget]",
+      "result": "passed",
+      "seconds": 1.664
+    },
+    {
+      "case": "tests.test_acceptance_recovery::test_acceptance_recovers_truncation_once_on_the_actual_sdk_wire[False]",
+      "result": "passed",
+      "seconds": 0.086
+    },
+    {
+      "case": "tests.test_system_faults::test_real_acceptance_check_failure_is_target_behavior_and_not_a_system_code_defect",
+      "result": "passed",
+      "seconds": 0.382
+    },
+    {
+      "case": "tests.test_repair_review_feedback::test_test_failures_and_review_rejections_share_correction_limits",
+      "result": "passed",
+      "seconds": 0.138
+    },
+    {
+      "case": "tests.test_releases::test_rollback_keeps_new_writes_and_interrupted_release_can_reconcile",
+      "result": "passed",
+      "seconds": 3.022
+    },
+    {
+      "case": "tests.test_releases::test_release_resumes_only_real_original_adapter_with_budget_and_authorization",
+      "result": "passed",
+      "seconds": 1.155
+    },
+    {
+      "case": "tests.test_system_faults::test_repair_verified_retry_only_resolves_compatible_prior_attempt[True]",
+      "result": "passed",
+      "seconds": 0.406
+    }
+  ]
+}
