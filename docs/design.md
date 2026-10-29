@@ -11,13 +11,24 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
 
+Issue #99 is implemented on `feature/unified-issues-99` (base `7b79e8e`): the
+repository flow has five pages, and Issue combines GitHub issues with local
+analysis findings, source filters, evidence and disposition. Reports remain in
+analysis; patches, tests and independent review remain in repair. The legacy
+`reproduction` section maps to Issue. Validation and delivery status are recorded
+in [unified Issue](unified-issues-99.md); this increment is not merged or deployed.
+
 The local single-user workbench supports fixed-revision Docker execution, model-based
 analysis, GitHub Issue synchronization and Issue-based analysis, daily repository
 checks, and controlled repair and publication. Issue #97 implements evidence-bound
 repair candidates without personal reproduction confirmation on its feature
 branch. Existing Issues retain their validation and evidence gates. Offline
 verification and diff review are recorded in [candidate eligibility](finding-repair-eligibility-97.md)
-and [review](tasks/0097/review.md). Delivery PR #98 is open. This change has not been merged or deployed.
+and [review](tasks/0097/review.md). Delivery PR #98 was merged as `7b79e8e`
+on 2026-10-29 (Asia/Shanghai). Its code was started in the local workbench at
+port 8765 with the original database after a consistent backup. Startup and
+served frontend bytes were verified; no test suite or live-model acceptance was
+run during restart. This manual startup did not enable managed release supervision.
 Ordinary repository merges remain owner-operated. The self-maintenance
 release CLI described below has separate, explicit owner authorization; no
 background worker can independently merge or deploy.

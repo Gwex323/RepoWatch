@@ -267,8 +267,8 @@ function App() {
       })
       .finally(() => setScheduleHistoryLoading(current => current === repoId ? null : current));
   };
-  const openRepository = (id: string, envId = '') => {
-    setSourceSection(''); setSourceTask('');
+  const openRepository = (id: string, envId = '', section = '', analysisId = '') => {
+    setSourceSection(section); setSourceTask(analysisId);
     setExecutionEnv(envId); setExecutionRepo(id); setView('repositories'); setMenuOpen(false);
   };
   const navigate = (next: View) => {
@@ -364,10 +364,12 @@ function App() {
             }</span>
             <button className="text-link" onClick={() => {
               if (notice.status === 'waiting_model') navigate('settings');
-              else { openRepository(notice.repo_id); }
+              else { openRepository(notice.repo_id, '',
+                notice.repair_queued || notice.repair_running || notice.repair_failed || notice.repair_published
+                  ? 'repair' : (notice.repair_candidates ?? 0) > 0 || notice.waiting > 0 ? 'issues' : 'analysis'); }
             }}>{notice.status === 'waiting_model' ? '配置模型' :
               notice.repair_queued || notice.repair_running || notice.repair_failed || notice.repair_published
-                ? '查看修复' : '查看分析'}<ArrowRight size={14} /></button>
+                ? '查看修复' : (notice.repair_candidates ?? 0) > 0 || notice.waiting > 0 ? '查看 Issue' : '查看分析'}<ArrowRight size={14} /></button>
           </div>)}
           {view === 'overview' && <>
             <section className="next-action" aria-label="下一步">
@@ -395,7 +397,7 @@ function App() {
                 <section>
                   <div className="section-heading"><h2><Clock3 size={18} />待自动修复<span className="small-count">{waiting.length}</span></h2>
                     <button className="text-link" onClick={() => { setFilter('waiting'); navigate('findings'); }}>全部问题<ArrowRight size={14} /></button></div>
-                  {waiting.length ? <div className="waiting-list">{waiting.slice(0, 4).map(run => <button className="waiting-item" key={run.id} onClick={() => openRepository(run.repo_id, run.env_id)}>
+                  {waiting.length ? <div className="waiting-list">{waiting.slice(0, 4).map(run => <button className="waiting-item" key={run.id} onClick={() => openRepository(run.repo_id, run.env_id, 'issues', run.analysis_id)}>
                     <span className="severity">{run.severity}</span><div><strong>{run.title}</strong>
                       <span>{run.repository}<i>·</i>{time(run.created)}</span></div><ChevronRight size={17} /></button>)}</div> :
                     <Empty icon={CheckCircle2} title="暂无待修复候选" />}
@@ -501,7 +503,7 @@ function App() {
             {data.repositories.filter(repo => repo.id === executionRepo && repo.kind === 'github').map(repo =>
               <ExecutionPanel key={`${repo.id}:${executionEnv}:${sourceSection}:${sourceTask}`} repo={repo} api={api}
                 initialEnvId={executionEnv} initialSection={sourceSection}
-                initialAnalysisId={sourceSection === 'analysis' ? sourceTask : ''}
+                initialAnalysisId={['analysis', 'issues', 'reproduction'].includes(sourceSection) ? sourceTask : ''}
                 initialRepairId={['repair', 'pr'].includes(sourceSection) ? sourceTask : ''} />)}
           </section>}
           {view === 'findings' && <section className="activity-page">
@@ -512,7 +514,7 @@ function App() {
             </div>
             {!filteredFindings.length ? <Empty icon={Search} title="暂无匹配的问题" /> :
               <div className="waiting-list">{filteredFindings.map(finding =>
-                <button className="waiting-item" key={finding.id} onClick={() => openRepository(finding.repo_id, finding.env_id)}>
+                <button className="waiting-item" key={finding.id} onClick={() => openRepository(finding.repo_id, finding.env_id, 'issues', finding.analysis_id)}>
                   <span className="severity">{finding.severity}</span>
                   <div><strong>{finding.title}</strong><span>{finding.repository}<i>·</i>{time(finding.created)}</span></div>
                   <Status status={finding.status} /><ChevronRight size={17} />

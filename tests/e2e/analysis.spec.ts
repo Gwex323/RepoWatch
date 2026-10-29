@@ -247,7 +247,7 @@ test(`analysis settings, automatic status, evidence and candidate disposition on
     await expect(panel.getByText('从已保存证据恢复最终报告，仅调用独立审查员', { exact: false })).toBeVisible();
     await expect(panel.getByRole('button', { name: '从已保存证据恢复报告' })).toHaveCount(0);
   }
-  await page.getByRole('navigation', { name: '仓库处理流程' }).getByRole('button', { name: '问题与修复', exact: false }).click();
+  await page.getByRole('navigation', { name: '仓库处理流程' }).getByRole('button', { name: 'Issue', exact: false }).click();
   const historical = panel.getByLabel('旧问题逐条复核');
   await expect(historical).toBeVisible();
   for (const outcome of ['仍存在', '已修复', '疑似误报', '本轮未覆盖']) {
@@ -346,7 +346,7 @@ test('historical finding disposition records owner decision', async ({ page }) =
   await page.getByRole('dialog').getByRole('button', { name: '添加仓库', exact: true }).click();
   await page.locator('.repository-row').filter({ hasText: 'fixture/analysis' })
     .getByTitle('管理运行环境').click();
-  await page.getByRole('navigation', { name: '仓库处理流程' }).getByRole('button', { name: '问题与修复', exact: false }).click();
+  await page.getByRole('navigation', { name: '仓库处理流程' }).getByRole('button', { name: 'Issue', exact: false }).click();
   const historical = page.getByLabel('旧问题逐条复核');
   await expect(historical).toBeVisible();
   const jwt = historical.locator('article', { hasText: '历史 JWT 校验疑似问题' });
