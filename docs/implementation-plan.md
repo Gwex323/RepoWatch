@@ -53,8 +53,8 @@ Status updated: 2026-10-29
   based on `599de39`: a cross-stage offline journey, a fixed 16-case runner,
   machine-readable evidence, a specification matrix, staged operations and
   precise cross-version source verification. All 16 focused cases, Ruff and
-  independent code/documentation review passed. Chinese PR delivery
-  remains pending; this branch is not merged or deployed. No full regression,
+  independent code/documentation review passed. Chinese delivery PR #94
+  is open; this branch is not merged or deployed. No full regression,
   production database/permission changes, live model calls or GitHub business
   writes were performed. Isolated acceptance is not production acceptance;
   parent #77 remains open. See the [matrix and limits](central-acceptance-83.md).

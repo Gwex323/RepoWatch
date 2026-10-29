@@ -67,8 +67,8 @@ Stage 6 (#83) is implemented on `feature/central-acceptance-83`, based on
 `599de39`: an offline cross-stage journey, a fixed 16-case acceptance runner,
 portable evidence, staged enablement/rollback instructions and narrowly bound
 post-release verification across workbench versions. All 16 focused cases,
-Ruff and independent code/documentation review passed. Chinese PR delivery
-remains pending; this branch is not merged or deployed. No production
+Ruff and independent code/documentation review passed. Chinese delivery PR #94
+is open; this branch is not merged or deployed. No production
 database, permissions, live model or GitHub business writes were exercised.
 The isolated scope and remaining live/native integration limits are explicit;
 parent #77 stays open. See the [acceptance matrix](central-acceptance-83.md).
