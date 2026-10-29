@@ -76,7 +76,7 @@ for (const width of [1920, 1440, 390]) test(`task navigation and retained forms 
   await nav('仓库');
   await page.getByTitle('管理运行环境').click();
   const flow = page.getByRole('navigation', {name:'仓库处理流程'});
-  await expect(flow.getByRole('button')).toHaveCount(6);
+  await expect(flow.getByRole('button')).toHaveCount(5);
   await expect(page.getByLabel('环境准备内容')).toBeVisible();
   await expect(page.getByLabel('GitHub Issues')).toBeHidden();
   await flow.getByRole('button', {name:'Issue',exact:false}).click();
@@ -98,12 +98,12 @@ for (const width of [1920, 1440, 390]) test(`task navigation and retained forms 
   await expect(page.getByText('当前源码分析报告',{exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:'复现成功',exact:true})).toBeHidden();
   await expect(page.getByText('代码差异',{exact:true}).first()).toBeHidden();
-  await flow.getByRole('button',{name:'问题与修复',exact:false}).click();
+  await flow.getByRole('button',{name:'Issue',exact:false}).click();
   await expect(page.getByRole('button',{name:'复现成功',exact:true})).toHaveCount(0);
   await expect(page.getByRole('button',{name:'未能复现',exact:true})).toBeVisible();
   await expect(page.getByText('当前源码分析报告',{exact:true})).toBeHidden();
   await page.getByLabel('处置说明（确认误报时必填）').fill('正在核验，请保留草稿');
-  await flow.getByRole('button',{name:'5 修复',exact:true}).click();
+  await flow.getByRole('button',{name:'4 修复',exact:true}).click();
   await expect(page.getByText('代码差异',{exact:true}).first()).toBeVisible();
   await expect(page.getByRole('button',{name:'仅重试发布',exact:true})).toBeHidden();
   await flow.getByRole('button',{name:'PR',exact:false}).click();
@@ -114,7 +114,7 @@ for (const width of [1920, 1440, 390]) test(`task navigation and retained forms 
   await page.getByRole('button',{name:'仅重试发布',exact:true}).click();
   await expect.poll(() => publicationRetries).toBe(1);
   await expect(page.getByText('等待发布',{exact:true})).toBeVisible();
-  await flow.getByRole('button',{name:'问题与修复',exact:false}).click();
+  await flow.getByRole('button',{name:'Issue',exact:false}).click();
   await expect(page.getByLabel('处置说明（确认误报时必填）')).toHaveValue('正在核验，请保留草稿');
   await page.getByRole('button',{name:'未能复现',exact:true}).click();
   await expect.poll(() => finding.status).toBe('not_reproduced');

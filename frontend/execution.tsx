@@ -4,6 +4,11 @@ import { AnalysisPanel, analysisErrorMessages } from './analysis';
 import { RepairPanel } from './repair';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
+const repositorySteps = [['environment', '环境准备'], ['analysis', '项目分析'], ['issues', 'Issue'], ['repair', '修复'], ['pr', 'PR']];
+const repositorySection = (section: string, fallback: string) => {
+  if (section === 'reproduction') return 'issues';
+  return repositorySteps.some(([key]) => key === section) ? section : fallback;
+};
 type DesktopProfile = {
   kind: 'python_desktop'; runtime_stdlib_only: boolean; test_command: string; complete: false;
   selected: { path: string; module: string }[]; excluded: { path: string; reasons: string[] }[];
@@ -318,17 +323,18 @@ function IssuesPanel({ repo, api, environment, onAnalysisSubmitted }: {
 
   return <section className="issue-panel" aria-label="GitHub Issues">
     <div className="section-heading">
-      <h2><CircleDot size={18} />GitHub Issues</h2>
+      <h3><CircleDot size={18} />GitHub Issue</h3>
       <button className="button secondary" disabled={busy} onClick={() => void sync()}>
-        <RefreshCw size={15} />同步
+        <RefreshCw size={15} />同步 GitHub Issue
       </button>
     </div>
     {error && <div className="error-inline" role="alert">{error}</div>}
-    {!issues.length ? <div className="empty"><CircleDot size={24} /><p>暂无 Issue</p></div> :
+    {!issues.length ? <div className="empty"><CircleDot size={24} /><p>尚未同步到 GitHub Issue</p></div> :
       <div className="issue-list">{issues.map(issue =>
         <div className="issue-row" key={issue.id}>
           <span className="issue-number">#{issue.number}</span>
           <div className="issue-copy">
+            <span className="tag neutral">GitHub Issue</span>
             <strong>{issue.title}</strong>
             <span>{issue.state === 'open' ? '待解决' : '已关闭'}</span>
           </div>
@@ -413,7 +419,8 @@ export function ExecutionPanel({ repo, api, initialEnvId = '', initialSection = 
   const [error, setError] = useState('');
   const [autoRun, setAutoRun] = useState(true);
   const [tab, setTab] = useState('logs');
-  const [section, setSection] = useState(initialSection || (initialEnvId ? 'reproduction' : 'environment'));
+  const [section, setSection] = useState(() => repositorySection(initialSection, initialEnvId ? 'issues' : 'environment'));
+  const [issueSource, setIssueSource] = useState<'all' | 'github' | 'analysis'>('all');
   const refresh = useCallback(async () => {
     const data = await api<Environment[]>(`/repositories/${repo.id}/environments`);
     const id = data.some(env => env.id === selectedRef.current || env.reused_environment_id === selectedRef.current)
@@ -460,20 +467,19 @@ export function ExecutionPanel({ repo, api, initialEnvId = '', initialSection = 
   const running = env?.state === 'running';
   const chainActive = pipelineActive(env?.pipeline);
   const locked = busy || env?.busy || chainActive;
-  const steps = [['environment', '环境准备'], ['analysis', '项目分析'], ['issues', 'Issue'], ['reproduction', '问题与修复'], ['repair', '修复'], ['pr', 'PR']];
+  const steps = repositorySteps;
   const stepIndex = steps.findIndex(([key]) => key === section);
   const help: Record<string, string> = {
     environment: '下载源码、准备依赖与运行测试；在这里处理环境故障、执行日志和定时巡检。',
-    analysis: '查看模型分析进度、报告与任务验收范围。问题处置请进入「问题与修复」。',
-    issues: '同步原仓库 Issue，选择要调查的问题。提交后进入项目分析查看进度。',
-    reproduction: '查看分析依据和自动修复进度，可标记误报、未能复现或已解决。',
+    analysis: '查看模型分析进度、报告与任务验收范围。发现的问题统一进入 Issue 页。',
+    issues: '统一查看 GitHub Issue 和项目分析发现，调查问题或标记处置结果；修复进度请进入「修复」。',
     repair: '查看有效分析发现的代码修复、补丁、测试和独立审查结果。',
     pr: '查看已创建的 PR、关联 Issue 与发布失败；合并状态请以 GitHub 为准。',
   };
   return <section className="execution-panel" aria-labelledby="execution-title">
     <div className="section-heading"><h2 id="execution-title"><Terminal size={18} />{repo.name}</h2></div>
     {env && <div className="repository-context">      <label className="execution-version">当前源码版本<select value={selected} onChange={e => {
-        selectedRef.current = e.target.value; setSelected(e.target.value); void perform(refresh);
+        selectedRef.current = e.target.value; setSelected(e.target.value); setIssueAnalysisId(''); void perform(refresh);
       }}>
         {environments.map(item => <option value={item.id} key={item.id}>
           {new Date(item.created * 1000).toLocaleString('zh-CN')} · {item.revision?.slice(0, 12) ?? '待下载'} · {environmentState(item)}
@@ -579,16 +585,31 @@ export function ExecutionPanel({ repo, api, initialEnvId = '', initialSection = 
       </>}
       <details className="disclosure"><summary>定时巡检配置</summary><SchedulePanel repo={repo} api={api} /></details>
     </div>
-    <div hidden={section !== 'issues'}>
-      {!env?.revision && <p className="action-hint">请先到「环境准备」下载源码，再分析 Issue。</p>}
-      <IssuesPanel repo={repo} api={api} environment={env ?? null} onAnalysisSubmitted={id => { setIssueAnalysisId(id); setSection('analysis'); }} />
+    <div hidden={!['analysis', 'issues'].includes(section)}>
+      <div hidden={section !== 'issues'}>
+        <div className="section-heading"><h2><CircleDot size={18} />Issue</h2></div>
+        <p className="diagnosis-meta">来源标记用于区分 GitHub 已有问题与本地分析发现；分析发现不会仅因展示在此处而自动提交到 GitHub。</p>
+        <nav className="section-nav secondary-nav" aria-label="Issue 来源">
+          {([['all', '全部'], ['github', 'GitHub Issue'], ['analysis', '分析发现']] as const).map(([key, label]) =>
+            <button key={key} className={issueSource === key ? 'active' : ''} aria-pressed={issueSource === key}
+              onClick={() => setIssueSource(key)}>{label}</button>)}
+        </nav>
+        <div hidden={issueSource === 'analysis'}>
+          {!env?.revision && <p className="action-hint">请先到「环境准备」下载源码，再分析 GitHub Issue。</p>}
+          <IssuesPanel repo={repo} api={api} environment={env ?? null}
+            onAnalysisSubmitted={id => { setIssueAnalysisId(id); setSection('analysis'); }} />
+        </div>
+        {!env && issueSource !== 'github' && <p className="action-hint">尚无分析发现，请先准备源码并完成项目分析。</p>}
+      </div>
+      {env && <div hidden={section === 'issues' && issueSource === 'github'}>
+        <AnalysisPanel key={env.id} envId={env.id} version={env.version} api={api}
+          view={section === 'issues' ? 'findings' : 'analysis'} onNavigate={next => {
+            setSection(repositorySection(next, 'issues'));
+            if (next === 'issues' || next === 'reproduction') setIssueSource('analysis');
+          }} focusAnalysisId={issueAnalysisId} pipelineActive={chainActive && env.pipeline?.stage !== 'analysis'} />
+      </div>}
     </div>
     {env ? <>
-      <div hidden={!['analysis', 'reproduction'].includes(section)}>
-        <AnalysisPanel key={env.id} envId={env.id} version={env.version} api={api}
-          view={section === 'reproduction' ? 'reproduction' : 'analysis'} onNavigate={setSection}
-          focusAnalysisId={issueAnalysisId} pipelineActive={chainActive && env.pipeline?.stage !== 'analysis'} />
-      </div>
       <div hidden={!['repair', 'pr'].includes(section)}>
         <RepairPanel key={env.id} envId={env.id} api={api} focusTaskId={initialRepairId} view={section === 'pr' ? 'pr' : 'repair'} onNavigate={setSection} />
       </div>

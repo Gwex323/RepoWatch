@@ -5,10 +5,21 @@ Status updated: 2026-10-29
 
 ## Current Delivery Status
 
+- Issue #99 is implemented on `feature/unified-issues-99`, based on `7b79e8e`:
+  five repository pages, a combined GitHub Issue/analysis-finding page with
+  source filters, and preserved analysis selection, dispositions and repair
+  navigation. This increment is not merged or deployed. See
+  [delivery and validation](unified-issues-99.md).
+
 - Issue #97 is implemented on `feature/remove-manual-reproduction-97`, based
   on `f8e91ed`: valid analyzed findings become automatic repair candidates without
   per-finding personal confirmation. Offline verification and diff review are recorded; no merge
-  or deployment is claimed. Delivery PR #98 is open. See [policy](finding-repair-eligibility-97.md).
+  or deployment was claimed at PR creation. Delivery PR #98 was subsequently
+  merged as `7b79e8e` on 2026-10-29 (Asia/Shanghai) and started in the local
+  workbench at port 8765 with the original database after a consistent backup.
+  Startup and served frontend bytes were verified; no test suite or live-model
+  acceptance was run during restart, and managed release supervision was not
+  enabled. See [policy](finding-repair-eligibility-97.md).
 
 - The original execution, analysis, controlled repair and GitHub publication
   increments are implemented. Real GitHub Issues can be synchronized and used
