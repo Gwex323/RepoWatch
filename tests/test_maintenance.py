@@ -12,6 +12,7 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from test_github_accounts import TOKEN_A, MemoryVault
+from test_model_providers import choice, configure, create
 from test_repair_feedback import tool
 from test_repository_analysis import ReviewModel, final_message
 
@@ -22,6 +23,7 @@ from repowatch.maintenance import Maintenance, diagnosis_for
 from repowatch.maintenance_model import classify_maintenance
 from repowatch.maintenance_target import LOGIN, REPOSITORY
 from repowatch.maintenance_workspace import approved_artifacts, create_workspace
+from repowatch.model_providers import ModelProviders
 from repowatch.repair_model import run_repair
 from repowatch.repair_workspace import RepairWorkspace, digest
 from repowatch.store import Conflict, Store
@@ -340,6 +342,37 @@ def test_wrong_identity_repository_and_permissions_cannot_enable(maintenance):
             service.configure(version=1, enabled=True)
         setattr(remote, field, restored)
     assert not remote.issues and not service.execution.root.joinpath("system-maintenance").exists()
+
+
+def test_coordinator_route_does_not_invalidate_claimed_maintenance(maintenance):
+    service = maintenance[0]
+    providers = ModelProviders(service.store, service.github)
+    saved = create(providers)
+    configure(providers, {"default": choice(saved)})
+    enabled(maintenance)
+    task = service.claim()
+    providers.select(version=providers.state()["version"], role="system_coordinator",
+                     choice=choice(saved, "specialized-model"))
+    service.guard(task)
+    providers.select(version=providers.state()["version"], role="repair_agent",
+                     choice=choice(saved, "specialized-model"))
+    with pytest.raises(Conflict, match="maintenance_basis_changed"):
+        service.guard(task)
+
+
+def test_existing_maintenance_basis_is_not_blindly_rebound(maintenance):
+    service = enabled(maintenance)
+    task = service.claim()
+    with service.store.connection() as db:
+        occurrence = db.execute("SELECT * FROM system_fault_occurrences WHERE id=?",
+                                (task["occurrence_id"],)).fetchone()
+        task["basis"] = service.basis(db, occurrence, legacy_routing=True)
+        db.execute("UPDATE maintenance_tasks SET basis=? WHERE id=?", (task["basis"], task["id"]))
+    service.guard(task)
+    with service.store.connection() as db:
+        db.execute("UPDATE agent_model_settings SET version=version+1")
+    with pytest.raises(Conflict, match="maintenance_basis_changed"):
+        service.guard(task)
 
 
 def test_internal_chain_rejects_then_retests_and_publishes_chinese_pr_without_resolving(

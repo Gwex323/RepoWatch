@@ -153,7 +153,7 @@ class Maintenance:
                 raise Conflict("maintenance_configuration_changed")
         return self.state()
 
-    def basis(self, db, occurrence):
+    def basis(self, db, occurrence, *, legacy_routing=False):
         roles = [
             dict(row)
             for row in db.execute(
@@ -170,9 +170,18 @@ class Maintenance:
                 source_basis(db, occurrence, self.repairs),
                 roles,
                 dict(model) if model else None,
-                {role: effective.get(role) for role in ("repair_agent", "independent_reviewer")},
+                {
+                    role: {key: value for key, value in effective[role].items()
+                           if legacy_routing or key != "routing_version"}
+                    for role in ("repair_agent", "independent_reviewer")
+                },
             ]
         )
+
+    def matches_basis(self, db, occurrence, expected):
+        # Accept old receipts only when their complete original digest still matches.
+        return (expected == self.basis(db, occurrence)
+                or expected == self.basis(db, occurrence, legacy_routing=True))
 
     def claim(self):
         with self.store.connection() as db:
@@ -297,7 +306,7 @@ class Maintenance:
             or config["binding"] != task["binding"]
             or not occurrence
             or occurrence["state"] in {"resolved", "dismissed"}
-            or self.basis(db, occurrence) != task["basis"]
+            or not self.matches_basis(db, occurrence, task["basis"])
         ):
             raise Conflict("maintenance_basis_changed")
         self.github.row(db, task["binding"]["account_id"], task["binding"]["account_version"])

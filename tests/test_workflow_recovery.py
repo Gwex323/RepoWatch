@@ -5,6 +5,7 @@ import json
 import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
@@ -23,12 +24,11 @@ from repowatch.task_scopes import register_scope_batch, scope_packet
 
 
 @pytest.fixture
-def db():
-    connection = sqlite3.connect(":memory:")
-    connection.row_factory = sqlite3.Row
-    recovery.initialize(connection)
-    yield connection
-    connection.close()
+def db(tmp_path):
+    store = Store(tmp_path / "recovery.db")
+    with closing(sqlite3.connect(store.path)) as connection:
+        connection.row_factory = sqlite3.Row
+        yield connection
 
 
 def claim(db, flow="analysis", task="root", attempt=1, owner="one", **kwargs):
@@ -117,8 +117,9 @@ def test_root_budget_survives_role_and_child_changes(db, metric, amount):
 
 def test_upgrade_seeds_known_historical_requests_once(db):
     db.executescript("""
-        CREATE TABLE analysis_report_recovery(analysis_id,requests,resumptions,retry_budget);
-        INSERT INTO analysis_report_recovery VALUES('root',9,2,'{"used":2}');
+        INSERT INTO analysis_report_recovery
+        (analysis_id,state,started,deadline,requests,resumptions,retry_budget)
+        VALUES('root','blocked',0,1000,9,2,'{"used":2}');
     """)
     first = claim(db)
     assert recovery.snapshot(db, "root")["budget"]["requests"] == 9

@@ -44,11 +44,23 @@ Status updated: 2026-10-29
   event delivery, data-preserving rollback and original-adapter resumption.
   Eight focused backend cases, one desktop/mobile smoke, frontend build,
   Ruff and independent review passed. The native-process release/restart/rollback
-  drill passed; Chinese delivery PR #93 is open. No merge, production
-  deployment or default enablement is claimed. No full regression was run.
+  drill passed; PR #93 was merged as `599de39` on 2026-10-29 (Asia/Shanghai).
+  Production deployment and default enablement remain unverified.
+  No full regression was run.
   See the [release policy](workbench-release-82.md) and
   [validation](workbench-release-82-validation.md).
-  Full acceptance (#83) remains unimplemented.
+  Full acceptance (#83) has an isolated implementation/validation candidate in
+  open PR #94 on `feature/central-acceptance-83` (`d76a369`). It is not merged,
+  deployed or enabled. Whole-chain review found four closure defects and 12
+  test-contract failures. Repair sub-Issue #95 under #77 is implemented on
+  `feature/central-review-fixes-95` from `599de39`; targeted validation and diff
+  self-review passed, not merged or deployed. It fixes maintenance evidence
+  invalidation, coordinator/notification closure, failed first-deploy cleanup
+  and original-verification termination, and adapts the two stale test fixtures.
+  The release-source proof from PR #94 is reused with bounded, authorization-
+  checked delayed-success handling; the rest of that PR stays separate.
+  PR #94 needs integration review against the repair before merge. See
+  [the repair record](central-review-fixes-95-validation.md).
   A merged change is not proof
   that the running workbench has been deployed.
 - Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend

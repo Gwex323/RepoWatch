@@ -198,13 +198,17 @@ def consume(db, limit=200):
                                 "account_id",
                                 "env_id",
                                 "revision",
-                                "workbench_version",
                             )
                         )
                         or not payload["model_binding"]
                         or payload["model_binding"] not in event["verified_models"]
                     ):
                         continue
+                    if payload["workbench_version"] != event.get("workbench_version"):
+                        from .release_state import verifies_released_source
+
+                        if not verifies_released_source(db, occurrence, event):
+                            continue
                 elif event.get("role") and payload["role"] != event["role"]:
                     continue
                 transition(

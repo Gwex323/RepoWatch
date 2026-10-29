@@ -107,8 +107,8 @@ def controller(tmp_path, monkeypatch):
              2000, digest({}), 1, 1000, 1000),
         )
     runtime = SimpleNamespace(readiness=lambda: {"ready": True})
-    analyses = SimpleNamespace(store=SimpleNamespace(connection=connection),
-                               execution=SimpleNamespace(runtime=runtime))
+    store = SimpleNamespace(connection=connection, draining=lambda _: False)
+    analyses = SimpleNamespace(store=store, execution=SimpleNamespace(runtime=runtime))
     engine = SimpleNamespace(status=lambda: {"enabled": True, "role_models": {}})
     worker = Acceptance(analyses, None, engine)
     worker.owner = 'worker'

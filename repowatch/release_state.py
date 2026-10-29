@@ -65,14 +65,16 @@ def idle(db):
                    for table, condition in checks)
 
 
-def require_source_authorization(db, flow, task_id):
+def require_source_authorization(db, flow, task_id, *, release_id=None):
     rows = db.execute(
         "SELECT a.binding,a.revoked,a.resume_original FROM release_resumptions r "
         "JOIN maintenance_tasks m ON m.id=r.task_id "
         "JOIN system_fault_occurrences o ON o.id=m.occurrence_id "
         "LEFT JOIN release_authorizations a ON a.kind='deploy' AND a.target=r.release_id "
-        "WHERE r.state='verifying_original' AND o.flow=? AND o.task_id=?",
-        (flow, task_id)).fetchall()
+        "WHERE r.state IN ('verifying_original','blocked') AND o.flow=? AND o.task_id=? "
+        + ("AND r.release_id=? " if release_id else "")
+        + "ORDER BY r.created DESC,r.release_id DESC LIMIT 1",
+        (flow, task_id, release_id) if release_id else (flow, task_id)).fetchall()
     for row in rows:
         if not row["binding"] or row["revoked"] or not row["resume_original"]:
             raise Conflict("release_resume_authorization_revoked")
@@ -85,6 +87,37 @@ def require_source_authorization(db, flow, task_id):
                 or account["version"] != binding["account_version"]
                 or account["active_account_id"] != binding["account_id"]):
             raise Conflict("release_account_changed")
+
+
+def verifies_released_source(db, occurrence, event):
+    """Accept delayed success only for the exact, explicitly dispatched release."""
+    from . import recovery
+
+    if (event.get("state") != "resolved" or event.get("attempt") is None
+            or occurrence["attempt"] is None or event["attempt"] <= occurrence["attempt"]):
+        return False
+    rows = db.execute(
+        "SELECT r.release_id,e.created,e.details,r.created AS resumed FROM release_resumptions r "
+        "JOIN maintenance_tasks m ON m.id=r.task_id "
+        "JOIN release_events e ON e.release_id=r.release_id "
+        "AND e.kind='source_resume_authorized' "
+        "WHERE r.state IN ('verifying_original','blocked') AND m.occurrence_id=? "
+        "AND EXISTS(SELECT 1 FROM release_events d WHERE d.release_id=r.release_id "
+        "AND d.kind='deployed')", (occurrence["id"],)).fetchall()
+    for row in rows:
+        proof = json.loads(row["details"])
+        if (not row["created"] <= event["occurred"] <= row["resumed"] + recovery.MAX_SECONDS
+                or proof != {"occurrence_id": occurrence["id"], "flow": event["flow"],
+                             "task_id": event["task_id"],
+                             "workbench_version": event.get("workbench_version")}):
+            continue
+        try:
+            require_source_authorization(db, event["flow"], event["task_id"],
+                                         release_id=row["release_id"])
+        except Conflict:
+            return False
+        return True
+    return False
 
 
 @contextmanager

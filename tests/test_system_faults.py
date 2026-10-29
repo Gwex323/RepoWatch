@@ -102,9 +102,10 @@ def source_event(store, analysis_id, kind, value):
         ).lastrowid
 
 
-def attempt(store, analysis_id, number=1):
+def attempt(store, analysis_id, number=1, *, workbench_version="build1"):
     source_event(
-        store, analysis_id, "fault_attempt", {"attempt": number, "workbench_version": "build1"}
+        store, analysis_id, "fault_attempt",
+        {"attempt": number, "workbench_version": workbench_version},
     )
     source_event(store, analysis_id, "agent", "repository_analyst")
     source_event(
