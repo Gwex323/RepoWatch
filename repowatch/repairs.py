@@ -743,7 +743,7 @@ class Repairs(EnvironmentRecovery):
             return
 
     def retry(self, repair_id, version, *, model_change_note=None, automatic=False,
-              coordination=None):
+              coordination=None, release=None):
         with self.store.connection() as db:
             previous = db.execute("SELECT * FROM repair_tasks WHERE id=?", (repair_id,)).fetchone()
         if (previous and previous["version"] == version
@@ -753,6 +753,8 @@ class Repairs(EnvironmentRecovery):
                 raise Conflict(ready["reason"])
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if release is not None:
+                release.authorize_resume(db, repair_id)
             row = db.execute("SELECT * FROM repair_tasks WHERE id=?", (repair_id,)).fetchone()
             if not row:
                 raise Missing("Repair task not found.")
@@ -927,10 +929,15 @@ class Repairs(EnvironmentRecovery):
         )
 
     def claim(self, *, allow_work=True):
+        with self.store.connection() as db:
+            if self.store.draining(db):
+                return None
         candidate = self._environment_candidate(allow_work=allow_work)
         now = time.time()
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.store.draining(db):
+                return None
             for row in db.execute(
                 "SELECT id,analysis_id FROM repair_tasks WHERE status='running' AND lease<?", (now,)
             ).fetchall():
@@ -1011,6 +1018,9 @@ class Repairs(EnvironmentRecovery):
                     "attempt": row["attempt"] + 1, "_recovery_action": action}
 
     async def tick(self):
+        with self.store.connection() as db:
+            if self.store.draining(db):
+                return False
         self.backfill()
         await asyncio.to_thread(self._queue_review_feedback_recovery)
         await asyncio.to_thread(self._queue_automatic_recovery)

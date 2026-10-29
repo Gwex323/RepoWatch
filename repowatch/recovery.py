@@ -212,6 +212,9 @@ def require(db, action, owner):
     saved = active(db, action, owner)
     if not saved:
         raise Conflict("recovery_ownership_changed")
+    from .release_state import require_source_authorization
+
+    require_source_authorization(db, saved["flow"], saved["task_id"])
     root = db.execute(
         "SELECT stop_reason,seconds FROM recovery_roots WHERE id=?", (saved["root_id"],)
     ).fetchone()

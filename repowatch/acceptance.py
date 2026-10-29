@@ -203,6 +203,9 @@ class Acceptance:
                     _event(db, _bound(db, analysis["id"]), "acceptance_queued", "system", {})
 
     def claim(self):
+        with self.store.connection() as db:
+            if self.store.draining(db):
+                return None
         status = self.engine.status()
         if not status["enabled"]:
             return None
@@ -215,6 +218,8 @@ class Acceptance:
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             now = time.time()
+            if self.store.draining(db):
+                return None
             db.execute(
                 "UPDATE scope_acceptance_runs SET state=CASE WHEN attempt>=?+additional_attempts "
                 "THEN 'failed' "
@@ -299,13 +304,15 @@ class Acceptance:
                 return result
         return None
 
-    def retry(self, analysis_id, version, additional_attempt=False, run_id=None):
+    def retry(self, analysis_id, version, additional_attempt=False, run_id=None, *, release=None):
         """Explicit continuation preserves calls, attempts, evidence and failure history."""
         status = self.engine.status()
         if not status["enabled"]:
             raise Conflict("acceptance_paused")
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if release is not None:
+                release.authorize_resume(db, run_id)
             analysis = db.execute(
                 "SELECT * FROM repository_analyses WHERE id=?", (analysis_id,),
             ).fetchone()
@@ -1051,6 +1058,9 @@ class Acceptance:
         return True
 
     async def tick(self):
+        with self.store.connection() as db:
+            if self.store.draining(db):
+                return False
         await asyncio.to_thread(self.schedule)
         run = await asyncio.to_thread(self.claim)
         if not run:

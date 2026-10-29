@@ -32,11 +32,23 @@ Status updated: 2026-10-29
   evidence-based Issue/PR reuse, isolated feature workspaces and existing
   verification/review gates. Targeted validation passed: 13 backend cases,
   one desktop/mobile browser smoke, frontend build and Ruff. Independent review
-  passed; no full regression was run, as requested. Chinese delivery PR #92 is open;
-  not merged or deployed. The automatic patch boundary is Python implementation
+  passed; no full regression was run, as requested. Chinese delivery PR #92 was
+  merged as `172c5a8` on 2026-10-29 (Asia/Shanghai); deployment is unverified.
+  The automatic patch boundary is Python implementation
   and new Python regressions. See the [policy](system-maintenance-81.md) and
   [validation](system-maintenance-81-validation.md).
-  Deployment/service recovery (#82) and full acceptance (#83) remain unimplemented.
+  Deployment/service recovery (#82) is implemented on
+  `feature/workbench-release-82`, based on `172c5a8`: separate exact-target
+  merge/deploy grants, pinned manifests, draining/backup/migration probes,
+  runtime/assets/original-DB checks, bounded independent supervision, offline
+  event delivery, data-preserving rollback and original-adapter resumption.
+  Eight focused backend cases, one desktop/mobile smoke, frontend build,
+  Ruff and independent review passed. The native-process release/restart/rollback
+  drill passed; Chinese delivery PR #93 is open. No merge, production
+  deployment or default enablement is claimed. No full regression was run.
+  See the [release policy](workbench-release-82.md) and
+  [validation](workbench-release-82-validation.md).
+  Full acceptance (#83) remains unimplemented.
   A merged change is not proof
   that the running workbench has been deployed.
 - Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend
@@ -51,7 +63,9 @@ Status updated: 2026-10-29
   passed 11 cases, leaving one cached-desktop case skipped: 1072 passed, 0 failed,
   1 skipped across that validation. Production deployment remains unverified.
   See [the regression validation](main-regression-88-validation.md).
-- Automatic merging is not available; the project owner merges on GitHub.
+- Background automatic merging is not enabled. Ordinary repository owners
+  merge on GitHub; the self-maintenance CLI requires explicit, separate,
+  exact-HEAD merge authorization and GitHub rule approval.
   See the [README](../README.md) for current operational limits.
 
 The dated increments and milestone sections below preserve the state and acceptance
@@ -83,7 +97,9 @@ desktop and mobile workflows. See the root README for startup and validation.
 - Personal reproduction for system-discovered findings before Issue submission or repair.
 - Existing Issues use automatic validation without a human reproduction checkpoint.
 - Automated fork, issue, repair, verification, and PR preparation afterward.
-- Project owners review and merge; this system never executes merges.
+- Project owners review and merge ordinary repairs. The self-maintenance CLI
+  is a separate owner-invoked, exact-HEAD authorized exception under GitHub rules,
+  not permission for background automatic merging or deployment.
 - Windows first, Linux deployment later.
 
 ## Shared Memory Increment (2026-10-10)

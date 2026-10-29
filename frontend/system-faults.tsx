@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { ArrowLeft, ArrowRight, RefreshCw } from 'lucide-react';
 import { CoordinationPanel } from './coordination';
 import { MaintenancePanel } from './maintenance';
+import { ReleasesPanel } from './releases';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Repo = { id: string; name: string };
@@ -168,6 +169,7 @@ export function SystemFaults({ api, repositories, onSource }: {
       </p>)}</details></div>}
     <CoordinationPanel api={api} faultId={selected} />
     <MaintenancePanel api={api} faultId={selected} />
+    <ReleasesPanel api={api} />
     {error && <p className="error-inline" role="alert">{error}</p>}
     <div className="fault-filters">
       <label>仓库<select aria-label="仓库" value={repo} onChange={e => { setRepo(e.target.value); reset(); }}>

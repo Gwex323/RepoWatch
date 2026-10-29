@@ -14,9 +14,13 @@
 新增独立配置的系统协调角色，默认关闭，不覆盖五个业务角色配置。PR #91 已于 2026-10-29（Asia/Shanghai）合并为 `74b0918`，部署未核验。
 详见[协调策略与启用](docs/system-coordinator-80.md)及[验证记录](docs/system-coordinator-80-validation.md)。
 
-第四阶段（#81）已在 `feature/system-maintenance-81` 实现并通过定向验证和独立 review，已提交 PR #92，未合并或部署。
+第四阶段（#81）已在 `feature/system-maintenance-81` 实现并通过定向验证和独立 review，PR #92 已于 2026-10-29（Asia/Shanghai）合并为 `172c5a8`，部署未核验。
 独立授权的自身维护默认关闭，绑定 `Gwex323/RepoWatch`，先查重并登记 Issue，再隔离修复、验证和独立审查，交付中文 PR；不伪造用户确认、不自动合并或部署、不以 PR 代替原故障恢复。
 当前自动补丁范围为 Python 实现和新增 Python 回归，其他文件拒绝。详见[维护范围与操作](docs/system-maintenance-81.md)及[验证记录](docs/system-maintenance-81-validation.md)。
+
+第五阶段（#82）已在基于最新主干的 `feature/workbench-release-82` 实现发布清单、独立合并/部署授权、排空备份、固定版本就绪核验、独立监护、离线事件补交和保留新数据的代码回滚。
+8 个定向后端用例、1 个桌面/手机界面冒烟、真实进程隔离发布/监护重启/回滚演练、构建、Ruff 和独立 review 已通过；已提交中文 PR #93，未合并或部署。不运行全量回归；默认无合并/部署授权。
+详见[发布与恢复操作](docs/workbench-release-82.md)及[验证记录](docs/workbench-release-82-validation.md)。第六阶段完整验收尚未实施。
 
 单用户、本地运行的多 Agent 工作台，使用真实仓库源码、隔离执行记录与模型分析，
 支持人工复现确认、持久化任务和受控自动修复。
@@ -61,8 +65,8 @@
 默认开关关闭，启用后不再逐问题审批；
 PR 合并仍由项目拥有者在 GitHub 中完成。
 
-以下能力尚未启用：自动合并操作。
-任何自动合并操作均不在系统权限内。
+默认不启用自动合并或部署。普通仓库修复仍由项目拥有者在 GitHub 合并；
+第五阶段新增的本机所有者 CLI 仅面向固定自身维护仓库，必须逐个 HEAD/清单独立授权且满足 GitHub 规则，后台不会自行合并或部署。
 
 ## Agent 角色与模型配置
 

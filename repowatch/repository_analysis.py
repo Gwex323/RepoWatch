@@ -1919,9 +1919,11 @@ class Analyses:
                 ids.insert(0, focus)
         return [self.get(item) for item in ids]
 
-    def retry(self, analysis_id, version):
+    def retry(self, analysis_id, version, *, release=None):
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if release is not None:
+                release.authorize_resume(db, analysis_id)
             row = db.execute("SELECT * FROM repository_analyses WHERE id=?",
                              (analysis_id,)).fetchone()
             if not row:
@@ -2089,10 +2091,15 @@ class Analyses:
                 pass
 
     async def tick(self):
+        with self.store.connection() as db:
+            if self.store.draining(db):
+                return
         self.discover_pending()
         now = time.time()
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.store.draining(db):
+                return
             db.execute(
                 "UPDATE repository_analyses SET status='interrupted',error='analysis_interrupted',"
                 "version=version+1,updated=? WHERE status='running' AND lease<?", (now, now),

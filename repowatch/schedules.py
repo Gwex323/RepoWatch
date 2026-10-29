@@ -205,6 +205,9 @@ class RepositorySchedules:
         )
 
     def trigger(self, repo_id):
+        with self.store.connection() as db:
+            if self.store.draining(db):
+                return None
         if not self.due(repo_id):
             return None
         now = datetime.now()
@@ -212,6 +215,8 @@ class RepositorySchedules:
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self._ensure(db, repo_id)
+            if self.store.draining(db):
+                return None
             if not row["enabled"] or row["last_run_date"] == today:
                 return None
             changed = db.execute(

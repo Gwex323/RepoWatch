@@ -15,7 +15,9 @@ The local single-user workbench supports fixed-revision Docker execution, model-
 analysis, GitHub Issue synchronization and Issue-based analysis, daily repository
 checks, and controlled repair and publication. System discoveries still require
 personal reproduction; existing Issues retain their own validation and evidence
-gates. The owner performs merges; the application has no merge interface.
+gates. Ordinary repository merges remain owner-operated. The self-maintenance
+release CLI described below has separate, explicit owner authorization; no
+background worker can independently merge or deploy.
 Merged repair experience can be written back to repository memory after owner
 disposition and merge verification. See the [README](../README.md) and the later
 ADRs for current behavior and limitations.
@@ -46,11 +48,22 @@ It adds separately authorized, evidence-bound RepoWatch maintenance through a
 Chinese Issue, isolated feature workspace, verified patch, independent review
 and Chinese PR. Targeted validation passed: 13 backend cases, one desktop/mobile
 browser smoke, frontend build and Ruff; independent review passed. No full
-regression was run, per owner request. Submitted as PR #92; no merge or
-deployment is claimed. Automatic patches currently cover Python implementation
+regression was run, per owner request. PR #92 was merged as `172c5a8` on
+2026-10-29 (Asia/Shanghai); deployment is unverified. Automatic patches cover Python implementation
 and new Python regressions only; see the [policy](system-maintenance-81.md) and
 [validation](system-maintenance-81-validation.md).
-Stages 5-6 (#82-#83) remain unimplemented. See the
+Stage 5 (#82) is implemented on `feature/workbench-release-82`, based on the
+latest default commit `172c5a8`: exact-target merge/deploy grants, immutable
+runtime bindings, draining and backup-first migration probes, real asset and
+original-DB readiness, independent bounded supervision, offline event delivery,
+data-preserving code rollback and source-owned original-step resumption.
+Eight focused backend cases, one desktop/mobile browser smoke, build, Ruff and
+independent review passed. The native-process release/restart/rollback drill
+passed. Chinese delivery PR #93 is open; no merge, production deployment or
+enablement is claimed. No full regression was
+run, per owner request. See the [release policy](workbench-release-82.md) and
+[validation](workbench-release-82-validation.md).
+Stage 6 (#83) remains unimplemented. See the
 [stage 2 policy](workflow-recovery-79.md) and [validation](workflow-recovery-79-validation.md).
 Merge does not establish deployment to the running workbench. See
 [stage 1 validation](system-fault-records-78-validation.md).
@@ -95,8 +108,10 @@ See [the regression validation](main-regression-88-validation.md) for the origin
 - After human reproduction confirmation, issue creation, bug fixing,
   repair-branch pushes, and PR creation do not need separate per-action
   approval, subject to the remaining quality and permission gates.
-- The project owner reviews and performs the merge. The system does not
-  execute merges, even after owner approval.
+- Ordinary repository repairs require project-owner review and merge.
+  The self-maintenance release increment adds only explicitly owner-invoked,
+  exact-HEAD authorized merges under GitHub rules; it does not enable background
+  merging, bypass PR review or confer deployment permission.
 - Automated tests and agent review cannot replace required human reproduction
   for system discoveries or project-owner review and merge for either origin.
 - The system may automatically fork a selected repository into the configured

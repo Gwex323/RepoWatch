@@ -88,6 +88,8 @@ class EnvironmentRecovery:
             failure = "repair_source_changed"
         with self.store.connection() as db:
             db.execute("BEGIN IMMEDIATE")
+            if self.store.draining(db):
+                return None
             latest = db.execute("SELECT * FROM repair_tasks WHERE id=?", (row["id"],)).fetchone()
             if (not latest or latest["version"] != row["version"]
                     or latest["status"] != row["status"]):
