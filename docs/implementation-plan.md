@@ -8,7 +8,7 @@ Status updated: 2026-10-29
 - Issue #97 is implemented on `feature/remove-manual-reproduction-97`, based
   on `f8e91ed`: valid analyzed findings become automatic repair candidates without
   per-finding personal confirmation. Offline verification and diff review are recorded; no merge
-  or deployment is claimed. See [policy](finding-repair-eligibility-97.md).
+  or deployment is claimed. Delivery PR #98 is open. See [policy](finding-repair-eligibility-97.md).
 
 - The original execution, analysis, controlled repair and GitHub publication
   increments are implemented. Real GitHub Issues can be synchronized and used

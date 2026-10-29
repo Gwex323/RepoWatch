@@ -42,3 +42,10 @@ review 通过后才创建 PR。GitHub 合并与运行服务部署另行记录；
 Ruff、TypeScript `--noEmit`、Vite 构建、OpenSpec `--strict` 与 `git diff --check` 全部通过；构建产物为 `index-V3ryS5ix.js`、`index-Dz6XDJWM.css`。最后补充五部分发布正文断言后，完整无人工确认主流程用例再次通过（1 passed，4.66 秒），Ruff 再次通过。
 
 最终自审结论：通过，无未处理的代码阻断项。合并、生产模型/Docker 验收和部署不包含在此次离线验证中。业务代码和测试的精确内容以 LF 规范化 SHA256 记录在同目录 `reviewed-files.sha256`；后续提交交付状态不会改变这些已审查文件。
+
+
+## 交付事实
+
+实现及测试审查提交：`000b8db7f23b54f9ba6e3262d3220b232c2e63ec`。已校验该提交的业务代码和测试与审查摘要清单完全一致。
+
+GitHub 账号 `Gwex323` 核验后推送 feature 分支，创建中文五部分 PR #98（关联并计划关闭 #97）。PR 尚未合并，工作台尚未部署；后续本记录及任务复选框更新仅涉及交付元数据。

@@ -17,7 +17,7 @@ checks, and controlled repair and publication. Issue #97 implements evidence-bou
 repair candidates without personal reproduction confirmation on its feature
 branch. Existing Issues retain their validation and evidence gates. Offline
 verification and diff review are recorded in [candidate eligibility](finding-repair-eligibility-97.md)
-and [review](tasks/0097/review.md). This change has not been merged or deployed.
+and [review](tasks/0097/review.md). Delivery PR #98 is open. This change has not been merged or deployed.
 Ordinary repository merges remain owner-operated. The self-maintenance
 release CLI described below has separate, explicit owner authorization; no
 background worker can independently merge or deploy.
