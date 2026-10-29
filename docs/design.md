@@ -59,7 +59,8 @@ original-DB readiness, independent bounded supervision, offline event delivery,
 data-preserving code rollback and source-owned original-step resumption.
 Eight focused backend cases, one desktop/mobile browser smoke, build, Ruff and
 independent review passed. The native-process release/restart/rollback drill
-passed; no PR, merge, production deployment or enablement is claimed. No full regression was
+passed. Chinese delivery PR #93 is open; no merge, production deployment or
+enablement is claimed. No full regression was
 run, per owner request. See the [release policy](workbench-release-82.md) and
 [validation](workbench-release-82-validation.md).
 Stage 6 (#83) remains unimplemented. See the

@@ -44,7 +44,7 @@ Status updated: 2026-10-29
   event delivery, data-preserving rollback and original-adapter resumption.
   Eight focused backend cases, one desktop/mobile smoke, frontend build,
   Ruff and independent review passed. The native-process release/restart/rollback
-  drill passed; the stage PR has not been submitted. No merge, production
+  drill passed; Chinese delivery PR #93 is open. No merge, production
   deployment or default enablement is claimed. No full regression was run.
   See the [release policy](workbench-release-82.md) and
   [validation](workbench-release-82-validation.md).

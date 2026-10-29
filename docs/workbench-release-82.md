@@ -1,6 +1,6 @@
 # 发布与服务恢复（#82）
 
-更新：2026-10-29（Asia/Shanghai）。第五阶段在 `feature/workbench-release-82` 实施；基于第四阶段 PR #92 合并提交 `172c5a8`。复用现有 Issue #82，不新建重复事项。当前交付与验收状态见[验证记录](workbench-release-82-validation.md)。未在正式工作台启用、部署或执行合并。
+更新：2026-10-29（Asia/Shanghai）。第五阶段在 `feature/workbench-release-82` 实现，定向验证、隔离演练及独立 review 通过，已提交中文 PR #93，未合并；基于第四阶段 PR #92 合并提交 `172c5a8`。复用现有 Issue #82，不新建重复事项。当前证据见[验证记录](workbench-release-82-validation.md)。未在正式工作台启用、部署或执行合并。
 
 ## 权限与边界
 
