@@ -36,7 +36,7 @@ type Dashboard = {
 type AnalysisNotice = {
   repo_id: string; repository: string; status: string; waiting: number;
   repairs_enabled?: boolean; repair_queued?: number; repair_running?: number;
-  repair_failed?: number; repair_published?: number;
+  repair_failed?: number; repair_published?: number; repair_candidates?: number;
 };
 type System = {
   sdk_version: string; platform: string; roles: string[]; agent_models?: AgentModels; max_turns: number; max_attempts: number;
@@ -67,7 +67,7 @@ const roleNames: Record<string, string> = {
 };
 const roleName = (name: string) => roleNames[name] ?? (name === 'owner' ? '你' : name);
 const labels: Record<string, string> = {
-  waiting_reproduction: '待人工复现', confirmed: '已确认复现',
+  waiting_reproduction: '历史待重新分析', repair_candidate: '修复候选', confirmed: '历史已确认复现',
   not_reproduced: '未能复现', false_positive: '误报 · 用户已确认，已关闭', resolved: '已解决', queued: '排队中',
   running: '执行中', failed: '执行失败', interrupted: '已中断', pr_created: '已提交 PR',
   superseded: '已转到新版本继续修复',
@@ -275,14 +275,14 @@ function App() {
     history.replaceState(null, '', location.pathname); setFaultRoute('');
     setView(next); setQuery(''); setMenuOpen(false); setSourceSection(''); setSourceTask('');
   };
-  const pageHelp: Record<View, string> = { overview: '先看需要你处理的事项，再继续仓库任务。', repositories: '选择仓库，处理已有 Issue 或启动一次完整检查。', findings: '查看分析发现，按复现步骤确认问题，再跟进修复。', memory: '保存项目约定与修复经验，供后续分析参考。', activity: '查看发生了什么，点击记录回到对应任务。', faults: '查看系统运行故障、实际执行情况与处理历史。', settings: '先连接账号与模型，再按需要开启自动修复。' };
-  const waiting = data.findings.filter(f => f.status === 'waiting_reproduction');
+  const pageHelp: Record<View, string> = { overview: '先看需要你处理的事项，再继续仓库任务。', repositories: '选择仓库，处理已有 Issue 或启动一次完整检查。', findings: '查看分析发现与自动修复进度，并处置误报或已解决的问题。', memory: '保存项目约定与修复经验，供后续分析参考。', activity: '查看发生了什么，点击记录回到对应任务。', faults: '查看系统运行故障、实际执行情况与处理历史。', settings: '先连接账号与模型，再按需要开启自动修复。' };
+  const waiting = data.findings.filter(f => f.status === 'repair_candidate' && !f.repair_status);
   const needsAttention = (f: Finding) => f.status === 'waiting_reproduction' ||
-    (f.status === 'confirmed' && ['failed', 'interrupted'].includes(f.repair_status ?? ''));
+    (['confirmed', 'repair_candidate'].includes(f.status) && ['failed', 'interrupted'].includes(f.repair_status ?? ''));
   const attention = data.findings.filter(needsAttention);
   const filteredFindings = data.findings.filter(f =>
     `${f.repository} ${f.title} ${f.id}`.toLowerCase().includes(query.toLowerCase()) &&
-    (filter === 'all' || (filter === 'attention' ? needsAttention(f) : f.status === 'waiting_reproduction')));
+    (filter === 'all' || (filter === 'attention' ? needsAttention(f) : (f.status === 'repair_candidate' && !f.repair_status))));
   const registeredRoles = system?.roles ?? [];
   const nav = [
     ['overview', '工作台', LayoutDashboard],
@@ -354,10 +354,11 @@ function App() {
             <FileCode2 size={17} /><span><strong>{notice.repository}</strong> · {
               notice.status === 'waiting_model' ? '分析已排队，等待模型配置' :
               notice.status === 'running' ? 'Agent 正在自动分析' :
-              notice.waiting > 0 ? `${notice.waiting} 个疑似问题待人工复现` :
+              (notice.repair_candidates ?? 0) > 0 && !notice.repairs_enabled ? '分析候选等待启用自动修复' :
+              notice.waiting > 0 ? `${notice.waiting} 个历史问题待重新分析` :
               notice.repair_running ? `${notice.repair_running} 个问题正在自动修复` :
               notice.repair_failed ? `${notice.repair_failed} 个修复任务需要处理` :
-              notice.repair_queued ? (notice.repairs_enabled ? '已确认问题等待自动修复' : '已确认问题等待启用自动修复') :
+              notice.repair_queued ? (notice.repairs_enabled ? '分析发现等待自动修复' : '分析发现等待启用自动修复') :
               notice.repair_published ? `${notice.repair_published} 个 PR 已提交，等待仓库拥有者审核` :
               notice.status === 'completed' ? '源码分析已完成' : '分析需要处理'
             }</span>
@@ -371,11 +372,11 @@ function App() {
           {view === 'overview' && <>
             <section className="next-action" aria-label="下一步">
               <div><span className="eyebrow">下一步</span><h2>{!data.repositories.length ? '添加你的第一个仓库' : !system?.repository_analysis?.enabled ? '配置模型，让分析开始工作' : attention.length ? `${attention.length} 个问题需要你处理` : '选择仓库，开始检查'}</h2>
-              <p>连接仓库 → 分析问题 → 你确认复现 → 修复与审查 → 查看 PR</p></div>
+              <p>连接仓库 → 分析问题 → 自动修复与验证 → 独立审查 → 查看 PR</p></div>
               <button className="button primary" onClick={() => { if (!data.repositories.length) setAdding(true); else if (!system?.repository_analysis?.enabled) navigate('settings'); else if (attention.length) { setFilter('attention'); navigate('findings'); } else navigate('repositories'); }}>继续处理<ArrowRight size={16} /></button>
             </section><div className="metrics">
               {[
-                ['待人工复现', data.counts.waiting, 'waiting', Clock3],
+                ['待自动修复', data.counts.waiting, 'waiting', Clock3],
                 ['运行中', data.counts.active, 'running', Workflow],
                 ['已提交 PR', data.counts.published_prs, 'done', CheckCircle2],
                 ['已登记仓库', data.repositories.length, 'repos', FolderGit2],
@@ -384,7 +385,7 @@ function App() {
                 return <div className={`metric ${cls}`} key={String(label)}>
                   <div className="metric-label">{String(label)}<MetricIcon size={17} /></div>
                   <strong>{String(count)}</strong><span>{cls === 'repos' ? '已登记 GitHub 仓库' :
-                    cls === 'waiting' ? '等待你的复现结果' : cls === 'running' ? '当前执行队列'
+                    cls === 'waiting' ? '分析候选等待自动修复' : cls === 'running' ? '当前执行队列'
                       : '等待仓库拥有者审核'}</span>
                 </div>;
               })}
@@ -392,12 +393,12 @@ function App() {
             <div className="overview-columns">
               <div>
                 <section>
-                  <div className="section-heading"><h2><Clock3 size={18} />待人工复现<span className="small-count">{waiting.length}</span></h2>
+                  <div className="section-heading"><h2><Clock3 size={18} />待自动修复<span className="small-count">{waiting.length}</span></h2>
                     <button className="text-link" onClick={() => { setFilter('waiting'); navigate('findings'); }}>全部问题<ArrowRight size={14} /></button></div>
                   {waiting.length ? <div className="waiting-list">{waiting.slice(0, 4).map(run => <button className="waiting-item" key={run.id} onClick={() => openRepository(run.repo_id, run.env_id)}>
                     <span className="severity">{run.severity}</span><div><strong>{run.title}</strong>
                       <span>{run.repository}<i>·</i>{time(run.created)}</span></div><ChevronRight size={17} /></button>)}</div> :
-                    <Empty icon={CheckCircle2} title="暂无待确认问题" />}
+                    <Empty icon={CheckCircle2} title="暂无待修复候选" />}
                 </section>
                 <section className="recent-section">
                   <div className="section-heading"><h2><FolderGit2 size={18} />仓库</h2>
@@ -414,7 +415,7 @@ function App() {
               </div>
               <aside className="overview-aside">
                 <section><div className="section-heading"><h2><ShieldCheck size={18} />运行边界</h2></div>
-                  <dl className="boundary-list"><div><dt>系统发现</dt><dd className="green-text"><LockKeyhole size={13} />人工复现</dd></div>
+                  <dl className="boundary-list"><div><dt>系统发现</dt><dd className="green-text"><LockKeyhole size={13} />分析与自动验证</dd></div>
                     <div><dt>已有 Issue</dt><dd>同步与源码分析</dd></div>
                     <div><dt>GitHub 发布</dt><dd>{system?.automatic_repair?.enabled ? '已启用' : '未启用'}</dd></div><div><dt>自动合并</dt><dd className="red-text">禁止</dd></div>
                     <div><dt>外部模型调用</dt><dd>{system?.external_model_calls ? '已启用' : '关闭'}</dd></div>
@@ -506,7 +507,7 @@ function App() {
           {view === 'findings' && <section className="activity-page">
             <div className="segmented">
               <button className={filter === 'all' ? 'active' : ''} onClick={() => setFilter('all')}>全部</button>
-              <button className={filter === 'waiting' ? 'active' : ''} onClick={() => setFilter('waiting')}>待复现 <span>{data.counts.waiting}</span></button>
+              <button className={filter === 'waiting' ? 'active' : ''} onClick={() => setFilter('waiting')}>待自动修复 <span>{data.counts.waiting}</span></button>
               <button className={filter === 'attention' ? 'active' : ''} onClick={() => setFilter('attention')}>待处理</button>
             </div>
             {!filteredFindings.length ? <Empty icon={Search} title="暂无匹配的问题" /> :
@@ -533,7 +534,7 @@ function App() {
             <nav className="section-nav" aria-label="设置分类">{[['models', '模型与供应商'], ['accounts', 'GitHub 账号'], ['automation', '自动修复'], ['about', '系统信息']].map(([key, label]) => <button key={key} aria-current={settingsSection === key ? 'page' : undefined} className={settingsSection === key ? 'active' : ''} onClick={() => setSettingsSection(key)}>{label}</button>)}</nav>
             <div hidden={settingsSection !== 'models'}>
             <AgentModelSettings api={api} onChange={() => { void refresh().catch(e => setError(e.message)); }} />
-            </div><div hidden={settingsSection !== 'automation'}><p className="section-intro">确认问题后，自动修复会生成补丁并进行审查。请先完成模型与 GitHub 账号配置。</p>
+            </div><div hidden={settingsSection !== 'automation'}><p className="section-intro">有效分析发现会自动进入修复、验证和独立审查。请先完成模型与 GitHub 账号配置。</p>
             <RepairSettings api={api} modelEnabled={system?.automatic_repair?.model_enabled} />
             </div><div hidden={settingsSection !== 'accounts'}><p className="section-intro">连接用于读取仓库和提交修复的账号，并检查仓库访问权限。</p>
             <GitHubAccounts api={api} repositories={data.repositories}
@@ -550,7 +551,7 @@ function App() {
                 ['GitHub 写入', system?.automatic_repair?.enabled ? '已启用 · 测试与审查通过后提交' : '自动修复开关未启用'],
                 ['仓库分析模型', system?.repository_analysis?.enabled ? '按角色配置 · 已就绪' : '等待角色模型配置或启用'],
                 ['环境诊断模型', system?.execution_diagnosis?.enabled ? '按角色配置 · 已就绪' : '使用本地规则'],
-                ['系统发现问题', '人工复现确认'], ['已有 Issue', '同步与源码分析'],
+                ['系统发现问题', '分析依据与自动验证'], ['已有 Issue', '同步与源码分析'],
                 ['真实 Issue 接入', '已接入'],
                 ['外部仓库执行', '本机 Docker · 按需启动'],
                 ['每日检查', system?.schedule?.enabled_repositories

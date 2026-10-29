@@ -504,7 +504,7 @@ def scope_snapshot(db, analysis_id, *, candidate=None):
                 if required <= kinds:
                     status = "verified_fixed"
                     verified_candidates.add(repair_id)
-        elif any(f["status"] == "confirmed" for f in current_findings):
+        elif any(f["status"] in ("confirmed", "repair_candidate") for f in current_findings):
             status = "awaiting_verification" if repair_kinds else "confirmed"
         if status not in COMPLETE and conclusion and conclusion["outcome"] == "blocked":
             status = "blocked"

@@ -421,6 +421,10 @@ def create_app(
 
     @app.exception_handler(Conflict)
     async def conflict_handler(request, exc):
+        if str(exc) == "manual_confirmation_retired":
+            return JSONResponse({"detail": str(exc),
+                                 "message": "人工复现确认已停用，请刷新客户端；"
+                                 "历史问题请重新分析当前版本。"}, 409)
         return JSONResponse({"detail": str(exc)}, 409)
 
     @app.exception_handler(Missing)
@@ -736,6 +740,8 @@ def create_app(
                 "SELECT a.repo_id,r.name AS repository,a.status,"
                 "(SELECT count(*) FROM analysis_findings f WHERE f.analysis_id=a.id "
                 "AND f.status='waiting_reproduction') AS waiting,"
+                "(SELECT count(*) FROM analysis_findings f WHERE f.analysis_id=a.id "
+                "AND f.status='repair_candidate') AS repair_candidates,"
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
                 "AND t.status='queued') AS repair_queued,"
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
@@ -743,7 +749,7 @@ def create_app(
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
                 "AND t.status IN ('failed','interrupted') AND EXISTS "
                 "(SELECT 1 FROM analysis_findings f WHERE f.id=t.finding_id "
-                "AND f.status='confirmed')) AS repair_failed,"
+                "AND f.status IN ('confirmed','repair_candidate'))) AS repair_failed,"
                 "(SELECT count(*) FROM repair_tasks t WHERE t.analysis_id=a.id "
                 "AND t.status='pr_created') AS repair_published "
                 "FROM repository_analyses a JOIN repositories r ON r.id=a.repo_id "

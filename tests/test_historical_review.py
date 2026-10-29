@@ -176,7 +176,14 @@ def history(service):  # noqa: F811
     asyncio.run(analyses.tick())
     old = analyses.list(env["id"])[0]
     finding = old["findings"][0]
-    analyses.feedback(old["id"], finding["id"], finding["version"], "confirmed", "", True)
+    with execution.store.connection() as db:
+        db.execute("DELETE FROM finding_repair_origins WHERE finding_id=?", (finding["id"],))
+        db.execute("UPDATE analysis_findings SET status='confirmed',feedback=?,version=version+1 "
+                   "WHERE id=?", (json.dumps({"actor": "owner", "decision": "confirmed",
+                                             "revision": old["revision"], "note": ""}),
+                                 finding["id"]))
+    if analyses.repairer is not None:
+        analyses.repairer.enqueue(old["id"], finding["id"])
     with execution.store.connection() as db:
         db.execute("UPDATE repository_analyses SET revision=? WHERE id=?", ("b" * 40, old["id"]))
     return execution, repo, env, analyses, old, finding

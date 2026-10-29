@@ -12,7 +12,7 @@ def historical_snapshot(db, repo_id, analysis_id, created):
     where = (
         "FROM analysis_findings f JOIN repository_analyses a ON a.id=f.analysis_id "
         "WHERE a.repo_id=? AND a.id<>? AND a.created<=? AND a.status='completed' "
-        "AND f.status IN ('confirmed','waiting_reproduction') "
+        "AND f.status IN ('confirmed','waiting_reproduction','repair_candidate') "
     )
     args = (repo_id, analysis_id, created)
     total = db.execute("SELECT COUNT(*) " + where, args).fetchone()[0]
@@ -38,7 +38,8 @@ def historical_snapshot(db, repo_id, analysis_id, created):
         } for evidence in original.get("evidence", [])[:5]]
         items.append({
             "finding_id": row["id"], "version": row["version"],
-            "human_status": row["status"], "analysis_id": row["analysis_id"],
+            "human_status": row["status"], "status": row["status"],
+            "analysis_id": row["analysis_id"],
             "revision": row["revision"], "data": data, "content_clipped": data != original,
         })
     return redact_values({"total": total, "included": len(items),

@@ -21,6 +21,8 @@ from .acceptance_store import repair_basis
 from .analysis_basis import analysis_current
 from .diagnosis import redact, redact_values
 from .execution_pipeline import empty_tests
+from .finding_eligibility import origin as finding_origin
+from .finding_eligibility import register as register_repair_origin
 from .repair_workspace import MAX_FILE_BYTES, safe_path, source_tree, test_path
 from .repository_analysis import source_snapshot
 from .repository_source import ExecutionError
@@ -101,14 +103,12 @@ class Acceptance:
             "WHERE t.analysis_id=? ORDER BY t.created,t.id",
             (analysis["id"],),
         ):
-            feedback = json.loads(task["feedback"] or "{}")
+            finding = db.execute("SELECT * FROM analysis_findings WHERE id=?",
+                                 (task["finding_id"],)).fetchone()
             verification = json.loads(task["verification"] or "{}") or {}
             review = json.loads(task["review"] or "{}") or {}
             if (
-                task["finding_status"] not in ("confirmed", "resolved")
-                or feedback.get("actor") != "owner"
-                or feedback.get("decision") not in ("confirmed", "resolved")
-                or feedback.get("revision") != analysis["revision"]
+                finding_origin(db, analysis, finding, historical=True) is None
                 or task["status"] not in ("pr_created", "failed", "interrupted")
                 or task["revision"] != analysis["revision"]
                 or not task["patch"]
@@ -920,7 +920,7 @@ class Acceptance:
             )
 
     def _followup(self, run, row, verdict, result):
-        """Carry only an already owner-confirmed finding; never authorize a new defect."""
+        """Continue only an eligible original finding with real acceptance evidence."""
         coverage_required = (
             row["kind"] == "regression" and verdict.met and result.get("exit_code") == 0
         )
@@ -972,9 +972,7 @@ class Acceptance:
             ).fetchone()
             if (
                 not mapped
-                or finding["status"] != "confirmed"
-                or feedback.get("actor") != "owner"
-                or feedback.get("decision") != "confirmed"
+                or finding_origin(db, analysis, finding) is None
                 or count >= MAX_FOLLOWUPS
             ):
                 _event(
@@ -982,12 +980,12 @@ class Acceptance:
                     _bound(db, run["analysis_id"]),
                     "acceptance_followup_blocked",
                     "system",
-                    {"run_id": run["id"], "reason": "confirmation_or_budget_required"},
+                    {"run_id": run["id"], "reason": "eligibility_or_budget_required"},
                 )
                 return
             finding_id = uid("finding")
             inherited = {
-                **feedback,
+                "actor": "system",
                 "acceptance_root": root,
                 "continued_from": finding["id"],
                 "continuation": {
@@ -1002,7 +1000,7 @@ class Acceptance:
             }
             db.execute(
                 "INSERT INTO analysis_findings(id,analysis_id,status,data,feedback) "
-                "VALUES(?,?,'confirmed',?,?)",
+                "VALUES(?,?,'repair_candidate',?,?)",
                 (finding_id, run["analysis_id"], json.dumps(data), json.dumps(inherited)),
             )
             for key in data.get("scope_keys", []):
@@ -1015,6 +1013,11 @@ class Acceptance:
             ).fetchone()
             if not self._authorized(db, analysis):
                 raise Conflict("acceptance_basis_changed")
+            register_repair_origin(db, analysis, finding_id, "acceptance_followup", {
+                "root_finding_id": root, "parent_finding_id": finding["id"],
+                "run_id": run["id"], "check_id": row["id"], "item_key": row["item_key"],
+                "result_digest": digest(result), "review_digest": digest(verdict.model_dump()),
+            })
             context = request_scope_review(db, analysis, actor="system")
             db.execute(
                 "UPDATE repository_analyses SET context=?,version=version+1 WHERE id=?",
@@ -1034,7 +1037,7 @@ class Acceptance:
                 "review": verdict.model_dump(),
                 "result": result,
                 "test_files": json.loads(row["specification"])["files"],
-                "authorization": "Inherited original owner confirmation for this finding only.",
+                "authorization": "Inherited original evidence-bound repair eligibility only.",
                 "next": "Include these actual acceptance tests in a complete repair patch. "
                 "Read original source, preserve the prior valid fix, and perform all "
                 "original/before/after/full-suite verification and independent review. "

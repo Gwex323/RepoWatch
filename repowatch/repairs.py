@@ -11,6 +11,7 @@ import time
 from . import recovery as recovery_ledger
 from .diagnosis import redact, redact_values
 from .environment_recovery import EnvironmentRecovery
+from .finding_eligibility import origin as finding_origin
 from .github_accounts import GitHubError
 from .github_contributions import GitHubPublisher
 from .observability import task_binding
@@ -548,11 +549,11 @@ class Repairs(EnvironmentRecovery):
             return False
         if env["revision"] != task["revision"] or analysis["revision"] != task["revision"]:
             return False
-        feedback = json.loads(finding["feedback"] or "{}")
         return (
-            finding["status"] == "confirmed" and feedback.get("decision") == "confirmed"
-            and feedback.get("actor") == "owner" and feedback.get("revision") == task["revision"]
+            finding_origin(db, analysis, finding) is not None
             and self.analyses.current(analysis)
+            and not db.execute("SELECT paused FROM repositories WHERE id=?",
+                               (analysis["repo_id"],)).fetchone()[0]
             and not db.execute(
                 "SELECT 1 FROM execution_jobs WHERE env_id=? AND state IN ('queued','running')",
                 (task["env_id"],),
@@ -577,13 +578,17 @@ class Repairs(EnvironmentRecovery):
         bound = {"analysis_id": analysis_id, "finding_id": finding_id,
                  "env_id": analysis["env_id"], "revision": analysis["revision"]}
         if not self.current(db, bound):
-            raise Conflict("repair_confirmation_required")
+            raise Conflict("repair_eligibility_required")
         old = db.execute("SELECT id FROM repair_tasks WHERE finding_id=?", (finding_id,)).fetchone()
         if old:
             return old["id"]
         env = db.execute("SELECT * FROM environments WHERE id=?", (analysis["env_id"],)).fetchone()
+        provenance = finding_origin(db, analysis, finding)
         context = {
-            "finding": json.loads(finding["data"]), "confirmation": json.loads(finding["feedback"]),
+            "finding": json.loads(finding["data"]),
+            "repair_origin": provenance,
+            "confirmation": (json.loads(finding["feedback"] or "null")
+                             if provenance["kind"] == "legacy_owner" else None),
             "revision": analysis["revision"], "repo_id": analysis["repo_id"],
             "env_id": analysis["env_id"], "config": json.loads(env["config"] or "{}"),
             "memories": json.loads(analysis["context"] or "{}").get("memories", []),
@@ -599,17 +604,28 @@ class Repairs(EnvironmentRecovery):
         )
         db.execute(
             "INSERT INTO repair_events(repair_id,kind,value,created) VALUES(?,?,?,?)",
-            (task_id, "queued", "confirmed_finding", now),
+            (task_id, "queued", "repair_candidate" if finding["status"] == "repair_candidate"
+             else "confirmed_finding", now),
         )
         return task_id
 
     def backfill(self):
+        cursor = getattr(self, "_backfill_cursor", (-1, ""))
         with self.store.connection() as db:
+            if not db.execute("SELECT enabled FROM repair_settings WHERE id=1").fetchone()[0]:
+                return
             rows = db.execute(
-                "SELECT a.id AS analysis_id,f.id AS finding_id FROM repository_analyses a "
+                "SELECT a.id AS analysis_id,a.created,f.id AS finding_id "
+                "FROM repository_analyses a "
                 "JOIN analysis_findings f ON f.analysis_id=a.id "
-                "WHERE a.status='completed' AND f.status='confirmed'"
+                "LEFT JOIN repair_tasks t ON t.finding_id=f.id "
+                "WHERE a.status='completed' AND f.status IN ('confirmed','repair_candidate') "
+                "AND t.id IS NULL AND (a.created>? OR (a.created=? AND f.id>?)) "
+                "ORDER BY a.created,f.id LIMIT 100",
+                (cursor[0], cursor[0], cursor[1]),
             ).fetchall()
+        # Rotate bounded pages so stale/paused candidates cannot starve later eligible ones.
+        self._backfill_cursor = (rows[-1]["created"], rows[-1]["finding_id"]) if rows else (-1, "")
         for row in rows:
             try:
                 self.enqueue(row["analysis_id"], row["finding_id"])
@@ -1326,14 +1342,19 @@ class Repairs(EnvironmentRecovery):
             if isinstance(value, dict) and "exit_code" in value
         )
         body = (
-            "## 问题与复现\n\n" + context["finding"]["explanation"] + "\n\n"
+            "## 概述\n\n" + context["finding"]["explanation"] + "\n\n"
             + "\n".join(
                 f"{i}. {step}" for i, step in enumerate(context["finding"]["reproduction"], 1)
             )
-            + "\n\n已由工作台用户确认复现。"
-            + (context["confirmation"].get("note") or "")
-            + "\n\n## 修改摘要\n\n" + json.loads(row["patch"])["summary"]
-            + "\n\n## 验证结果\n\n" + results + "\n\n## 独立审查\n\n" + review["summary"]
+            + ("\n\n历史记录：已由工作台用户确认复现。"
+               + ((context.get("confirmation") or {}).get("note") or "")
+               if (context.get("repair_origin") or {}).get("kind") == "legacy_owner"
+               or (not context.get("repair_origin") and context.get("confirmation"))
+               else "\n\n来源：当前版本有效分析发现；修复依据实际自动验证和独立审查结果。")
+            + "\n\n## 变更内容\n\n" + json.loads(row["patch"])["summary"]
+            + "\n\n## 设计方案/说明\n\n基于当前源码和问题证据实施修复，"
+            + "修复范围与原问题一致；验证与独立审查记录见下文。"
+            + "\n\n## 验证/验收\n\n" + results + "\n\n## review记录\n\n" + review["summary"]
             + "\n\n风险与限制：\n" + "\n".join("- " + risk for risk in review["risks"])
             + "\n\n基于版本 `" + row["revision"] + "`。请仓库拥有者审核并决定是否合并。"
         )

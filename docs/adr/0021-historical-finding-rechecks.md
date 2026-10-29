@@ -235,3 +235,10 @@ history was unchanged. The isolated QA server on port 8796 was stopped. No perso
 analysis, project test, reinstall, repair or GitHub operation was initiated. The old
 failed attempt remains unchanged; actual model acceptance of the continuation path
 is not claimed without a new explicit owner-triggered analysis.
+
+
+## Candidate eligibility update — Issue #97
+
+Unclosed repair candidates join the bounded same-repository historical snapshot.
+Their state is not human reproduction feedback. Continuation requires fresh
+source, scope and review evidence. See [policy](../finding-repair-eligibility-97.md).

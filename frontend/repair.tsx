@@ -83,9 +83,9 @@ const errors: Record<string, string> = {
   repair_model_retry_unavailable: '此次模型变更不满足一次续跑的授权条件。',
   repair_model_changed: '代码修复模型与此次用户授权的配置不一致，本轮已停止。',
   repair_settings_changed: '修复配置已变化，请刷新后重试。',
-  repair_stale: '源码、配置或执行证据已变化，需重新分析并复现。',
+  repair_stale: '源码、配置或执行证据已变化，需重新分析。',
   repair_source_changed: '本地源码与修复依据不一致，需重新分析。',
-  repair_confirmation_required: '此问题尚无有效的本人复现确认。',
+  repair_eligibility_required: '此问题没有当前有效的修复依据，请重新分析。',
   repair_tests_failed: '回归测试未满足修复前失败、修复后通过及完整测试通过的要求。',
   repair_verification_required: '补丁尚未完成真实测试验证，已阻止提前进入独立审查。',
   repair_setup_failed: '修复验证环境安装失败，请查看测试日志。',
@@ -127,7 +127,7 @@ const errors: Record<string, string> = {
   repair_deadline_exceeded: '本轮修复超过三十分钟时限。',
   repair_changed: '任务状态已变化或尝试次数已用完，请刷新。',
   repair_account_changed: 'GitHub 账号已切换或凭据已变化，请检查绑定账号。',
-  repair_upstream_changed: '远程默认分支已更新，需下载新版本、重新分析和复现。',
+  repair_upstream_changed: '远程默认分支已更新，需下载新版本、重新分析。',
   repair_fork_not_allowed: '没有上游写入权限，且当前仓库不允许本阶段的公开 fork 流程。',
   repair_fork_pending: 'GitHub fork 尚未准备好，请稍后重试。',
   repair_fork_conflict: '账号下已有同名但来源不同的仓库，未覆盖。',
@@ -321,7 +321,7 @@ export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?:
           onChange={e => setSettings({ ...settings, enabled: e.target.checked })} />自动修复并提交 Issue / PR</label>
         <button className="button secondary" disabled={busy}><Save size={15} />保存修复配置</button>
       </div>
-      <p className="diagnosis-meta">已有 Issue 关联原编号；新发现的问题先查找相似 Issue，匹配时补充评论，否则新建 Issue，再提交修复 PR。</p>
+        <p className="diagnosis-meta">开启后，有效分析发现会自动进入修复、测试与独立审查，无需逐项确认复现。已有 Issue 关联原编号；新发现先查找相似 Issue，再按现有权限提交修复 PR。</p>
       <dl className="repair-facts">
         <div><dt>模型</dt><dd>{(modelEnabled ?? settings.model_enabled) ? '代码修复与独立审查模型已就绪' : '等待修复角色模型配置或启用'}</dd></div>
         <div><dt>每个问题</dt><dd>最多 {settings.max_attempts} 次尝试</dd></div>
@@ -377,7 +377,7 @@ export function RepairPanel({ envId, api, focusTaskId = '', view = 'repair', onN
       <button className="text-link" onClick={() => onNavigate?.('repair')}>查看补丁与验证记录</button>
     </article>)}</div>
   </section>;
-  if (tasks.length === 0 && !error) return <p className="action-hint">尚无修复任务。请先在「复现结果」确认问题，并在设置中启用自动修复。</p>;
+  if (tasks.length === 0 && !error) return <p className="action-hint">尚无修复任务。有效分析发现会在自动修复开启后自动入队，请查看分析与自动修复配置。</p>;
   return <section className="repository-repairs" aria-label="自动修复任务">
     <div className="section-heading"><h3><Wrench size={17} />自动修复</h3>
       <span className="tag neutral">{tasks.length} 个任务</span></div>
