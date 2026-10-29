@@ -754,3 +754,5 @@ select { font: inherit; max-width: 100%; }
 .fault-timeline time { display: block; color: #64748b; margin-top: 6px; }
 @media (max-width: 1000px) { .fault-layout.has-detail { grid-template-columns: minmax(0, 1fr); } .fault-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 600px) { .fault-health { align-items: stretch; flex-direction: column; } .fault-filters { grid-template-columns: minmax(0, 1fr); } .fault-metadata { grid-template-columns: minmax(0, 1fr); } .fault-detail { padding: 15px; } }
+
+.status-repair_candidate { background: #e9f4ef; color: #257957; }

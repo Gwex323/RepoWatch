@@ -5,6 +5,11 @@ Status updated: 2026-10-29
 
 ## Current Delivery Status
 
+- Issue #97 is implemented on `feature/remove-manual-reproduction-97`, based
+  on `f8e91ed`: valid analyzed findings become automatic repair candidates without
+  per-finding personal confirmation. Offline verification and diff review are recorded; no merge
+  or deployment is claimed. Delivery PR #98 is open. See [policy](finding-repair-eligibility-97.md).
+
 - The original execution, analysis, controlled repair and GitHub publication
   increments are implemented. Real GitHub Issues can be synchronized and used
   for analysis; daily repository checks and their history are available.
@@ -188,6 +193,9 @@ resource limits remain outside this milestone. Docker engine availability
 has not been resolved by this delivery.
 
 ## Milestone 1: Durable Human Checkpoint And Native Handoffs
+
+Historical implementation baseline: the personal-confirmation gate below is superseded
+by change #97; see the current status and candidate eligibility contract above.
 
 - Establish the application structure and select remaining web-service,
   frontend, persistence, and task-dispatch components.

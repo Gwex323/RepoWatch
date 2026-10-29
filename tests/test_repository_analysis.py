@@ -1368,7 +1368,7 @@ def test_failed_tests_are_eligible_and_do_not_confirm_findings(service):  # noqa
     asyncio.run(analyses.tick())
     result = analyses.list(env["id"])[0]
     assert result["status"] == "completed"
-    assert result["findings"][0]["status"] == "waiting_reproduction"
+    assert result["findings"][0]["status"] == "repair_candidate"
     with execution.store.connection() as db:
         context = json.loads(db.execute(
             "SELECT context FROM repository_analyses WHERE id=?", (result["id"],),
@@ -1400,34 +1400,28 @@ def test_automatic_queue_waits_for_model_then_resumes_once(service):  # noqa: F8
     assert asyncio.run(analyses.tick())
     result = analyses.get(row["id"])
     assert result["status"] == "completed"
-    assert result["findings"][0]["status"] == "waiting_reproduction"
+    assert result["findings"][0]["status"] == "repair_candidate"
     assert len([e for e in result["events"] if e["kind"] == "handoff"]) == 3
     assert asyncio.run(analyses.tick()) is False
     assert len(analyses.list(env["id"])) == 1
     assert execution.store.dashboard()["findings"][0]["id"] == result["findings"][0]["id"]
 
 
-def test_real_feedback_requires_personal_confirmation_and_never_repairs(service):  # noqa: F811
+def test_real_positive_feedback_is_retired_and_never_repairs(service):  # noqa: F811
     execution, _, runtime = service
     env = prepare_tested(service)
     analyses = Analyses(execution, Engine())
     asyncio.run(analyses.tick())
     row = analyses.list(env["id"])[0]
     finding = row["findings"][0]
-    with pytest.raises(Conflict, match="personal_reproduction"):
-        analyses.feedback(row["id"], finding["id"], 1, "confirmed", "", False)
-    with pytest.raises(Conflict, match="personal_reproduction"):
-        analyses.feedback(row["id"], finding["id"], 1, "confirmed", "Observed fixture", False)
-    result = analyses.feedback(row["id"], finding["id"], 1, "confirmed", "", True)
-    assert result["findings"][0]["status"] == "confirmed"
-    assert result["findings"][0]["feedback"]["note"] == ""
-    assert result["findings"][0]["feedback"]["revision"] == env["revision"]
-    with pytest.raises(Conflict, match="finding_changed"):
-        analyses.feedback(row["id"], finding["id"], 1, "confirmed", "Again", True)
+    for personal in (False, True):
+        with pytest.raises(Conflict, match="manual_confirmation_retired"):
+            analyses.feedback(row["id"], finding["id"], 1, "confirmed", "", personal)
+    assert analyses.get(row["id"])["findings"][0] == finding
     assert runtime.calls == ["setup", "test"]
 
 
-@pytest.mark.parametrize("decision", ["confirmed", "not_reproduced"])
+@pytest.mark.parametrize("decision", ["not_reproduced"])
 @pytest.mark.parametrize("note", ["", "   ", "  Observed fixture  "])
 def test_feedback_notes_are_optional_and_preserved(service, decision, note):  # noqa: F811
     execution, _, runtime = service
@@ -1457,7 +1451,7 @@ def test_config_changes_invalidate_feedback_and_do_not_invent_new_evidence(servi
     row = analyses.list(env["id"])[0]
     execution.configure(env["id"], env["version"], {**env["config"], "test": "echo changed"})
     assert not analyses.get(row["id"])["current"]
-    with pytest.raises(Conflict, match="analysis_stale"):
+    with pytest.raises(Conflict, match="manual_confirmation_retired"):
         analyses.feedback(row["id"], row["findings"][0]["id"], 1, "confirmed", "Done", True)
     with pytest.raises(Conflict, match="analysis_execution_required"):
         analyses.enqueue(env["id"])
@@ -1666,7 +1660,8 @@ def test_analysis_apis_require_owner_csrf_and_reject_forged_feedback(tmp_path):
         confirmed = client.post(feedback_url, headers=headers, json={
             "version": 1, "decision": "confirmed", "personally_reproduced": True,
         })
-        assert confirmed.status_code == 200
-        finding = confirmed.json()["findings"][0]
-        assert finding["status"] == "confirmed"
-        assert finding["feedback"]["note"] == ""
+        assert confirmed.status_code == 409
+        assert "manual_confirmation_retired" in confirmed.text
+        finding = client.get(url).json()[0]["findings"][0]
+        assert finding["status"] == "repair_candidate"
+        assert finding["feedback"] is None

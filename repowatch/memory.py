@@ -374,7 +374,7 @@ class Memory:
         buckets = {
             key: {name: 0 for name in (
                 "analyses", "completed_analyses", "failed_analyses", "memory_entries",
-                "findings", "confirmed_findings", "resolved_findings",
+                "findings", "confirmed_findings", "repair_candidates", "resolved_findings",
                 "merged_resolutions", "repairs", "published_repairs", "failed_repairs",
             )} for key in ("with_memory", "without_memory")
         }
@@ -426,8 +426,12 @@ class Memory:
                     if not isinstance(feedback, dict):
                         feedback = {}
                     metrics["findings"] += 1
+                    metrics["repair_candidates"] += int(finding["status"] == "repair_candidate")
                     metrics["confirmed_findings"] += int(
                         finding["status"] == "confirmed"
+                        and feedback.get("actor") == "owner"
+                        and feedback.get("decision") == "confirmed"
+                        and feedback.get("revision") == analysis["revision"]
                     )
                     metrics["resolved_findings"] += int(finding["status"] == "resolved")
                     metrics["merged_resolutions"] += int(

@@ -94,7 +94,7 @@ def test_stale_waiting_finding_can_be_disposed_and_leaves_candidates(service):  
     assert saved["version"] == finding["version"] + 1
     assert saved["feedback"]["note"] == "误报"
     assert saved["feedback"]["actor"] == "owner"
-    assert saved["feedback"]["previous_status"] == "waiting_reproduction"
+    assert saved["feedback"]["previous_status"] == "repair_candidate"
     assert saved["feedback"]["disposition"] is True
     with execution.store.connection() as db:
         repo_id = db.execute(
@@ -112,7 +112,14 @@ def test_confirmed_finding_disposition_cancels_queued_repair(service):  # noqa: 
     asyncio.run(analyses.tick())
     row = analyses.list(env["id"])[0]
     finding = row["findings"][0]
-    analyses.feedback(row["id"], finding["id"], finding["version"], "confirmed", "", True)
+    with execution.store.connection() as db:
+        db.execute("DELETE FROM finding_repair_origins WHERE finding_id=?", (finding["id"],))
+        db.execute("UPDATE analysis_findings SET status='confirmed',feedback=?,version=version+1 "
+                   "WHERE id=?", (json.dumps({"actor": "owner", "decision": "confirmed",
+                                             "revision": row["revision"], "note": ""}),
+                                 finding["id"]))
+    if analyses.repairer is not None:
+        analyses.repairer.enqueue(row["id"], finding["id"])
     with execution.store.connection() as db:
         repair = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
                             (finding["id"],)).fetchone()
@@ -132,7 +139,7 @@ def test_confirmed_finding_disposition_cancels_queued_repair(service):  # noqa: 
     ]
 
 
-def test_running_repair_blocks_disposition(service):  # noqa: F811
+def test_running_repair_can_be_closed_and_loses_eligibility(service):  # noqa: F811
     execution, _, _ = service
     env = prepare_tested(service)
     repairs = Repairs(execution)
@@ -140,12 +147,22 @@ def test_running_repair_blocks_disposition(service):  # noqa: F811
     asyncio.run(analyses.tick())
     row = analyses.list(env["id"])[0]
     finding = row["findings"][0]
-    analyses.feedback(row["id"], finding["id"], finding["version"], "confirmed", "", True)
+    with execution.store.connection() as db:
+        db.execute("DELETE FROM finding_repair_origins WHERE finding_id=?", (finding["id"],))
+        db.execute("UPDATE analysis_findings SET status='confirmed',feedback=?,version=version+1 "
+                   "WHERE id=?", (json.dumps({"actor": "owner", "decision": "confirmed",
+                                             "revision": row["revision"], "note": ""}),
+                                 finding["id"]))
+    if analyses.repairer is not None:
+        analyses.repairer.enqueue(row["id"], finding["id"])
     with execution.store.connection() as db:
         db.execute("UPDATE repair_tasks SET status='running' WHERE finding_id=?", (finding["id"],))
-    with pytest.raises(Conflict, match="repair_running"):
-        analyses.disposition(row["id"], finding["id"], finding["version"] + 1,
-                             "not_reproduced", "")
+    analyses.disposition(row["id"], finding["id"], finding["version"] + 1,
+                         "not_reproduced", "")
+    with execution.store.connection() as db:
+        task = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
+                          (finding["id"],)).fetchone()
+        assert not repairs.current(db, task)
 
 
 def test_disposition_rejects_stale_versions_and_closed_findings(service):  # noqa: F811
@@ -233,7 +250,7 @@ def test_resolved_owner_assertion_requires_note_and_exits_candidates(service):  
     assert saved["status"] == "resolved"
     assert saved["feedback"]["resolution"] == "owner_assertion"
     assert saved["feedback"]["note"] == "已在本地手动修复并验证"
-    assert saved["feedback"]["previous_status"] == "waiting_reproduction"
+    assert saved["feedback"]["previous_status"] == "repair_candidate"
     with execution.store.connection() as db:
         repo_id = db.execute(
             "SELECT repo_id FROM repository_analyses WHERE id=?", (row["id"],),
@@ -251,7 +268,14 @@ def confirmed_with_repairs(execution_fixture, *, merged=True, fail=False):
     asyncio.run(analyses.tick())
     row = analyses.list(env["id"])[0]
     finding = row["findings"][0]
-    analyses.feedback(row["id"], finding["id"], finding["version"], "confirmed", "", True)
+    with execution.store.connection() as db:
+        db.execute("DELETE FROM finding_repair_origins WHERE finding_id=?", (finding["id"],))
+        db.execute("UPDATE analysis_findings SET status='confirmed',feedback=?,version=version+1 "
+                   "WHERE id=?", (json.dumps({"actor": "owner", "decision": "confirmed",
+                                             "revision": row["revision"], "note": ""}),
+                                 finding["id"]))
+    if analyses.repairer is not None:
+        analyses.repairer.enqueue(row["id"], finding["id"])
     return execution, analyses, row, finding, github
 
 
@@ -369,11 +393,16 @@ def test_resolved_with_queued_repair_cancels_and_uses_owner_assertion(service): 
     assert repair["status"] == "cancelled"
 
 
-def test_resolved_blocks_running_repair(service):  # noqa: F811
+def test_resolved_stops_future_actions_of_running_repair(service):  # noqa: F811
     execution, analyses, row, finding, _ = confirmed_with_repairs(service)
     with execution.store.connection() as db:
         db.execute("UPDATE repair_tasks SET status='running' WHERE finding_id=?",
                    (finding["id"],))
-    with pytest.raises(Conflict, match="repair_running"):
-        analyses.disposition(row["id"], finding["id"], finding["version"] + 1,
-                             "resolved", "说明")
+    result = analyses.disposition(row["id"], finding["id"], finding["version"] + 1,
+                                  "resolved", "已手动解决，停止后续动作")
+    assert result["findings"][0]["status"] == "resolved"
+    with execution.store.connection() as db:
+        task = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
+                          (finding["id"],)).fetchone()
+        assert task["status"] == "running"  # An in-flight receipt must still be persisted.
+        assert not analyses.repairer.current(db, task)

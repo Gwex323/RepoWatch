@@ -1,8 +1,10 @@
-"""Explicit owner continuation of a confirmed historical claim on a fresh revision."""
+"""Continue a historical claim only after validating evidence on the current revision."""
 
 import json
 import time
 
+from .finding_eligibility import digest
+from .finding_eligibility import register as register_repair_origin
 from .repair_origin import analysis_origin
 from .store import Conflict, Missing, uid
 from .task_scopes import request_scope_review, scope_snapshot
@@ -27,10 +29,8 @@ def continue_finding(analyses, analysis_id, finding_id, version, target_analysis
         if old["version"] != version or target["version"] != analysis_version:
             raise Conflict("finding_changed")
         confirmation = json.loads(old["feedback"] or "{}")
-        if (old["status"] != "confirmed" or confirmation.get("decision") != "confirmed"
-                or confirmation.get("actor") != "owner"
-                or confirmation.get("revision") != source["revision"]):
-            raise Conflict("repair_confirmation_required")
+        if old["status"] not in ("confirmed", "waiting_reproduction", "repair_candidate"):
+            raise Conflict("repair_eligibility_required")
         if (source["status"] != "completed" or target["status"] != "completed"
                 or source["repo_id"] != target["repo_id"] or source["id"] == target["id"]
                 or source["created"] >= target["created"] or not analyses.current(target)):
@@ -75,15 +75,20 @@ def continue_finding(analyses, analysis_id, finding_id, version, target_analysis
         data = Finding.model_validate({**json.loads(old["data"]), "scope_keys": keys,
                                       "evidence": [item.model_dump() for item in recheck.evidence]})
         successor, now = uid("finding"), time.time()
-        feedback = {"decision": "confirmed", "actor": "owner", "revision": target["revision"],
+        feedback = {"decision": "continued", "actor": "system", "revision": target["revision"],
                     "note": note.strip(), "at": now, "continued_from": finding_id,
                     "original_analysis_id": analysis_id, "original_confirmation": confirmation,
                     "recheck_analysis_id": target_analysis_id}
         db.execute(
             "INSERT INTO analysis_findings(id,analysis_id,status,data,feedback) "
-            "VALUES(?,?,'confirmed',?,?)", (successor, target_analysis_id,
+            "VALUES(?,?,'repair_candidate',?,?)", (successor, target_analysis_id,
                                           data.model_dump_json(), json.dumps(feedback)),
         )
+        register_repair_origin(db, target, successor, "current_recheck", {
+            "parent_finding_id": finding_id, "source_analysis_id": analysis_id,
+            "parent_digest": digest(json.loads(old["data"])),
+            "recheck_digest": digest(recheck.model_dump()),
+        })
         for key in keys:
             db.execute("INSERT INTO task_scope_findings VALUES(?,?,?)",
                        (scope["id"], key, successor))

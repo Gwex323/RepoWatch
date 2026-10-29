@@ -24,7 +24,8 @@ def snapshot(db):
     waiting = db.execute(
         "SELECT count(*) FROM analysis_findings f JOIN repository_analyses a "
         "ON a.id=f.analysis_id JOIN repositories r ON r.id=a.repo_id "
-        "WHERE r.kind='github' AND f.status='waiting_reproduction'",
+        "WHERE r.kind='github' AND f.status='repair_candidate' AND NOT EXISTS "
+        "(SELECT 1 FROM repair_tasks t WHERE t.finding_id=f.id)",
     ).fetchone()[0]
     active = 0
     for table, states in (
@@ -61,4 +62,5 @@ def snapshot(db):
         ") ORDER BY created DESC,id DESC LIMIT 100",
     )]
     return {"repositories": repositories, "findings": findings, "events": events,
-            "counts": {"waiting": waiting, "active": active, "published_prs": published}}
+            "counts": {"waiting": waiting, "repair_candidates": waiting,
+                       "active": active, "published_prs": published}}

@@ -13,9 +13,12 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 The local single-user workbench supports fixed-revision Docker execution, model-based
 analysis, GitHub Issue synchronization and Issue-based analysis, daily repository
-checks, and controlled repair and publication. System discoveries still require
-personal reproduction; existing Issues retain their own validation and evidence
-gates. Ordinary repository merges remain owner-operated. The self-maintenance
+checks, and controlled repair and publication. Issue #97 implements evidence-bound
+repair candidates without personal reproduction confirmation on its feature
+branch. Existing Issues retain their validation and evidence gates. Offline
+verification and diff review are recorded in [candidate eligibility](finding-repair-eligibility-97.md)
+and [review](tasks/0097/review.md). Delivery PR #98 is open. This change has not been merged or deployed.
+Ordinary repository merges remain owner-operated. The self-maintenance
 release CLI described below has separate, explicit owner authorization; no
 background worker can independently merge or deploy.
 Merged repair experience can be written back to repository memory after owner
@@ -110,37 +113,32 @@ See [the regression validation](main-regression-88-validation.md) for the origin
   containers for dependency installation, execution, and testing, with
   restricted mounts and permissions. Detailed isolation policy remains to
   be specified; local execution does not imply unrestricted host access.
-- Analysis and finding discovery are automated. Each discovered suspected
-  bug must then be reproduced and confirmed by a human before the system
-  proceeds with issue submission, repair, or a repair PR for that finding.
-- The single user personally operates the local project to reproduce the
-  suspected bug, then records the result in the WebUI. Agent-generated
-  evidence does not replace that user confirmation for system discoveries.
-- Existing GitHub Issues do not require personal reproduction. The system
-  automatically validates the issue at the task revision before repair.
-  Failed validation pauses with a WebUI notification, without switching to a
-  human reproduction requirement. Both origins still require tests and review.
-- Origin is assigned by the trusted intake path and cannot be changed by model
-  output, user-supplied metadata, or later Issue creation. Linking an Issue to a
-  system discovery must not bypass that discovery's human checkpoint.
-- Project containers do not stay running while waiting for the user to
-  reproduce findings. The feedback interface must remain independent of
-  the target project's container lifecycle.
-- After human reproduction confirmation, issue creation, bug fixing,
-  repair-branch pushes, and PR creation do not need separate per-action
-  approval, subject to the remaining quality and permission gates.
+- Analysis and finding discovery are automated. Under change #97, findings retained
+  by a valid final independent review become `repair_candidate` records. When
+  automatic repair is enabled, current eligible candidates proceed without
+  personal reproduction feedback. Reproduction steps remain available.
+- Trusted server provenance binds the finding, final analysis, revision,
+  configuration and execution basis. Existing genuine owner confirmations remain
+  readable; old waiting records require current analysis or validated continuation.
+- Existing GitHub Issues retain their trusted intake origin and automatic
+  validation requirements. Model output cannot change that origin.
+- Users may dispose candidates as not reproduced, false positive or resolved.
+  Closing a finding blocks later actions; an already sent remote request keeps its
+  actual receipt. Project containers need not remain active for disposition.
+- Issue creation, repair branches and PR publication require current eligibility,
+  regression failure before the patch, passing regression and full tests after it,
+  independent repair review, budget and account checks.
 - Ordinary repository repairs require project-owner review and merge.
   The self-maintenance release increment adds only explicitly owner-invoked,
   exact-HEAD authorized merges under GitHub rules; it does not enable background
   merging, bypass PR review or confer deployment permission.
-- Automated tests and agent review cannot replace required human reproduction
-  for system discoveries or project-owner review and merge for either origin.
+- Automated tests and agent review do not confer project-owner merge or deployment permission.
 - The system may automatically fork a selected repository into the configured
   GitHub account and use that account to submit issues and pull requests,
   subject to available permissions and repository restrictions.
-- Version one automatically publishes new issues only for human-confirmed
-  discoveries. Repair PRs require the origin-specific reproduction evidence
-  plus passing repair tests and independent review. Refactoring suggestions,
+- Automatic issue publication for discoveries requires current evidence-bound
+  eligibility. Repair PRs require origin-specific validation, passing repair tests
+  and independent review. Refactoring suggestions,
   style findings, and unverified suspected problems remain in the analysis
   report.
 - The system supports recurring scheduled repository checks after intake.

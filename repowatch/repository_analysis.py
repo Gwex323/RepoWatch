@@ -44,6 +44,9 @@ from .analysis_tools import (
     tools_for_role,
 )
 from .diagnosis import evidence_matches, fingerprint, redact, redact_values
+from .finding_eligibility import digest as provenance_digest
+from .finding_eligibility import origin as finding_origin
+from .finding_eligibility import register as register_repair_origin
 from .historical_review import MAX_HISTORICAL_FINDINGS, historical_results, historical_snapshot
 from .memory import Memory, capture_repair_fix, compact_experience
 from .observability import TracingHooks, task_binding
@@ -1489,7 +1492,8 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
         name=ROLES[3], model=models[ROLES[3]], tools=tools_for_role(ROLES[3], tools),
         output_type=Review,
         instructions=boundary + "Independently challenge prior claims, remove weak or duplicate "
-        "findings, and return the final review. Findings remain unconfirmed until human feedback.",
+        "findings, and return the final review. Validated final findings become repair candidates; "
+        "this is not human reproduction or proof that repair tests will pass.",
         model_settings=ModelSettings(max_tokens=5000, reasoning=reasoning.get(ROLES[3])),
     )
     reproduction = Agent(
@@ -1868,8 +1872,12 @@ class Analyses:
                 result["failure_details"] = None
                 result["provider_response"] = None
                 result["progress"] = {"stage": None, "model_calls": 0, "source_reads": 0}
+            result["repairs_enabled"] = bool(db.execute(
+                "SELECT enabled FROM repair_settings WHERE id=1",
+            ).fetchone()[0])
             result["findings"] = [
                 {**dict(item), "data": json.loads(item["data"]),
+                 "repair_origin": finding_origin(db, row, item, historical=True),
                  "feedback": json.loads(item["feedback"]) if item["feedback"] else None}
                 for item in db.execute("SELECT * FROM analysis_findings WHERE analysis_id=?",
                                        (analysis_id,))
@@ -1994,31 +2002,9 @@ class Analyses:
         return self.get(analysis_id)
 
     def feedback(self, analysis_id, finding_id, version, decision, note, personally_reproduced):
-        if decision == "confirmed" and not personally_reproduced:
-            raise Conflict("personal_reproduction_required")
-        with self.store.connection() as db:
-            db.execute("BEGIN IMMEDIATE")
-            analysis = db.execute("SELECT * FROM repository_analyses WHERE id=?",
-                                  (analysis_id,)).fetchone()
-            if not analysis or not self.current(analysis):
-                raise Conflict("analysis_stale")
-            finding = db.execute(
-                "SELECT * FROM analysis_findings WHERE id=? AND analysis_id=?",
-                (finding_id, analysis_id),
-            ).fetchone()
-            if not finding:
-                raise Missing("Finding not found.")
-            if finding["version"] != version or finding["status"] != "waiting_reproduction":
-                raise Conflict("finding_changed")
-            record = {"decision": decision, "note": note.strip(), "actor": "owner",
-                      "revision": analysis["revision"], "at": time.time()}
-            db.execute(
-                "UPDATE analysis_findings SET status=?,feedback=?,version=version+1 WHERE id=?",
-                (decision, json.dumps(record, ensure_ascii=False), finding_id),
-            )
-            if decision == "confirmed" and self.repairer is not None:
-                self.repairer.enqueue_in(db, analysis_id, finding_id)
-        return self.get(analysis_id)
+        if decision == "confirmed":
+            raise Conflict("manual_confirmation_retired")
+        return self.disposition(analysis_id, finding_id, version, decision, note)
 
     def disposition(self, analysis_id, finding_id, version, decision, note):
         if decision not in ("not_reproduced", "resolved", "false_positive"):
@@ -2045,14 +2031,12 @@ class Analyses:
                 raise Missing("Finding not found.")
             if finding["version"] != version:
                 raise Conflict("finding_changed")
-            if (finding["status"] not in ("waiting_reproduction", "confirmed")
+            if (finding["status"] not in ("waiting_reproduction", "confirmed", "repair_candidate")
                     and not (decision == "false_positive"
                              and finding["status"] == "not_reproduced")):
                 raise Conflict("finding_closed")
             repair = db.execute("SELECT * FROM repair_tasks WHERE finding_id=?",
                                 (finding_id,)).fetchone()
-            if repair and repair["status"] == "running":
-                raise Conflict("repair_running")
             record = {"decision": decision, "note": note.strip(), "actor": "owner",
                       "revision": analysis["revision"], "at": time.time(),
                       "previous_status": finding["status"], "disposition": True}
@@ -2454,7 +2438,8 @@ class Analyses:
                     if finding_id is None:
                         finding_id = uid("finding")
                         db.execute(
-                            "INSERT INTO analysis_findings(id,analysis_id,data) VALUES(?,?,?)",
+                            "INSERT INTO analysis_findings(id,analysis_id,data,status) "
+                            "VALUES(?,?,?,'repair_candidate')",
                             (finding_id, row["id"], json.dumps(data, ensure_ascii=False)),
                         )
                     scoped_findings.append((finding_id, data))
@@ -2466,6 +2451,10 @@ class Analyses:
                     "lease=0,version=version+1,updated=? WHERE id=?",
                     (json.dumps(report, ensure_ascii=False), time.time(), row["id"]),
                 )
+                for finding_id, _data in scoped_findings:
+                    register_repair_origin(db, row, finding_id, "analysis_review", {
+                        "report_digest": provenance_digest(report),
+                    })
                 db.execute("DELETE FROM analysis_review_checkpoints WHERE analysis_id=?",
                            (row["id"],))
                 db.execute("UPDATE analysis_report_recovery SET state='completed',retry_after=0,"
@@ -2513,6 +2502,8 @@ class Analyses:
                 self.store, action, row["id"]+":"+str(run_version),
                 "repository_analyses", row["id"],
             )
+        if self.repairer is not None:
+            self.repairer.backfill()
         return True
 
     async def run(self):

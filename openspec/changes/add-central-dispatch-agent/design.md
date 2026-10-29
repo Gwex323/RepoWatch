@@ -10,7 +10,7 @@
 | `repository_analysis.py` 保存 `failure`、`required_read_validation`、`model_configuration` 等事件 | 复用稳定事件与实际模型配置，不能仅记录最终中文报错，也不能用当前配置反推历史请求 |
 | `required_read_validation` 对范围登记只允许一条调用，`too_many_calls` 不走缺失调用纠正 | 第一阶段完整记录该检查；第二阶段实现受限范围批次恢复，不在第一阶段改变前置检查 |
 | `report_scheduler.py` 持久化 32 次请求、1800 秒总时限与三次审查续办，且保留已用预算 | 中央调度接入现有计数与检查点；不得转交角色后清零或绕开上限 |
-| `repairs.py` 已有审查拒绝、验证、输出和协议恢复；`acceptance.py:_followup` 只沿用已由用户确认的发现 | 整合已有恢复条件；不把系统诊断当作新的用户确认，不产生第二个独立恢复竞争者 |
+| `repairs.py` 已有审查拒绝、验证、输出和协议恢复；`acceptance.py:_followup` 按 #97 接纳有效分析候选及真实历史确认的来源链 | 整合已有恢复条件；不把系统诊断当作新的用户确认，不产生第二个独立恢复竞争者 |
 | `roles.py` 定义五角色；`analysis_model.py`、供应商路由及旧批量保存接口依赖此集合 | 新角色需要配置版本兼容与单独流程，旧五角色批量保存不能偷偷配置第六角色 |
 | `observability.py` 的 Langfuse 是可选元数据追踪，包含允许字段与追踪关联事件 | 本地台账独立于 Langfuse 可用性，复用最小披露原则，不复制模型原始正文 |
 | `/api/system` 当前声明合并为 `owner_only` | 阶段四默认停在合规 PR；阶段五的自动合并必须是明确新增、独立授权的策略 |
@@ -171,3 +171,8 @@ flowchart TD
 ## Phase 6 Integration Note
 
 发布修复会改变工作台源码摘要。第六阶段发现原故障的旧摘要若与成功事件永远要求相等，会使已修复的原步骤仍无法闭环；但全局忽略摘要也不安全。因此原 retry 的授权事务在既有 `release_events` 写入 `source_resume_authorized`，精确绑定出现项、flow、task、新进程摘要和时间。只有对应已部署、仍待原任务验证、有效部署续办授权及账号、更高尝试和更新证据可关联旧版本；仓库、环境、源码 revision 和模型绑定继续精确匹配。凭据自身不解决故障，仍需原来源真实成功事件。可执行契约、反例及有限隔离验收见 `docs/central-acceptance-83.md`。
+
+
+## Related Change: remove-manual-reproduction-gate
+
+Issue #97 将目标仓库发现从本人确认门槛改为有效分析来源资格。验收续办必须关联原候选、验收项及真实失败结果，不能伪造 owner 反馈；新问题仍经正常分析登记。专用自身维护、合并与部署的独立授权继续生效。历史设计中的本人确认依赖以该变更的新契约为准。

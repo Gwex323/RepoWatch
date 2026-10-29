@@ -1,10 +1,11 @@
 import { test, expect } from '@playwright/test';
 
 for (const feedback of [
-  { decision: 'confirmed', note: '', button: '复现成功', status: '复现成功' },
+  { decision: 'resolved', note: '已手动修复并验证。', button: '标记已解决', status: '已解决' },
   { decision: 'not_reproduced', note: '按步骤操作后未观察到异常。', button: '未能复现', status: '未能复现' },
 ]) {
-test(`analysis settings, automatic status, evidence and human reproduction on mobile (${feedback.decision})`, async ({ page }) => {
+test(`analysis settings, automatic status, evidence and candidate disposition on mobile (${feedback.decision})`, async ({ page }) => {
+  test.setTimeout(90_000);
   const deepseek = feedback.decision === 'not_reproduced';
   const errors: string[] = [];
   page.on('pageerror', error => errors.push(error.message));
@@ -41,8 +42,8 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   });
   const analysis = {
     id: 'analysis_fixture', version: 1, revision: 'a'.repeat(40), status: 'waiting_model',
-    current: true, created: Date.now() / 1000, error: null,
-    report: { summary: '发现一个需要人工复现的疑似边界问题。', limitations: ['仅分析当前快照。'],
+    current: true, repairs_enabled: deepseek, created: Date.now() / 1000, error: null,
+    report: { summary: '发现一个等待自动修复的候选问题。', limitations: ['仅分析当前快照。'],
       files_read: ['app.py'], model: 'test-only' },
     historical_review: {
       total: 10, included: 8, omitted: 2,
@@ -64,7 +65,7 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
       { kind: 'handoff', agent: 'repository_analyst -> problem_investigator', created: 1 },
       ...(deepseek ? [{ kind: 'provider_compatibility', agent: 'deepseek_chat', created: 1 }] : []),
     ],
-    findings: [{ id: 'finding_fixture', version: 1, status: 'waiting_reproduction', data: {
+    findings: [{ id: 'finding_fixture', version: 1, status: 'repair_candidate', data: {
       title: '边界条件疑似处理错误', severity: 'P2', explanation: '这是浏览器测试中的模拟发现。',
       expected: '返回空列表', suspected_actual: '返回上一页', reproduction: ['输入超出范围的页码。'],
       evidence: [{ path: 'app.py', start_line: 1, end_line: 1, quote: 'return previous_page' }],
@@ -139,10 +140,10 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
     retried = true;
     await route.fulfill({ json: { ...analysis, status: 'queued' } });
   });
-  await page.route('**/api/analyses/analysis_fixture/findings/finding_fixture/feedback', async route => {
+  await page.route('**/api/analyses/analysis_fixture/findings/finding_fixture/disposition', async route => {
     const body = route.request().postDataJSON();
     expect(body.decision).toBe(feedback.decision);
-    expect(body.personally_reproduced).toBe(feedback.decision === 'confirmed');
+    expect(body).not.toHaveProperty('personally_reproduced');
     expect(body.note).toBe(feedback.note);
     analysis.findings[0].status = feedback.decision;
     await route.fulfill({ json: analysis });
@@ -156,12 +157,18 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await page.getByRole('button', { name: '添加仓库', exact: true }).click();
   await page.getByLabel('GitHub 仓库链接').fill('https://github.com/fixture/analysis');
   await page.getByRole('dialog').getByRole('button', { name: '添加仓库', exact: true }).click();
-  const open = async () => page.locator('.repository-row').filter({ hasText: 'fixture/analysis' })
-    .getByRole('button', { name: '管理运行环境' }).click();
+  const open = async () => {
+    const flow = page.getByRole('navigation', { name: '仓库处理流程' });
+    if (!await flow.isVisible()) await page.locator('.repository-row').filter({ hasText: 'fixture/analysis' })
+      .getByTitle('管理运行环境').click();
+    await flow.getByRole('button', { name: '项目分析', exact: false }).click();
+  };
   await open();
   await expect(page.getByLabel('仓库自动分析').getByText('等待模型配置', { exact: true })).toBeVisible();
-  await page.getByRole('button', { name: '运行配置', exact: true }).click();
+  await page.locator('.sidebar').getByRole('button', { name: '设置', exact: true }).click();
+  await page.getByRole('button', { name: '2. 分配模型' }).click();
   const modelCard = page.locator('.agent-model-card').filter({ hasText: 'repository_analyst' });
+  await modelCard.getByText('此角色独立配置（兼容已有手工设置）', { exact: true }).click();
   await modelCard.getByLabel('模型名称', { exact: true }).fill(deepseek ? 'deepseek-flash' : 'glm-4.7');
   await modelCard.getByRole('combobox', { name: '模型接口', exact: true }).selectOption('chat_completions');
   await modelCard.getByLabel('模型服务地址', { exact: true }).fill(
@@ -180,9 +187,9 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await page.screenshot({ path: 'test-results/analysis-model-desktop.png', fullPage: true, animations: 'disabled' });
   await page.getByRole('button', { name: '仓库', exact: true }).click();
   await open();
-  const panel = page.getByLabel('仓库自动分析');
+  const panel = page.locator('.repository-analysis');
   await expect(panel.getByText('分析未完成', { exact: true })).toBeVisible();
-  await expect(panel.getByRole('alert')).toContainText('模型输出达到长度上限而被截断');
+  await expect(panel.getByRole('alert')).toContainText('模型输出达到生成上限');
   await expect(panel.getByText('失败阶段：复现辅助 · 耗时 229 秒')).toBeVisible();
   await expect(panel.getByText('模型结束原因：length · 输出 6000 tokens · 推理 5999 tokens')).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
@@ -208,8 +215,8 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await panel.screenshot({ path: 'test-results/analysis-timeout-mobile.png', animations: 'disabled' });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
   evidenceFailure = true;
-  await expect(panel.getByRole('alert')).toContainText('源码证据未通过校验');
-  await expect(panel.getByText('问题 1 · 证据 2：引用文本与源码不一致', { exact: false })).toBeVisible();
+  await expect(panel.getByRole('alert')).toContainText('源码证据未通过完整校验');
+  await expect(panel.locator('.analysis-events').getByText('问题 1 · 证据 2：引用文本与源码不一致', { exact: false })).toBeVisible();
   await expect(panel.getByText('独立审查 · 源码证据不匹配，正在纠正一次', { exact: false })).toBeVisible();
   await expect(panel.getByText('源码引用已去除显示行号：1 处', { exact: false })).toBeVisible();
   await panel.screenshot({ path: 'test-results/analysis-evidence-mobile.png', animations: 'disabled' });
@@ -218,7 +225,7 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   await expect(panel.getByRole('alert')).toContainText('Agent 未读取已保存的测试／启动记录');
   await expect(panel.getByText('必读检查：先读取已保存的测试／启动记录', { exact: false })).toBeVisible();
   await expect(panel.getByText('必读检查：先读取当前源码', { exact: false })).toBeVisible();
-  await expect(panel.getByText('必读请求检查（源码）：2 条调用 · 匹配 2 · 其他 0 · 上限 10 · 正文 0', { exact: false })).toBeVisible();
+  await expect(panel.getByText('前置请求检查（源码）：2 条调用 · 匹配 2 · 其他 0 · 上限 10 · 正文 0', { exact: false })).toBeVisible();
   await expect(panel.getByText('问题调查 · 提前结束，保留本轮证据并补一次真实交接', { exact: false })).toBeVisible();
   recoveringHandoff = true;
   await expect(panel.getByRole('status')).toContainText('当前角色提前结束，正在尝试补齐交接；本轮已读取的证据保留。');
@@ -240,6 +247,7 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
     await expect(panel.getByText('从已保存证据恢复最终报告，仅调用独立审查员', { exact: false })).toBeVisible();
     await expect(panel.getByRole('button', { name: '从已保存证据恢复报告' })).toHaveCount(0);
   }
+  await page.getByRole('navigation', { name: '仓库处理流程' }).getByRole('button', { name: '问题与修复', exact: false }).click();
   const historical = panel.getByLabel('旧问题逐条复核');
   await expect(historical).toBeVisible();
   for (const outcome of ['仍存在', '已修复', '疑似误报', '本轮未覆盖']) {
@@ -247,22 +255,25 @@ test(`analysis settings, automatic status, evidence and human reproduction on mo
   }
   await expect(historical.getByText('旧复现中的空白密钥被正确拒绝，不足以证明校验绕过。')).toBeVisible();
   await expect(historical.getByText('另有 2 项受本轮数量限制未带入，均未覆盖，不能认定已修复。')).toBeVisible();
-  await expect(historical.getByText(/原人工状态：复现成功/)).toHaveCount(8);
-  await expect(historical.getByRole('button', { name: '标记未能复现（含误报）' })).toHaveCount(8);
+  await expect(historical.getByText(/原问题状态：历史已确认复现/)).toHaveCount(8);
+  await expect(historical.getByRole('button', { name: '标记未能复现' })).toHaveCount(8);
   await historical.getByText('当前源码证据：app.py:1–1').first().click();
   await expect(historical.locator('pre').first()).toHaveText('return previous_page');
-  await expect(panel.getByRole('button', { name: '复现成功', exact: true })).toBeEnabled();
-  await expect(panel.getByLabel('复现说明（选填）')).toHaveValue('');
+  const currentFinding = panel.locator('.content-card-grid > .analysis-finding');
+  await expect(panel.getByRole('button', { name: '复现成功', exact: true })).toHaveCount(0);
+  await expect(panel.getByText(deepseek ? '分析已形成修复候选，将按当前模型、环境与任务状态自动推进，无需逐项确认。' : '自动修复未开启；开启后有效分析候选会自动推进，无需逐项确认。')).toBeVisible();
+  await expect(currentFinding.getByLabel('处置说明（确认误报时必填）')).toHaveValue('');
   await expect(panel.getByRole('checkbox')).toHaveCount(0);
   await panel.screenshot({ path: 'test-results/analysis-desktop.png', animations: 'disabled' });
   await page.setViewportSize({ width: 390, height: 844 });
   await expect.poll(() => page.locator('.sidebar').evaluate(el => el.getBoundingClientRect().right)).toBeLessThanOrEqual(0);
   await panel.screenshot({ path: 'test-results/analysis-mobile.png', animations: 'disabled' });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
-  if (feedback.note) await panel.getByLabel('复现说明（选填）').fill(feedback.note);
-  await panel.getByRole('button', { name: feedback.button, exact: true }).click();
-  await expect(panel.locator(':scope > .analysis-finding .tag')).toHaveText(feedback.status);
-  await expect(panel.getByLabel('复现说明（选填）')).toHaveCount(0);
+  if (feedback.note) await currentFinding.getByLabel('处置说明（确认误报时必填）').fill(feedback.note);
+  await currentFinding.getByRole('button', { name: feedback.button, exact: true }).click();
+  await expect(panel.locator('.content-card-grid > .analysis-finding .tag')).toHaveText(feedback.status);
+  await expect(currentFinding.getByLabel('处置说明（确认误报时必填）'))
+    .toHaveCount(feedback.decision === 'not_reproduced' ? 1 : 0);
   expect(errors).toEqual([]);
 });
 }
@@ -334,22 +345,23 @@ test('historical finding disposition records owner decision', async ({ page }) =
   await page.getByLabel('GitHub 仓库链接').fill('https://github.com/fixture/analysis');
   await page.getByRole('dialog').getByRole('button', { name: '添加仓库', exact: true }).click();
   await page.locator('.repository-row').filter({ hasText: 'fixture/analysis' })
-    .getByRole('button', { name: '管理运行环境' }).click();
+    .getByTitle('管理运行环境').click();
+  await page.getByRole('navigation', { name: '仓库处理流程' }).getByRole('button', { name: '问题与修复', exact: false }).click();
   const historical = page.getByLabel('旧问题逐条复核');
   await expect(historical).toBeVisible();
   const jwt = historical.locator('article', { hasText: '历史 JWT 校验疑似问题' });
   const paging = historical.locator('article', { hasText: '历史分页边界问题' });
-  await expect(jwt.getByRole('button', { name: '标记未能复现（含误报）' })).toBeVisible();
+  await expect(jwt.getByRole('button', { name: '标记未能复现' })).toBeVisible();
   await expect(jwt.getByRole('button', { name: '标记已解决' })).toBeVisible();
-  await jwt.getByLabel('处置说明（选填）').fill('空白密钥被正确拒绝，确认误报。');
-  await jwt.getByRole('button', { name: '标记未能复现（含误报）' }).click();
+  await jwt.getByLabel('处置说明（确认误报或手动标记解决时必填）').fill('空白密钥被正确拒绝，确认误报。');
+  await jwt.getByRole('button', { name: '标记未能复现' }).click();
   expect(disposed['finding_history_1']).toEqual({
     version: 3, decision: 'not_reproduced', note: '空白密钥被正确拒绝，确认误报。',
   });
   await expect(jwt.getByText('当前状态：未能复现')).toBeVisible();
-  await expect(jwt.getByRole('button', { name: '标记未能复现（含误报）' })).toHaveCount(0);
+  await expect(jwt.getByRole('button', { name: '标记未能复现' })).toHaveCount(0);
   await expect(jwt.getByRole('button', { name: '标记已解决' })).toHaveCount(0);
-  await paging.getByLabel('处置说明（选填）').fill('已在其他分支手动修复并验证。');
+  await paging.getByLabel('处置说明（确认误报或手动标记解决时必填）').fill('已在其他分支手动修复并验证。');
   await paging.getByRole('button', { name: '标记已解决' }).click();
   expect(disposed['finding_history_2']).toEqual({
     version: 3, decision: 'resolved', note: '已在其他分支手动修复并验证。',

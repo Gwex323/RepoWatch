@@ -460,14 +460,14 @@ export function ExecutionPanel({ repo, api, initialEnvId = '', initialSection = 
   const running = env?.state === 'running';
   const chainActive = pipelineActive(env?.pipeline);
   const locked = busy || env?.busy || chainActive;
-  const steps = [['environment', '环境准备'], ['analysis', '项目分析'], ['issues', 'Issue'], ['reproduction', '复现结果'], ['repair', '修复'], ['pr', 'PR']];
+  const steps = [['environment', '环境准备'], ['analysis', '项目分析'], ['issues', 'Issue'], ['reproduction', '问题与修复'], ['repair', '修复'], ['pr', 'PR']];
   const stepIndex = steps.findIndex(([key]) => key === section);
   const help: Record<string, string> = {
     environment: '下载源码、准备依赖与运行测试；在这里处理环境故障、执行日志和定时巡检。',
-    analysis: '查看模型分析进度、报告与任务验收范围。人工复现请进入「复现结果」。',
+    analysis: '查看模型分析进度、报告与任务验收范围。问题处置请进入「问题与修复」。',
     issues: '同步原仓库 Issue，选择要调查的问题。提交后进入项目分析查看进度。',
-    reproduction: '根据复现步骤亲自验证，并记录成功、未复现或历史问题的处置结果。',
-    repair: '查看已确认问题的代码修复、补丁、测试和独立审查结果。',
+    reproduction: '查看分析依据和自动修复进度，可标记误报、未能复现或已解决。',
+    repair: '查看有效分析发现的代码修复、补丁、测试和独立审查结果。',
     pr: '查看已创建的 PR、关联 Issue 与发布失败；合并状态请以 GitHub 为准。',
   };
   return <section className="execution-panel" aria-labelledby="execution-title">

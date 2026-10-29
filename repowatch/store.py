@@ -74,6 +74,9 @@ class Store:
 
             initialize_analysis(db)
             initialize_model(db)
+            from .finding_eligibility import initialize as initialize_eligibility
+
+            initialize_eligibility(db)
             from .model_providers import initialize as initialize_providers
 
             initialize_providers(db)

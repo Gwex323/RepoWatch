@@ -3,6 +3,13 @@
 Date: 2026-10-14
 Status: implemented for Issue #3; live provider/remote acceptance remains explicit
 
+## Policy update — Issue #97
+
+The candidate eligibility change replaces the personal-confirmation gate below
+with server-validated current analysis provenance for new findings. The original
+policy remains historical context. See [current policy](../finding-repair-eligibility-97.md)
+for switch behavior, migration, validation and remaining publication gates.
+
 ## Scope And Gates
 
 Continue confirmed real-repository findings into isolated repair, regression

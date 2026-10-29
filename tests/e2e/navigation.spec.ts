@@ -11,7 +11,7 @@ for (const width of [1920, 1440, 390]) test(`task navigation and retained forms 
   const analysis = { id: 'analysis_ui', status: 'failed', version: 1, revision: env.revision, created: 1,
     current: true, error: 'analysis_provider_timeout_exhausted', report: null, findings: [], events: [],
     report_recovery: { available: true } };
-  const finding = { id: 'finding_ui', status: 'waiting_reproduction', version: 1, data: { title: '待复现的边界问题', severity: 'P2', explanation: '边界行为需要人工确认', expected: '返回空列表', suspected_actual: '返回旧结果', reproduction: ['输入边界值并观察返回结果'], evidence: [{path:'app.py',start_line:1,end_line:1,quote:'return previous'}] } };
+  const finding = { id: 'finding_ui', status: 'repair_candidate', version: 1, data: { title: '等待自动修复的边界问题', severity: 'P2', explanation: '边界行为已形成修复候选', expected: '返回空列表', suspected_actual: '返回旧结果', reproduction: ['输入边界值并观察返回结果'], evidence: [{path:'app.py',start_line:1,end_line:1,quote:'return previous'}] } };
   Object.assign(analysis, { report: { summary:'当前源码分析报告', limitations:[],files_read:['app.py'] }, findings:[finding] });
   const repair = { id:'repair_ui',context:{finding:{title:finding.data.title}},status:'pr_created',stage:'completed',revision:env.revision,attempt:1,version:1,enabled:true,can_retry:false,events:[],diff:'修复代码差异',remote:{branch:'fix/ui',pr:{number:4,url:'https://github.com/example/project/pull/4'},issue:{number:2,url:'https://github.com/example/project/issues/2'}} };
   const publishFailure = {...repair,id:'repair_publish',remote:null,status:'failed',stage:'publishing',can_retry:true,publication_retry_available:true,error:'repair_publication_failed'};
@@ -36,9 +36,9 @@ for (const width of [1920, 1440, 390]) test(`task navigation and retained forms 
       '/api/repositories/repo_ui/memory-aging': { items: [] },
     };
     if (path === '/api/repairs/repair_publish/retry') { publicationRetries += 1; Object.assign(publishFailure,{status:'queued',stage:null,publication_retry_available:false,context:{finding:{title:finding.data.title},publication_retries:1}}); }
-    if (path === '/api/analyses/analysis_ui/findings/finding_ui/feedback') {
-      expect(route.request().postDataJSON()).toMatchObject({decision:'confirmed',personally_reproduced:true,note:'正在核验，请保留草稿'});
-      finding.status='confirmed';
+    if (path === '/api/analyses/analysis_ui/findings/finding_ui/disposition') {
+      expect(route.request().postDataJSON()).toMatchObject({decision:'not_reproduced',note:'正在核验，请保留草稿'});
+      finding.status='not_reproduced';
     }
     await route.fulfill({ json: values[path] ?? [] });
   });
@@ -98,11 +98,12 @@ for (const width of [1920, 1440, 390]) test(`task navigation and retained forms 
   await expect(page.getByText('当前源码分析报告',{exact:true})).toBeVisible();
   await expect(page.getByRole('button',{name:'复现成功',exact:true})).toBeHidden();
   await expect(page.getByText('代码差异',{exact:true}).first()).toBeHidden();
-  await flow.getByRole('button',{name:'复现结果',exact:false}).click();
-  await expect(page.getByRole('button',{name:'复现成功',exact:true})).toBeVisible();
+  await flow.getByRole('button',{name:'问题与修复',exact:false}).click();
+  await expect(page.getByRole('button',{name:'复现成功',exact:true})).toHaveCount(0);
+  await expect(page.getByRole('button',{name:'未能复现',exact:true})).toBeVisible();
   await expect(page.getByText('当前源码分析报告',{exact:true})).toBeHidden();
-  await page.getByLabel('复现说明（选填）').fill('正在核验，请保留草稿');
-  await flow.getByRole('button',{name:'修复',exact:false}).click();
+  await page.getByLabel('处置说明（确认误报时必填）').fill('正在核验，请保留草稿');
+  await flow.getByRole('button',{name:'5 修复',exact:true}).click();
   await expect(page.getByText('代码差异',{exact:true}).first()).toBeVisible();
   await expect(page.getByRole('button',{name:'仅重试发布',exact:true})).toBeHidden();
   await flow.getByRole('button',{name:'PR',exact:false}).click();
@@ -113,10 +114,10 @@ for (const width of [1920, 1440, 390]) test(`task navigation and retained forms 
   await page.getByRole('button',{name:'仅重试发布',exact:true}).click();
   await expect.poll(() => publicationRetries).toBe(1);
   await expect(page.getByText('等待发布',{exact:true})).toBeVisible();
-  await flow.getByRole('button',{name:'复现结果',exact:false}).click();
-  await expect(page.getByLabel('复现说明（选填）')).toHaveValue('正在核验，请保留草稿');
-  await page.getByRole('button',{name:'复现成功',exact:true}).click();
-  await expect.poll(() => finding.status).toBe('confirmed');
+  await flow.getByRole('button',{name:'问题与修复',exact:false}).click();
+  await expect(page.getByLabel('处置说明（确认误报时必填）')).toHaveValue('正在核验，请保留草稿');
+  await page.getByRole('button',{name:'未能复现',exact:true}).click();
+  await expect.poll(() => finding.status).toBe('not_reproduced');
   await flow.getByRole('button',{name:'环境准备',exact:false}).click();
   await expect(page.getByLabel('测试 / CLI 命令')).toHaveValue('pytest -q');
 

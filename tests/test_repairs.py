@@ -182,9 +182,10 @@ def pending(service):  # noqa: F811
 
 
 def confirm(pending):
+    """Compatibility helper for repair tests: queue a validated candidate, no owner feedback."""
     repairs, analyses, report, _, _ = pending
     finding = report["findings"][0]
-    analyses.feedback(report["id"], finding["id"], finding["version"], "confirmed", "", True)
+    repairs.enqueue(report["id"], finding["id"])
     return repairs.list(report["env_id"])[0]
 
 
@@ -193,21 +194,25 @@ def enable(repairs):
     return repairs.configure(settings["version"], True)
 
 
-def test_feedback_atomically_queues_one_repair_and_upgrade_backfills_without_reconfirmation(
+def test_analysis_candidates_backfill_once_after_enabling_without_confirmation(
     pending,
 ):
     repairs, analyses, report, _, _ = pending
     analyses.repairer = None
     finding = report["findings"][0]
-    analyses.feedback(report["id"], finding["id"], 1, "confirmed", "", True)
     assert repairs.list(report["env_id"]) == []
+    repairs.backfill()
+    assert repairs.list(report["env_id"]) == []
+    enable(repairs)
     repairs.backfill()
     original = repairs.list(report["env_id"])[0]
     repairs.backfill()
     assert len(repairs.list(report["env_id"])) == 1
     assert repairs.enqueue(report["id"], finding["id"]) == original["id"]
-    assert original["context"]["confirmation"]["note"] == ""
-    assert original["status"] == "queued" and not original["enabled"]
+    assert original["context"]["confirmation"] is None
+    assert original["context"]["repair_origin"]["kind"] == "analysis_review"
+    assert original["status"] == "queued" and original["enabled"]
+    repairs.configure(repairs.settings()["version"], False)
     assert not asyncio.run(repairs.tick())
     assert repairs.engine.models == []
 
@@ -1790,7 +1795,7 @@ def test_new_regression_cannot_change_package_initialization(pending):
         workspace.prepare(Patch.model_validate(patch))
 
 
-def test_api_requires_owner_csrf_and_explicit_feedback_before_queueing(tmp_path):
+def test_api_requires_owner_csrf_and_global_enable_without_manual_feedback(tmp_path):
     app = create_app(
         tmp_path / "api.db", start_worker=False, github_client=Remote().client,
         credential_vault=MemoryVault(), execution_runtime=RepairRuntime(),
@@ -1820,15 +1825,19 @@ def test_api_requires_owner_csrf_and_explicit_feedback_before_queueing(tmp_path)
         assert app.state.repairs.list(env["id"]) == []
         assert client.post(url, headers=headers, json={
             "version": 1, "decision": "confirmed", "personally_reproduced": True,
-        }).status_code == 200
-        tasks = client.get(f"/api/environments/{env['id']}/repairs").json()
-        assert len(tasks) == 1 and tasks[0]["status"] == "queued"
-        assert not tasks[0]["enabled"]
-        notice = client.get("/api/analysis-notifications").json()[0]
-        assert notice["repair_queued"] == 1 and not notice["repairs_enabled"]
-        assert TOKEN_A not in json.dumps(tasks)
+        }).status_code == 409
         assert client.post("/api/repair-settings", headers=headers, json={
             "version": 1, "enabled": True,
+        }).status_code == 200
+        app.state.repairs.backfill()
+        tasks = client.get(f"/api/environments/{env['id']}/repairs").json()
+        assert len(tasks) == 1 and tasks[0]["status"] == "queued"
+        assert tasks[0]["enabled"]
+        notice = client.get("/api/analysis-notifications").json()[0]
+        assert notice["repair_queued"] == 1 and notice["repairs_enabled"]
+        assert TOKEN_A not in json.dumps(tasks)
+        assert client.post("/api/repair-settings", headers=headers, json={
+            "version": 2, "enabled": True,
         }).status_code == 200
         assert asyncio.run(app.state.repairs.tick())
         result = client.get("/api/repairs/" + tasks[0]["id"]).json()
