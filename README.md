@@ -19,8 +19,10 @@
 当前自动补丁范围为 Python 实现和新增 Python 回归，其他文件拒绝。详见[维护范围与操作](docs/system-maintenance-81.md)及[验证记录](docs/system-maintenance-81-validation.md)。
 
 第五阶段（#82）已在基于最新主干的 `feature/workbench-release-82` 实现发布清单、独立合并/部署授权、排空备份、固定版本就绪核验、独立监护、离线事件补交和保留新数据的代码回滚。
-8 个定向后端用例、1 个桌面/手机界面冒烟、真实进程隔离发布/监护重启/回滚演练、构建、Ruff 和独立 review 已通过；已提交中文 PR #93，未合并或部署。不运行全量回归；默认无合并/部署授权。
-详见[发布与恢复操作](docs/workbench-release-82.md)及[验证记录](docs/workbench-release-82-validation.md)。第六阶段完整验收尚未实施。
+8 个定向后端用例、1 个桌面/手机界面冒烟、真实进程隔离发布/监护重启/回滚演练、构建、Ruff 和独立 review 已通过；PR #93 已于 2026-10-29（Asia/Shanghai）合并为 `599de39`，部署未核验。不运行全量回归；默认无合并/部署授权。
+详见[发布与恢复操作](docs/workbench-release-82.md)及[验证记录](docs/workbench-release-82-validation.md)。
+
+第六阶段（#83）已在 `feature/central-acceptance-83` 实现隔离联合验收、可复现结果和跨版本原步骤验证关联；固定 16 个离线用例、代码及文档独立 review 通过。中文 PR 待提交，未合并、未部署、未改变正式权限。详见[验收矩阵、指标及分步启用](docs/central-acceptance-83.md)；父 #77 保持开放，不把隔离通过视为生产完整目标已达成。
 
 单用户、本地运行的多 Agent 工作台，使用真实仓库源码、隔离执行记录与模型分析，
 支持人工复现确认、持久化任务和受控自动修复。

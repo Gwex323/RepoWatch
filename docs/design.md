@@ -59,11 +59,20 @@ original-DB readiness, independent bounded supervision, offline event delivery,
 data-preserving code rollback and source-owned original-step resumption.
 Eight focused backend cases, one desktop/mobile browser smoke, build, Ruff and
 independent review passed. The native-process release/restart/rollback drill
-passed. Chinese delivery PR #93 is open; no merge, production deployment or
-enablement is claimed. No full regression was
+passed. Chinese delivery PR #93 was merged as `599de39` on 2026-10-29
+(Asia/Shanghai); production deployment and enablement are unverified. No full regression was
 run, per owner request. See the [release policy](workbench-release-82.md) and
 [validation](workbench-release-82-validation.md).
-Stage 6 (#83) remains unimplemented. See the
+Stage 6 (#83) is implemented on `feature/central-acceptance-83`, based on
+`599de39`: an offline cross-stage journey, a fixed 16-case acceptance runner,
+portable evidence, staged enablement/rollback instructions and narrowly bound
+post-release verification across workbench versions. All 16 focused cases,
+Ruff and independent code/documentation review passed. Chinese PR delivery
+remains pending; this branch is not merged or deployed. No production
+database, permissions, live model or GitHub business writes were exercised.
+The isolated scope and remaining live/native integration limits are explicit;
+parent #77 stays open. See the [acceptance matrix](central-acceptance-83.md).
+See the
 [stage 2 policy](workflow-recovery-79.md) and [validation](workflow-recovery-79-validation.md).
 Merge does not establish deployment to the running workbench. See
 [stage 1 validation](system-fault-records-78-validation.md).

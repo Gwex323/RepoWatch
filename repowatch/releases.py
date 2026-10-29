@@ -382,6 +382,13 @@ class Releases:
                 "UPDATE release_resumptions SET state='verifying_original' WHERE release_id=? "
                 "AND state='dispatching'", (manifest.id,)).rowcount:
             raise Conflict("release_resume_receipt_changed")
+        db.execute(
+            "INSERT INTO release_events(id,release_id,kind,reason,created,details) "
+            "VALUES(?,?,'source_resume_authorized',NULL,?,?)",
+            ("resume:" + manifest.id, manifest.id, time.time(), json.dumps({
+                "occurrence_id": occurrence["id"], "flow": occurrence["flow"],
+                "task_id": source_id, "workbench_version": self.store.workbench_version,
+            })))
 
     def state(self):
         with self.store.connection() as db:

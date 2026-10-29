@@ -87,6 +87,34 @@ def require_source_authorization(db, flow, task_id):
             raise Conflict("release_account_changed")
 
 
+def verifies_released_source(db, occurrence, event):
+    """Only a source success in its explicitly dispatched release can cross versions."""
+    if (event.get("state") != "resolved" or event.get("attempt") is None
+            or occurrence["attempt"] is None or event["attempt"] <= occurrence["attempt"]):
+        return False
+    rows = db.execute(
+        "SELECT e.created,e.details FROM release_resumptions r "
+        "JOIN maintenance_tasks m ON m.id=r.task_id "
+        "JOIN release_events e ON e.release_id=r.release_id "
+        "AND e.kind='source_resume_authorized' "
+        "WHERE r.state='verifying_original' AND m.occurrence_id=? "
+        "AND EXISTS(SELECT 1 FROM release_events d WHERE d.release_id=r.release_id "
+        "AND d.kind='deployed')", (occurrence["id"],)).fetchall()
+    for row in rows:
+        proof = json.loads(row["details"])
+        if (row["created"] > event["occurred"]
+                or proof != {"occurrence_id": occurrence["id"], "flow": event["flow"],
+                             "task_id": event["task_id"],
+                             "workbench_version": event.get("workbench_version")}):
+            continue
+        try:
+            require_source_authorization(db, event["flow"], event["task_id"])
+        except Conflict:
+            return False
+        return True
+    return False
+
+
 @contextmanager
 def existing_database(path):
     path = Path(path)
