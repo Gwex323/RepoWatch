@@ -11,6 +11,7 @@ from test_execution import service as execution_service
 from test_model_providers import catalog, choice, configure, create, provider  # noqa: F401
 from test_repairs import pending  # noqa: F401
 from test_repository_analysis import ReviewModel, final_message
+from test_system_faults import attempt, ledger, source_event  # noqa: F401
 from test_workflow_recovery import failed_repair
 
 from repowatch.app import create_app
@@ -206,6 +207,38 @@ def test_safe_input_usage_durable_outcome_and_notifications(coordination):
     assert coordination.notifications() == notices and len(notices) == 1
     coordination.acknowledge(notices[0]["id"])
     assert not coordination.notifications()
+
+
+@pytest.mark.parametrize("action", ["blocked", "request_authorization", "wait"])
+def test_source_success_reconciles_jobs_and_supersedes_notifications(ledger, action):  # noqa: F811
+    store, faults, (_, _, task) = ledger
+    service = Coordinator(store, Model(action), SimpleNamespace())
+    service.configure(version=1, enabled=True)
+    attempt(store, task)
+    source_event(store, task, "failure", {"code": "analysis_provider_unreachable"})
+    faults.tick()
+    asyncio.run(service.tick())
+    assert service.list()[0]["state"] == {
+        "blocked": "blocked", "request_authorization": "needs_authorization", "wait": "waiting",
+    }[action]
+    attempt(store, task, 2)
+    source_event(store, task, "fault_verified", "analysis_report_validated")
+    with store.connection() as db:
+        db.execute("UPDATE repository_analyses SET status='completed' WHERE id=?", (task,))
+    service.claim()
+    assert service.list()[0]["state"] not in {"completed", "cancelled"}
+    if action == "wait":
+        # Also heal receipts left by the old completion-before-ingestion cancellation race.
+        with store.connection() as db:
+            db.execute("UPDATE coordination_jobs SET state='cancelled',"
+                       "error='coordination_source_inactive'")
+    faults.tick()
+    service.configure(version=2, enabled=False)
+    service.claim()
+    service.claim()
+    assert service.list()[0]["state"] == "completed"
+    assert [notice["state"] for notice in service.notifications()] == ["completed"]
+    assert len(service.model.calls) == 1
 
 
 def test_sdk_structured_plan_has_no_tools_or_handoffs(coordination):

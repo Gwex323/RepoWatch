@@ -44,20 +44,30 @@ Status updated: 2026-10-29
   event delivery, data-preserving rollback and original-adapter resumption.
   Eight focused backend cases, one desktop/mobile smoke, frontend build,
   Ruff and independent review passed. The native-process release/restart/rollback
-  drill passed; Chinese delivery PR #93 was merged as `599de39` on 2026-10-29
-  (Asia/Shanghai). Production deployment and enablement are unverified.
+  drill passed; PR #93 was merged as `599de39` on 2026-10-29 (Asia/Shanghai).
+  Production deployment and default enablement remain unverified.
   No full regression was run.
   See the [release policy](workbench-release-82.md) and
   [validation](workbench-release-82-validation.md).
-  Full acceptance (#83) is implemented on `feature/central-acceptance-83`,
-  based on `599de39`: a cross-stage offline journey, a fixed 16-case runner,
-  machine-readable evidence, a specification matrix, staged operations and
-  precise cross-version source verification. All 16 focused cases, Ruff and
-  independent code/documentation review passed. Chinese delivery PR #94
-  is open; this branch is not merged or deployed. No full regression,
-  production database/permission changes, live model calls or GitHub business
-  writes were performed. Isolated acceptance is not production acceptance;
-  parent #77 remains open. See the [matrix and limits](central-acceptance-83.md).
+  Full acceptance (#83) implemented a cross-stage offline journey, a fixed
+  16-case runner, portable evidence, a specification matrix, staged operations
+  and precise cross-version source verification on `feature/central-acceptance-83`.
+  All 16 focused cases, Ruff and independent code/documentation review passed.
+  PR #94 was merged as `8930246` at 2026-10-29 15:39:59 (Asia/Shanghai), closing
+  #83. Production deployment and enablement are not established; parent #77
+  remains open. See the [matrix and limits](central-acceptance-83.md).
+  Whole-chain review found four closure defects and 12 test-contract failures.
+  Repair sub-Issue #95 under #77 is implemented on
+  `feature/central-review-fixes-95` from `599de39`; targeted validation and diff
+  self-review passed, not merged or deployed. It fixes maintenance evidence
+  invalidation, coordinator/notification closure, failed first-deploy cleanup
+  and original-verification termination, and adapts the two stale test fixtures.
+  The release-source proof from PR #94 is reused with bounded, authorization-
+  checked delayed-success handling. PR #96 now integrates main commit `8930246`
+  with the stage 6 runner and stricter blocked-state, original-window and
+  per-release authorization checks preserved. The repair remains unmerged and
+  undeployed; conflict resolution does not change the running workbench. See
+  [the repair record](central-review-fixes-95-validation.md).
   A merged change is not proof
   that the running workbench has been deployed.
 - Stage 1 validation recorded 1024 passing, 35 failing and 12 skipped backend

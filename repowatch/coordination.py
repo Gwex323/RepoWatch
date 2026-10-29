@@ -126,6 +126,17 @@ def source_budget(db, occurrence, *, reserve=False, capacity=False, maintenance=
             )
 
 
+def source_state(db, occurrence):
+    table, column = {
+        "analysis": ("repository_analyses", "status"),
+        "repair": ("repair_tasks", "status"),
+        "acceptance": ("scope_acceptance_runs", "state"),
+    }.get(occurrence["flow"], (None, None))
+    row = db.execute(f"SELECT {column} FROM {table} WHERE id=?",
+                     (occurrence["task_id"],)).fetchone() if table else None
+    return row[0] if row else None
+
+
 def safe_plan(value):
     value = {
         k: v
@@ -398,12 +409,14 @@ class Coordinator:
         if occurrence and occurrence["state"] in {"resolved", "dismissed"}:
             state = "completed" if occurrence["state"] == "resolved" else "cancelled"
             error = None
-        elif error == "coordination_source_inactive":
+        elif (error == "coordination_source_inactive" and occurrence
+              and source_state(db, occurrence) in {"cancelled", "stale"}):
             state = "cancelled"
         if not db.execute(
             "UPDATE coordination_jobs SET state=?,version=version+1,plan=COALESCE(?,plan),"
             "error=?,receipt=COALESCE(?,receipt),updated=? WHERE id=? AND owner=? "
-            "AND state IN ('diagnosing','waiting')",
+            "AND (state IN ('diagnosing','waiting','blocked','needs_authorization') "
+            "OR (state='cancelled' AND error='coordination_source_inactive'))",
             (
                 state,
                 json.dumps(plan) if plan else None,
@@ -437,7 +450,9 @@ class Coordinator:
 
     def _reconcile(self, db):
         jobs = db.execute(
-            "SELECT * FROM coordination_jobs WHERE state IN ('diagnosing','waiting')"
+            "SELECT * FROM coordination_jobs WHERE state IN "
+            "('diagnosing','waiting','blocked','needs_authorization') "
+            "OR (state='cancelled' AND error='coordination_source_inactive')"
         ).fetchall()
         for job in jobs:
             occurrence = db.execute(
@@ -454,15 +469,16 @@ class Coordinator:
                 if time.time() >= job["created"] + recovery.MAX_SECONDS:
                     self._finish(db, job, "blocked", error="source_verification_timeout")
                     continue
+                # Source completion can precede consumption of its verified-success event.
+                state = source_state(db, occurrence)
+                if state in {"completed", "pr_created"}:
+                    continue
                 try:
                     source_budget(db, occurrence)
                 except Conflict as exc:
                     self._finish(db, job, "blocked", error=str(exc))
                     continue
-                task = db.execute(
-                    "SELECT status FROM repair_tasks WHERE id=?", (occurrence["task_id"],)
-                ).fetchone()
-                if task and task[0] in {"failed", "interrupted", "cancelled", "stale"}:
+                if state in {"failed", "interrupted", "cancelled", "stale"}:
                     self._finish(db, job, "blocked", error="source_not_verified")
 
     def _release(self, job):
@@ -657,7 +673,8 @@ class Coordinator:
                     "SELECT n.id,n.state,n.created,j.id job_id,j.error,o.fault_id "
                     "FROM coordination_notifications n "
                     "JOIN coordination_jobs j ON j.id=n.job_id JOIN system_fault_occurrences o "
-                    "ON o.id=j.occurrence_id WHERE n.seen=0 AND "
+                    "ON o.id=j.occurrence_id WHERE n.seen=0 AND n.version=j.version "
+                    "AND n.state=j.state AND "
                     + SystemFaults._scope(db)
                     + " ORDER BY n.id DESC LIMIT 100"
                 )

@@ -18,6 +18,7 @@ from .release_state import (
     idle,
     locked,
     read_json,
+    require_source_authorization,
     schema,
 )
 from .store import Conflict
@@ -189,8 +190,8 @@ class ReleaseManager:
                     Supervisor(root).status(manifest, "blocked", reason)
                 elif switched:
                     try:
-                        self._rollback(manifest, path, previous, old_path, journal)
-                        self._complete(manifest, "rolled_back")
+                        state = self._rollback(manifest, path, previous, old_path, journal)
+                        self._complete(manifest, state)
                     except Exception as rollback_error:
                         Supervisor(root).status(
                             manifest, "blocked",
@@ -206,12 +207,17 @@ class ReleaseManager:
                                    "WHERE id=1 AND draining=?", (manifest.id,))
 
     def _rollback(self, failed, failed_path, previous, old_path, journal):
+        root = Path(failed.state_root)
         if not previous:
-            raise Conflict("release_previous_manifest_required")
+            self.runtime_factory(failed, failed_path).stop()
+            atomic_json(root / "selection.json", {})
+            journal.event(failed.id, "stopped", "release_startup_failed",
+                          event_key=failed.id + ":stopped", commit=failed.commit)
+            Supervisor(root).status(failed, "blocked", "release_startup_failed")
+            return "stopped"
         previous.validate_files(rollback=True)
         local_authorization(previous)
         self.runtime_factory(failed, failed_path).stop()
-        root = Path(failed.state_root)
         atomic_json(root / "selection.json",
                     {"current": old_path, "previous": previous.previous})
         runtime = self.runtime_factory(previous, old_path)
@@ -221,6 +227,7 @@ class ReleaseManager:
                       event_key=failed.id + ":rollback",
                       commit=previous.commit, previous=previous.id)
         Supervisor(root).status(previous, "healthy")
+        return "rolled_back"
 
     def rollback(self, current_path):
         current = Manifest.load(current_path)
@@ -329,14 +336,7 @@ class ReleaseManager:
                     Supervisor(root).status(manifest, "healthy")
                     state = "healthy"
                 except Exception:
-                    if previous:
-                        self._rollback(manifest, path, previous, previous_path, journal)
-                        state = "rolled_back"
-                    else:
-                        runtime.stop()
-                        atomic_json(root / "selection.json", {})
-                        Supervisor(root).status(manifest, "blocked", "release_startup_failed")
-                        state = "stopped"
+                    state = self._rollback(manifest, path, previous, previous_path, journal)
             else:
                 raise Conflict("release_pending_selection_changed")
             self._complete(manifest, state)
@@ -367,7 +367,7 @@ class Releases:
                 or not config or not config[0] or not occurrence
                 or occurrence["task_id"] != source_id
                 or occurrence["state"] not in {"pending", "blocked"}
-                or task["basis"] != self.maintenance.basis(db, occurrence)
+                or not self.maintenance.matches_basis(db, occurrence, task["basis"])
                 or self.store.draining(db)):
             raise Conflict("release_source_basis_changed")
         source_budget(db, occurrence, capacity=True, maintenance=True)
@@ -438,7 +438,7 @@ class Releases:
                 if (not task
                         or task["state"] not in {"pr_created", "linked_pr", "waiting_deployment"}
                         or not occurrence or occurrence["state"] not in {"blocked", "pending"}
-                        or task["basis"] != self.maintenance.basis(db, occurrence)
+                        or not self.maintenance.matches_basis(db, occurrence, task["basis"])
                         or not db.execute("SELECT 1 FROM system_fault_occurrences o WHERE o.id=? "
                                           "AND " + SystemFaults._scope(db),
                                           (occurrence["id"],)).fetchone()):
@@ -493,23 +493,65 @@ class Releases:
             db.execute("UPDATE release_resumptions SET state=?,reason=? WHERE release_id=?",
                        (state, reason, manifest.id))
 
+    def _resumption_blocker(self, db, row, occurrence):
+        from .coordination import source_budget, source_state
+
+        if not occurrence:
+            return "release_source_basis_changed"
+        try:
+            require_source_authorization(db, occurrence["flow"], occurrence["task_id"],
+                                         release_id=row["release_id"])
+            state = source_state(db, occurrence)
+            if state in {"failed", "interrupted", "cancelled", "stale"}:
+                return "release_source_" + state
+            if state is None:
+                return "release_source_basis_changed"
+            # Completion is not proof, but the collector may still be processing success.
+            if state not in {"completed", "pr_created"}:
+                source_budget(db, occurrence, capacity=state != "running", maintenance=True)
+        except Conflict as exc:
+            return str(exc)
+        root = db.execute(
+            "SELECT r.*,a.started FROM recovery_roots r LEFT JOIN recovery_actions a "
+            "ON a.id=r.action_id WHERE r.id=?", (row["root_id"],)).fetchone()
+        elapsed = (max(0, time.time() - root["started"])
+                   if root and root["started"] is not None else 0)
+        if (not root or root["stop_reason"]
+                or root["seconds"] + elapsed >= recovery.MAX_SECONDS
+                or state not in {"running", "completed", "pr_created"} and (
+                    root["requests"] >= recovery.MAX_REQUESTS
+                    or root["tokens"] >= recovery.MAX_TOKENS
+                    or root["resumptions"] >= recovery.MAX_RESUMPTIONS)):
+            return "release_original_budget_exhausted"
+        if time.time() >= row["created"] + recovery.MAX_SECONDS:
+            return "release_source_verification_timeout"
+        return None
+
     def reconcile_resumptions(self):
         with self.store.connection() as db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute(
                 "UPDATE release_resumptions SET state='blocked',"
                 "reason='release_resume_receipt_unknown' "
                 "WHERE state='dispatching' AND created<?", (time.time() - 120,))
             for row in db.execute(
-                    "SELECT r.release_id,o.state FROM release_resumptions r "
-                    "JOIN maintenance_tasks m ON m.id=r.task_id "
-                    "JOIN system_fault_occurrences o ON o.id=m.occurrence_id "
-                    "WHERE r.state='verifying_original'").fetchall():
-                if row["state"] in {"resolved", "dismissed"}:
-                    db.execute("UPDATE release_resumptions SET state=?,reason=? WHERE release_id=?",
-                               ("completed" if row["state"] == "resolved" else "blocked",
-                                "source_verified" if row["state"] == "resolved"
-                                else "source_dismissed",
-                                row["release_id"]))
+                    "SELECT r.*,m.occurrence_id,m.root_id FROM release_resumptions r "
+                    "LEFT JOIN maintenance_tasks m ON m.id=r.task_id "
+                    "WHERE r.state IN ('verifying_original','blocked')").fetchall():
+                occurrence = db.execute("SELECT * FROM system_fault_occurrences WHERE id=?",
+                                        (row["occurrence_id"],)).fetchone()
+                if occurrence and occurrence["state"] in {"resolved", "dismissed"}:
+                    state = "completed" if occurrence["state"] == "resolved" else "blocked"
+                    reason = "source_verified" if state == "completed" else "source_dismissed"
+                elif row["state"] == "blocked":
+                    continue
+                else:
+                    reason = self._resumption_blocker(db, row, occurrence)
+                    if not reason:
+                        continue
+                    state = "blocked"
+                db.execute("UPDATE release_resumptions SET state=?,reason=? WHERE release_id=?",
+                           (state, reason, row["release_id"]))
 
     async def run(self):
         while not self.closing.is_set():

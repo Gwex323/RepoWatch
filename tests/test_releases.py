@@ -14,12 +14,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 from test_github_accounts import TOKEN_A, MemoryVault
+from test_system_faults import attempt, source_event
 
 from repowatch import recovery
 from repowatch.analysis_basis import execution_trigger
 from repowatch.app import create_app
 from repowatch.diagnosis import fingerprint
-from repowatch.fault_contract import FaultEvent
 from repowatch.github_accounts import GitHubAccounts, GitHubClient
 from repowatch.release_github import ReleaseAuthority
 from repowatch.release_manifest import Manifest, asset_files, git
@@ -35,7 +35,7 @@ from repowatch.release_state import (
 from repowatch.releases import ReleaseManager, Releases, data_binding
 from repowatch.repository_analysis import Analyses
 from repowatch.store import Conflict, Store
-from repowatch.system_faults import SystemFaults, enqueue
+from repowatch.system_faults import SystemFaults
 from repowatch.task_scopes import ensure_scope
 
 BINDING = {"account_id": 101, "account_version": 1, "repository_id": 99}
@@ -255,6 +255,31 @@ def test_drain_backup_and_probe_block_without_mutating_original_budgets(release)
     assert len(list((release.root / "backups").glob("*.db"))) >= 2
 
 
+@pytest.mark.parametrize("cleanup_error", [None, "release_process_identity_changed"])
+def test_first_deployment_failure_cleans_only_identified_candidate(release, monkeypatch,
+                                                                  cleanup_error):
+    release.live.failure = lambda _: True
+    if cleanup_error:
+        def stop(_):
+            raise Conflict(cleanup_error)
+
+        monkeypatch.setattr(release.Runtime, "stop", stop)
+    with pytest.raises(Conflict, match="release_health_mismatch"):
+        release.manager.deploy(release.path)
+    assert release.live.starts == 1
+    with release.store.connection() as db:
+        assert bool(release.store.draining(db)) == bool(cleanup_error)
+    assert bool(read_json(release.root / "pending.json")) == bool(cleanup_error)
+    status = read_json(release.root / "status.json")
+    assert status["state"] == "blocked"
+    if cleanup_error:
+        assert release.live.alive == release.manifest.id
+        assert status["reason"] == cleanup_error
+    else:
+        assert release.live.stops == 1 and release.live.alive is None
+        assert read_json(release.root / "selection.json") == {}
+
+
 def test_health_rejects_http_200_wrong_version_assets_and_unprotected_api(release, monkeypatch):
     manifest = release.manifest
     record = {**process_identity(os.getpid()), "token": "private", "release_id": manifest.id}
@@ -402,22 +427,19 @@ def test_rollback_keeps_new_writes_and_interrupted_release_can_reconcile(release
     assert release.store.setting("post_release_write") == "retained"
 
 
-def test_release_resumes_only_real_original_adapter_with_budget_and_authorization(
-    release, monkeypatch,
-):
+@pytest.fixture
+def resumption(release, monkeypatch):
     store = release.store
-    source_id, repo, env = analysis(store)
+    source_id, _, _ = analysis(store)
     now = time.time()
-    with store.connection() as db:
-        enqueue(db, FaultEvent(source_event_key="release:original", flow="analysis",
-                              task_id=source_id, root_task_id=source_id, repo_id=repo, env_id=env,
-                              account_id=101, source_table="analysis_events", source_id="fixture",
-                              occurred=now, category="protocol",
-                              code="analysis_scope_read_not_followed"))
+    attempt(store, source_id)
+    failure = source_event(store, source_id, "failure",
+                           {"code": "analysis_scope_read_not_followed"})
     SystemFaults(store).tick()
     with store.connection() as db:
         occurrence = db.execute("SELECT id FROM system_fault_occurrences "
-                                "WHERE source_event_key='release:original'").fetchone()[0]
+                                "WHERE source_event_key=?",
+                                (f"analysis_events:{failure}",)).fetchone()[0]
         db.execute("UPDATE system_fault_occurrences SET state='blocked' WHERE id=?", (occurrence,))
         db.execute("UPDATE maintenance_configuration SET enabled=1 WHERE id=1")
         db.execute("INSERT INTO recovery_roots(id,requests,seconds) VALUES(?,2,10)", (source_id,))
@@ -434,13 +456,22 @@ def test_release_resumes_only_real_original_adapter_with_budget_and_authorizatio
     grant(store, manifest, resume=True)
     Journal(release.root).event(manifest.id, "deployed", event_key=manifest.id + ":deployed")
     Journal(release.root).deliver(store)
-    maintenance = SimpleNamespace(basis=lambda *_: "bound")
+    maintenance = SimpleNamespace(
+        matches_basis=lambda _db, _occurrence, expected: expected == "bound")
     analyses = Analyses(SimpleNamespace(store=store),
                         SimpleNamespace(status=lambda: {"enabled": True}))
     service = Releases(store, maintenance, analyses, None, None, manifest)
     monkeypatch.setattr(NativeRuntime, "health", lambda _: {"ready": True})
     service.resume_original()
     service.resume_original()
+    return service, source_id, occurrence
+
+
+def test_release_resumes_only_real_original_adapter_with_budget_and_authorization(
+    release, resumption,
+):
+    service, source_id, occurrence = resumption
+    store, manifest = release.store, service.manifest
     with store.connection() as db:
         row = db.execute("SELECT * FROM release_resumptions").fetchone()
         assert row["state"] == "verifying_original", row["reason"]
@@ -456,13 +487,119 @@ def test_release_resumes_only_real_original_adapter_with_budget_and_authorizatio
         db.execute("UPDATE recovery_roots SET requests=? WHERE id=?",
                    (recovery.MAX_REQUESTS, source_id))
         db.execute("UPDATE repository_analyses SET status='failed' WHERE id=?", (source_id,))
+    service.reconcile_resumptions()
+    with store.connection() as db:
+        row = db.execute("SELECT * FROM release_resumptions").fetchone()
+        assert row["state"] == "blocked"
+        assert row["reason"] == "release_resume_authorization_revoked"
+        with pytest.raises(Conflict, match="authorization_revoked"):
+            require_source_authorization(db, "analysis", source_id)
     exhausted = altered(manifest, pr=2)
     grant(store, exhausted, resume=True)
     Journal(release.root).event(exhausted.id, "deployed")
     Journal(release.root).deliver(store)
     with store.connection() as db:
         db.execute("UPDATE maintenance_tasks SET remote=?", (json.dumps({"number": 2}),))
-    Releases(store, maintenance, analyses, None, None, exhausted).resume_original()
+    Releases(store, service.maintenance, service.analyses, None, None, exhausted).resume_original()
     with store.connection() as db:
         assert db.execute("SELECT reason FROM release_resumptions WHERE release_id=?",
                           (exhausted.id,)).fetchone()[0] == "release_original_budget_exhausted"
+
+
+@pytest.mark.parametrize("stop", ["failed", "cancelled", "stale", "account", "budget",
+                                  "deadline", "timeout"])
+def test_original_verification_stops_without_replaying_or_resetting(release, resumption, stop):
+    service, source_id, occurrence = resumption
+    reasons = {"account": "release_account_changed", "budget": "release_original_budget_exhausted",
+               "deadline": "coordination_source_budget_exhausted",
+               "timeout": "release_source_verification_timeout"}
+    with release.store.connection() as db:
+        if stop in {"failed", "cancelled", "stale"}:
+            db.execute("UPDATE repository_analyses SET status=? WHERE id=?", (stop, source_id))
+        elif stop == "account":
+            db.execute("UPDATE github_accounts SET version=version+1")
+        elif stop == "budget":
+            db.execute("UPDATE recovery_roots SET requests=? WHERE id=?",
+                       (recovery.MAX_REQUESTS, source_id))
+        elif stop == "deadline":
+            db.execute("UPDATE analysis_report_recovery SET deadline=0 WHERE analysis_id=?",
+                       (source_id,))
+        else:
+            db.execute("UPDATE release_resumptions SET created=?",
+                       (time.time() - recovery.MAX_SECONDS - 1,))
+        before = db.execute("SELECT version FROM repository_analyses WHERE id=?",
+                            (source_id,)).fetchone()[0]
+    service.reconcile_resumptions()
+    service.resume_original()
+    service.reconcile_resumptions()
+    with release.store.connection() as db:
+        row = db.execute("SELECT * FROM release_resumptions").fetchone()
+        assert (row["state"], row["reason"]) == (
+            "blocked", reasons.get(stop, "release_source_" + stop))
+        assert db.execute("SELECT version FROM repository_analyses WHERE id=?",
+                          (source_id,)).fetchone()[0] == before
+        assert db.execute("SELECT requests FROM recovery_roots WHERE id=?",
+                          (source_id,)).fetchone()[0] == (recovery.MAX_REQUESTS if stop == "budget"
+                                                         else 2)
+        assert db.execute("SELECT state FROM system_fault_occurrences WHERE id=?",
+                          (occurrence,)).fetchone()[0] != "resolved"
+
+
+@pytest.mark.parametrize("verification", ["original", "released", "wrong_version", "wrong_model",
+                                          "revoked"])
+def test_original_completion_waits_for_verified_event_and_accepts_delayed_collection(
+    release, resumption, monkeypatch, verification,
+):
+    service, source_id, occurrence = resumption
+    with release.store.connection() as db:
+        db.execute("UPDATE repository_analyses SET status='running' WHERE id=?", (source_id,))
+        db.execute("UPDATE recovery_roots SET requests=? WHERE id=?",
+                   (recovery.MAX_REQUESTS, source_id))
+    service.reconcile_resumptions()
+    with release.store.connection() as db:
+        assert db.execute("SELECT state FROM release_resumptions").fetchone()[0] == (
+            "verifying_original")
+        db.execute("UPDATE repository_analyses SET status='completed' WHERE id=?", (source_id,))
+    service.reconcile_resumptions()
+    with release.store.connection() as db:
+        assert db.execute("SELECT state FROM release_resumptions").fetchone()[0] == (
+            "verifying_original")
+    version = ("build1" if verification == "original" else "unrelated-build"
+               if verification == "wrong_version" else release.store.workbench_version)
+    attempt(release.store, source_id, 2, workbench_version=version)
+    if verification == "wrong_model":
+        source_event(release.store, source_id, "model_configuration",
+                     {"role": "repository_analyst", "model": "unrelated-model",
+                      "model_version": 99})
+    source_event(release.store, source_id, "fault_verified", "analysis_report_validated")
+    now = time.time()
+    monkeypatch.setattr("repowatch.releases.time.time", lambda: now + recovery.MAX_SECONDS + 1)
+    service.reconcile_resumptions()
+    with release.store.connection() as db:
+        assert db.execute("SELECT reason FROM release_resumptions").fetchone()[0] == (
+            "release_source_verification_timeout")
+    if verification == "revoked":
+        replacement = altered(service.manifest, pr=2)
+        grant(release.store, replacement, resume=True)
+        with release.store.connection() as db:
+            db.execute("UPDATE release_authorizations SET revoked=1 WHERE target=?",
+                       (service.manifest.id,))
+            db.execute("INSERT INTO release_resumptions VALUES(?,?,'verifying_original',NULL,?)",
+                       (replacement.id, service.manifest.maintenance_task, time.time()))
+            require_source_authorization(db, "analysis", source_id)
+            with pytest.raises(Conflict, match="authorization_revoked"):
+                require_source_authorization(db, "analysis", source_id,
+                                             release_id=service.manifest.id)
+    SystemFaults(release.store).tick()
+    service.reconcile_resumptions()
+    with release.store.connection() as db:
+        row = db.execute("SELECT * FROM release_resumptions WHERE release_id=?",
+                         (service.manifest.id,)).fetchone()
+        if verification in {"original", "released"}:
+            assert (row["state"], row["reason"]) == ("completed", "source_verified")
+            assert db.execute("SELECT state FROM system_fault_occurrences WHERE id=?",
+                              (occurrence,)).fetchone()[0] == "resolved"
+        else:
+            assert row["state"] == "blocked"
+            assert db.execute("SELECT state FROM system_fault_occurrences WHERE id=?",
+                              (occurrence,)).fetchone()[0] != "resolved"

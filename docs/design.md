@@ -59,20 +59,32 @@ original-DB readiness, independent bounded supervision, offline event delivery,
 data-preserving code rollback and source-owned original-step resumption.
 Eight focused backend cases, one desktop/mobile browser smoke, build, Ruff and
 independent review passed. The native-process release/restart/rollback drill
-passed. Chinese delivery PR #93 was merged as `599de39` on 2026-10-29
-(Asia/Shanghai); production deployment and enablement are unverified. No full regression was
+passed. PR #93 was merged as `599de39` on 2026-10-29 (Asia/Shanghai);
+production deployment and enablement remain unverified. No full regression was
 run, per owner request. See the [release policy](workbench-release-82.md) and
 [validation](workbench-release-82-validation.md).
-Stage 6 (#83) is implemented on `feature/central-acceptance-83`, based on
-`599de39`: an offline cross-stage journey, a fixed 16-case acceptance runner,
-portable evidence, staged enablement/rollback instructions and narrowly bound
-post-release verification across workbench versions. All 16 focused cases,
-Ruff and independent code/documentation review passed. Chinese delivery PR #94
-is open; this branch is not merged or deployed. No production
-database, permissions, live model or GitHub business writes were exercised.
-The isolated scope and remaining live/native integration limits are explicit;
-parent #77 stays open. See the [acceptance matrix](central-acceptance-83.md).
-See the
+Stage 6 (#83) implemented an offline cross-stage journey, a fixed 16-case
+acceptance runner, portable evidence, staged operations and narrowly bound
+cross-version source verification on `feature/central-acceptance-83`.
+All 16 focused cases, Ruff and independent code/documentation review passed.
+PR #94 was merged as `8930246` at 2026-10-29 15:39:59 (Asia/Shanghai), closing
+#83. This does not establish production deployment or enablement; parent #77
+remains open. See the [acceptance matrix and limits](central-acceptance-83.md).
+The whole-chain review found four closure defects and 12 stale test-contract
+failures, tracked by repair sub-Issue #95 under #77.
+Those fixes are implemented on `feature/central-review-fixes-95` from `599de39`:
+role-scoped maintenance evidence (with fail-closed legacy digest compatibility),
+source-verified coordinator/notification reconciliation, identity-checked failed
+first-deploy cleanup, and bounded original-task verification. The release-source
+proof from PR #94 is reused and extended to accept authorized success produced
+within the verification window even when consumed after timeout; it does not
+relax account, repository, environment, revision or model checks. No schema or
+budget reset is introduced. Targeted validation and diff self-review passed;
+the repair is not merged or deployed. PR #96 now integrates default-branch
+commit `8930246`, preserving the stage 6 runner and the stricter blocked-state,
+original-window and per-release authorization checks. Conflict resolution does
+not change the running workbench, its database or permissions. See the
+[repair validation](central-review-fixes-95-validation.md) and the
 [stage 2 policy](workflow-recovery-79.md) and [validation](workflow-recovery-79-validation.md).
 Merge does not establish deployment to the running workbench. See
 [stage 1 validation](system-fault-records-78-validation.md).
