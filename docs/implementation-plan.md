@@ -5,12 +5,20 @@ Status updated: 2026-10-30
 
 ## Current Delivery Status
 
+- Issue #103 is implemented on `feature/evidence-recovery-103`, based on
+  `d22226a`: persist unaccepted evidence/scope correction candidates and resume
+  the same correction with fresh validation and safe quote diagnostics.
+  Static checks and frontend build passed; test cases and runtime acceptance
+  were not run. PR #104 integrates main `fd42113` (PR #102); it is not merged
+  or deployed. See [delivery](evidence-recovery-103.md).
+
 - Issue #101 is implemented on `feature/unlimited-workflows-101` (base `d22226a`):
   remove cumulative workflow quotas and broaden patch permissions, with actual
   usage, renewable ownership, cancellation, single-request timeouts and evidence/
   review gates retained. Static checks and build are recorded in
   [review](tasks/0101/review.md); no test cases, paid model or Docker acceptance
-  were run. Delivery PR #102 is open; this increment is not merged or deployed. See
+  were run. Delivery PR #102 was merged as `fd42113` on 2026-10-30;
+  deployment is unverified. See
   [policy and limitations](unlimited-workflows-101.md), which supersedes earlier
   finite-quota and Python-only patch descriptions in this plan.
 

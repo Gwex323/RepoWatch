@@ -25,7 +25,7 @@ from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from . import recovery as recovery_ledger
-from . import report_scheduler
+from . import report_correction_recovery, report_scheduler
 from .analysis_basis import analysis_current, execution_trigger
 from .analysis_model import (
     REQUEST_TIMEOUT_SECONDS,
@@ -50,7 +50,12 @@ from .finding_eligibility import register as register_repair_origin
 from .historical_review import MAX_HISTORICAL_FINDINGS, historical_results, historical_snapshot
 from .memory import Memory, capture_repair_fix, compact_experience
 from .observability import TracingHooks, task_binding
-from .report_evidence_correction import CORRECTION_ERRORS, ReportEvidenceCorrection
+from .report_evidence_correction import (
+    CORRECTION_ERRORS,
+    ReportEvidenceCorrection,
+    evidence_comparisons,
+    redact_review,
+)
 from .report_recovery import (
     MAX_CHECKPOINT_BYTES,
     MAX_OUTPUT_TOKENS,
@@ -259,7 +264,8 @@ class StageModel(Model):
                  separate_schema_from_tools=False,
                  prepare_review=None, finalization_reserve=FINALIZATION_RESERVE_SECONDS,
                  tool_parameter_models=None, review_contract=None, evidence_sources=None,
-                 scope_context=None, scope_batch=None):
+                 scope_context=None, scope_batch=None, resume_correction=None,
+                 save_correction=None, redact_candidate=redact_values):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
@@ -276,6 +282,19 @@ class StageModel(Model):
         self.evidence_sources = evidence_sources
         self.scope_context = scope_context
         self.scope_batch = scope_batch
+        self.resume_correction = resume_correction
+        self.save_correction = save_correction
+        self.redact_candidate = redact_candidate
+
+    def checkpoint_correction(self, correction, settings):
+        if self.save_correction is not None:
+            self.save_correction({
+                "protocol": report_correction_recovery.PROTOCOL, "accepted": False,
+                "kind": correction.kind, "candidate": correction.original.model_dump(),
+                "feedback": correction.feedback, "max_tokens": settings.max_tokens,
+                "targets": [{"section": section, "item": item, "issues": issues}
+                            for (section, item), issues in correction.targets.items()],
+            })
 
     async def request(self, system_instructions, input, *, request_timeout=None, **kwargs):
         """Every delegated call, including closing corrections, reserves durable quota."""
@@ -468,6 +487,18 @@ class StageModel(Model):
         if review_schema is not None and closing and self.final_input is not None:
             call_input = self.final_input(input)
             self.event("report_finalization", self.role)
+        if review_schema is not None and self.resume_correction is not None:
+            restored = self.resume_correction()
+            self.resume_correction = None
+            if restored is not None:
+                report_correction, tokens = restored
+                kwargs["model_settings"] = replace(
+                    kwargs["model_settings"], max_tokens=max(
+                        tokens, kwargs["model_settings"].max_tokens or 0,
+                    ),
+                )
+                call_input = self.final_input(input)
+                self.event("report_correction_resumed", report_correction.kind)
         while True:
             if request_number:
                 await asyncio.sleep(RETRY_DELAY_SECONDS)
@@ -495,6 +526,7 @@ class StageModel(Model):
                 )
                 request_input = call_input
                 if report_correction is not None:
+                    self.checkpoint_correction(report_correction, model_kwargs["model_settings"])
                     model_kwargs = report_correction.request_kwargs(model_kwargs)
                     request_instructions = report_correction.instructions()
                     request_input = report_correction.input_for(call_input)
@@ -698,8 +730,9 @@ class StageModel(Model):
                     if issue is not None:
                         self.event("report_validation", issue)
                         self.event("report_diagnostics", report_diagnostics(response))
-                        self.retries.format_used += 1
                         report_correction.feedback = issue
+                        self.checkpoint_correction(report_correction, kwargs["model_settings"])
+                        self.retries.format_used += 1
                         self.event("format_retry", self.role)
                         continue
                     self.event(report_correction.kind + "_applied", self.role)
@@ -713,6 +746,7 @@ class StageModel(Model):
                             review = review_schema.validate_json("".join(
                                 p.text for p in parts if p.type == "output_text"
                             ))
+                            review = redact_review(review, self.redact_candidate)
                             issue = self.review_contract(review)
                     if issue:
                         if issue == "scope_mapping_invalid" and self.scope_context is not None:
@@ -720,8 +754,9 @@ class StageModel(Model):
                             mapping = report_mapping_issues(review, context)
                             for detail in mapping:
                                 self.event("scope_mapping_validation", json.dumps(detail))
-                            self.retries.format_used += 1
                             report_correction = ReportScopeCorrection(review, context, mapping)
+                            self.checkpoint_correction(report_correction, kwargs["model_settings"])
+                            self.retries.format_used += 1
                             self.event("scope_mapping_correction", json.dumps({
                                 "role": self.role, "items": len(mapping),
                             }))
@@ -765,6 +800,7 @@ class StageModel(Model):
                             and not any(item.type == "function_call" for item in response.output)
                             and not any(part.type == "refusal" for part in parts)):
                         review = review_schema.validate_json("".join(part.text for part in texts))
+                        review = redact_review(review, self.redact_candidate)
                         issues = self.review_evidence(review)
                         if (self.retries.evidence_used and not review.findings
                                 and not review.limitations):
@@ -772,6 +808,9 @@ class StageModel(Model):
                         if issues:
                             for detail in issues:
                                 self.event("evidence_validation", json.dumps(detail))
+                            sources = self.evidence_sources() if self.evidence_sources else []
+                            report_correction = ReportEvidenceCorrection(review, issues, sources)
+                            self.checkpoint_correction(report_correction, kwargs["model_settings"])
                             self.retries.evidence_used += 1
                             self.event("analysis_retry_budget", json.dumps(asdict(self.retries)))
                             self.event("evidence_retry", self.role)
@@ -785,8 +824,6 @@ class StageModel(Model):
                                 self.final_input(input) if self.final_input is not None
                                 else final_report_input(input)
                             )
-                            sources = self.evidence_sources() if self.evidence_sources else []
-                            report_correction = ReportEvidenceCorrection(review, issues, sources)
                             correction = ""
                             self.event("evidence_correction", json.dumps({
                                 "role": self.role, "items": len(report_correction.targets),
@@ -894,6 +931,7 @@ def failure_code(exc):
     if isinstance(exc, ValueError) and str(exc) in (
         "analysis_evidence_unverified", "analysis_review_incomplete",
         "analysis_execution_unread", "analysis_source_unread", "analysis_handoff_incomplete",
+        "analysis_correction_checkpoint_invalid",
     ):
         return str(exc)
     return "analysis_failed"
@@ -927,6 +965,7 @@ def initialize(db):
         );
     """)
     report_scheduler.initialize(db)
+    report_correction_recovery.initialize(db)
 
 
 def source_snapshot(source):
@@ -1362,7 +1401,45 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
         changed = normalize_evidence_quotes(review, context, inspected, ranges)
         if changed:
             event("evidence_normalized", str(changed))
-        return evidence_issues(review, context, inspected, ranges)
+        issues = evidence_issues(review, context, inspected, ranges)
+        for details in evidence_comparisons(review, issues, context):
+            event("evidence_comparison", json.dumps(details))
+        return issues
+
+    def restore_review_correction():
+        saved = context.pop("_review_correction", None)
+        if saved is None:
+            return None
+        try:
+            if not report_correction_recovery.valid_state(saved):
+                raise ValueError("invalid_correction_state")
+            review = Review.model_validate(saved["candidate"])
+            redact_candidate = context.get("_redact_review_candidate", redact_values)
+            if redact_review(review, redact_candidate).model_dump() != review.model_dump():
+                raise ValueError("invalid_correction_state")
+            contract = scope_report_issue(review, context)
+            if contract == "scope_mapping_invalid":
+                correction = ReportScopeCorrection(
+                    review, context, report_mapping_issues(review, context),
+                )
+            elif contract is None:
+                issues = review_evidence(review)
+                if not issues:
+                    raise ValueError("correction_no_longer_required")
+                correction = ReportEvidenceCorrection(review, issues, source_evidence(context, {
+                    "files_read": sorted(inspected), "read_ranges": ranges,
+                }))
+            else:
+                raise ValueError("correction_contract_changed")
+            if correction.kind == saved["kind"]:
+                correction.feedback = saved["feedback"]
+            return correction, saved["max_tokens"]
+        except (KeyError, TypeError, ValueError):
+            save = context.get("_save_review_correction")
+            if save is not None:
+                save(None)
+            event("report_correction_invalidated", "candidate_changed")
+            return None
 
     def required_read():
         if not execution_read:
@@ -1392,6 +1469,9 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             })) if role == ROLES[-1] else None,
             scope_context=(lambda: context) if role == ROLES[-1] else None,
             scope_batch=prepare_scope_batch if scope_required else None,
+            resume_correction=restore_review_correction if resume and role == ROLES[-1] else None,
+            save_correction=context.get("_save_review_correction") if role == ROLES[-1] else None,
+            redact_candidate=context.get("_redact_review_candidate", redact_values),
         )
         for role in ROLES
     }
@@ -1498,7 +1578,8 @@ class Analyses:
                                      "output_limit", "scope_mapping_validation",
                                      "required_read_validation", "provider_structure",
                                      "handoff_validation", "report_diagnostics",
-                                     "model_configuration", "model_request_failed"}
+                                     "model_configuration", "model_request_failed",
+                                     "evidence_comparison"}
                      else 1024 if kind == "failure" else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
@@ -2052,6 +2133,38 @@ class Analyses:
             return (latest and latest["status"] == "running"
                     and latest["version"] == run_version)
 
+        def save_review_correction(value):
+            # A private callback, not an event: candidate prose/quotes must never
+            # pass through public event ingestion or the telemetry wrapper.
+            if not active():
+                raise AnalysisFailure("analysis_cancelled")
+            if self.model_identity() != model_identity:
+                raise AnalysisFailure("analysis_model_changed")
+            with self.store.connection() as db:
+                db.execute("BEGIN IMMEDIATE")
+                live = db.execute("SELECT status,version FROM repository_analyses WHERE id=?",
+                                  (row["id"],)).fetchone()
+                if live["status"] != "running" or live["version"] != run_version:
+                    raise AnalysisFailure("analysis_cancelled")
+                if (self.issue_basis(db, row, context) != original_issue
+                        or not self.current(row) or not self.scope_current(db, row, context)):
+                    raise AnalysisFailure("analysis_stale")
+                if value is None:
+                    report_correction_recovery.clear(db, row["id"])
+                else:
+                    state = self.review_checkpoint(db, row, context, model_identity)
+                    if state is None:
+                        raise AnalysisFailure("analysis_recovery_basis_changed")
+                    checkpoint_row = db.execute(
+                        "SELECT * FROM analysis_review_checkpoints WHERE analysis_id=?",
+                        (row["id"],),
+                    ).fetchone()
+                    report_correction_recovery.save(
+                        db, row["id"], checkpoint_row, value, time.time(),
+                    )
+            self.event(row["id"], "report_correction_saved" if value is not None
+                       else "report_correction_cleared", value["kind"] if value else "invalidated")
+
         def record(kind, agent):
             nonlocal stage, saved_binding
             if kind in {"analysis_request", "usage"} or kind.endswith("_retry"):
@@ -2222,14 +2335,27 @@ class Analyses:
                 if invalidated:
                     db.execute("DELETE FROM analysis_review_checkpoints WHERE analysis_id=?",
                                (row["id"],))
+                checkpoint_row = db.execute(
+                    "SELECT * FROM analysis_review_checkpoints WHERE analysis_id=?", (row["id"],),
+                ).fetchone() if resume else None
+                correction = report_correction_recovery.load(db, row["id"], checkpoint_row)
+                correction_invalidated = not correction and db.execute(
+                    "SELECT 1 FROM analysis_review_corrections WHERE analysis_id=?", (row["id"],),
+                ).fetchone()
+                if correction_invalidated:
+                    report_correction_recovery.clear(db, row["id"])
             if recovery["state"] == "waiting" and (
                 not resume or recovery["binding"] != saved_binding
             ):
                 raise AnalysisFailure("analysis_recovery_basis_changed")
             if invalidated:
                 record("report_checkpoint_invalidated", "basis_changed")
+            if correction_invalidated:
+                record("report_correction_invalidated", "checkpoint_changed")
             if resume:
                 context["_review_resume"] = resume
+                if correction:
+                    context["_review_correction"] = correction
             with self.store.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 live = db.execute("SELECT status,version FROM repository_analyses WHERE id=?",
@@ -2246,6 +2372,7 @@ class Analyses:
                 "last_failure": recovery["last_error"], "last_report_validation": diagnostics,
             } if recovery["last_error"] else diagnostics)
             context["_review_model_identity"] = model_identity
+            context["_save_review_correction"] = save_review_correction
             with task_binding(task_id=row["id"], repo_id=row["repo_id"], env_id=row["env_id"],
                               revision=row["revision"], attempt=run_version):
                 task = asyncio.create_task(self.engine.analyze(context, record))

@@ -12,6 +12,7 @@ from cryptography.fernet import InvalidToken
 from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageFunctionToolCall
 
+from .diagnosis import redact_values
 from .model_providers import ModelProviders, validate_model_config
 from .observability import Telemetry, model_observation, record_event, record_usage
 from .report_recovery import digest
@@ -731,6 +732,19 @@ class AnalysisModel:
                 and context["_review_model_identity"] != self._identity(row, rows)):
             raise Conflict("analysis_model_changed")
         original_event = event
+
+        if flow == "analysis":
+            def redact_review_candidate(value):
+                serialized = json.dumps(value, ensure_ascii=False)
+                for secret in sorted(set(secrets.values()), key=len, reverse=True):
+                    serialized = serialized.replace(
+                        json.dumps(secret, ensure_ascii=False)[1:-1], "[REDACTED]",
+                    )
+                return redact_values(json.loads(serialized))
+
+            # Scope registration updates this shared context during the run;
+            # copying it would disconnect checkpoint ownership from those updates.
+            context["_redact_review_candidate"] = redact_review_candidate
 
         def event(kind, value):
             record_event(kind, value)

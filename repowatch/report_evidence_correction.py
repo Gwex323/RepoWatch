@@ -1,5 +1,6 @@
 """Bounded evidence edits to an unaccepted report, never new source observations."""
 
+import hashlib
 import json
 from dataclasses import replace
 from typing import Literal
@@ -8,6 +9,7 @@ from agents import AgentOutputSchema
 from pydantic import BaseModel, ConfigDict, Field
 
 SECTIONS = ("findings", "historical_rechecks", "scope_items", "scope_exclusions")
+REDACTED_QUOTE = "\0[REDACTED]\0"
 CORRECTION_ERRORS = {
     "evidence_correction_targets_mismatch", "evidence_correction_summary_mismatch",
     "evidence_correction_withdrawal_has_edits", "evidence_correction_requires_withdrawal",
@@ -45,6 +47,52 @@ def _rows(report, section):
     if section.startswith("scope_"):
         return (report.get("scope_review") or {}).get(section.removeprefix("scope_"), [])
     return report[section]
+
+
+def redact_review(review, redactor):
+    """A redacted mismatching quote must never become a matching placeholder."""
+    original = review.model_dump()
+    safe = redactor(original)
+    for section in SECTIONS:
+        for old, new in zip(_rows(original, section), _rows(safe, section)):
+            for before, after in zip(old["evidence"], new["evidence"]):
+                if before["quote"] != after["quote"]:
+                    # Source snapshots exclude NUL bytes. This private marker
+                    # remains invalid until the model selects real source or withdraws.
+                    after["quote"] = REDACTED_QUOTE
+    return type(review).model_validate(safe)
+
+
+def evidence_comparisons(review, issues, context):
+    """Diagnose the checked quote without exposing paths, model text or source text."""
+    data = review.model_dump()
+    for issue in issues:
+        if issue["reason"] != "quote_mismatch":
+            continue
+        section = ("historical_rechecks" if issue.get("historical") else
+                   "scope_" + issue["scope"] if issue.get("scope") else "findings")
+        evidence = _rows(data, section)[issue["finding"] - 1]["evidence"][issue["evidence"] - 1]
+        text = context["files"][evidence["path"]]
+        lines = text.splitlines()
+        source = "\n".join(lines[evidence["start_line"] - 1:evidence["end_line"]])
+        quote = evidence["quote"]
+        normalized = "\n".join(lines)
+        position = normalized.find(quote) if quote.strip() else -1
+        match = "other_lines" if position >= 0 else "text_changed_or_incomplete"
+        if " ".join(quote.split()) in " ".join(source.split()) and quote.strip():
+            match = "whitespace"
+        if quote == REDACTED_QUOTE:
+            match = "redacted"
+        details = {
+            **issue, "start_line": evidence["start_line"], "end_line": evidence["end_line"],
+            "path_sha256": hashlib.sha256(evidence["path"].encode()).hexdigest(),
+            "quote_sha256": hashlib.sha256(quote.encode()).hexdigest(),
+            "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+            "quote_chars": len(quote), "source_chars": len(source), "match": match,
+        }
+        if position >= 0:
+            details["matched_start_line"] = normalized.count("\n", 0, position) + 1
+        yield details
 
 
 class ReportEvidenceCorrection:

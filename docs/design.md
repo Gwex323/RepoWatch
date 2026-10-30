@@ -11,6 +11,14 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
 
+Issue #103 is implemented on `feature/evidence-recovery-103` (base `d22226a`):
+private unaccepted correction candidates survive interrupted evidence/scope
+correction requests, with checkpoint bindings, freshly computed errors and
+metadata-only quote comparisons. Static checks and frontend build passed; no
+test cases or runtime acceptance were run. This increment is not merged or
+deployed. PR #104 now integrates main `fd42113`, including PR #102.
+See [correction recovery](evidence-recovery-103.md).
+
 Issue #101 is implemented on `feature/unlimited-workflows-101`, based on
 `d22226a`: workflow request/token/correction/resumption/duration quotas are
 removed, public limits are null, and patch policy permits new production files,
@@ -19,7 +27,8 @@ Usage, finite renewable leases, single-request timeouts, cancellation, evidence,
 review and publication authority remain enforced. See [current policy](unlimited-workflows-101.md)
 and [review](tasks/0101/review.md). Static checks and frontend build are recorded;
 no test cases or live-model/Docker acceptance were run for this increment.
-Delivery PR #102 is open; it is not merged or deployed. Earlier quota and patch-allowlist descriptions
+Delivery PR #102 was merged as `fd42113` on 2026-10-30; deployment is unverified.
+Earlier quota and patch-allowlist descriptions
 below document the preceding policy and are superseded by this increment.
 The coordinator still cannot independently invent a new analysis-retry action;
 removing quotas alone does not establish a fix for invalid source quotations.
@@ -33,7 +42,7 @@ in [unified Issue](unified-issues-99.md). PR #100 was merged as `d22226a` on
 2026-10-29 and started at local port 8765 using the original database after a
 consistent backup. Startup and served asset bytes were checked; no test suite
 or live-model acceptance was run during restart, and managed release supervision
-was not enabled.
+was not enabled. That startup did not validate the #101 or #103 increments.
 
 The local single-user workbench supports fixed-revision Docker execution, model-based
 analysis, GitHub Issue synchronization and Issue-based analysis, daily repository
