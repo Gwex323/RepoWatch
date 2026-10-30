@@ -15,8 +15,11 @@ Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
 the correction-state INSERT explicitly binds six columns to six parameters;
 SQLite database failures have a fixed analysis error code and numeric-only
 diagnostics. Review and validation status are recorded in
-[storage fix](correction-storage-105.md). Delivery PR #106 is open;
-this increment is not merged or deployed.
+[storage fix](correction-storage-105.md). PR #106 was open when deployed:
+on 2026-10-30 the reviewed feature commit `6db43a7` was started at local port
+8765 with the original database after a consistent backup. Startup, session
+API, served assets and original record counts were checked. This is a branch
+deployment; actual correction/recovery acceptance remains outstanding.
 
 Issue #103 is implemented on `feature/evidence-recovery-103` (base `d22226a`):
 private unaccepted correction candidates survive interrupted evidence/scope
