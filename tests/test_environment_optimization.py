@@ -182,9 +182,8 @@ def test_old_exhausted_preflight_requires_explicit_retry_and_credits_only_once(p
     asyncio.run(repairs.tick())
     failed = repairs.get(task["id"])
     assert failed["attempt"] == 4 and failed["error"] == "repair_tests_failed"
-    assert not failed["can_retry"] and not failed["docker_recovery_available"]
-    with pytest.raises(Conflict):
-        repairs.retry(task["id"], failed["version"])
+    assert failed["can_retry"] and not failed["docker_recovery_available"]
+    repairs.retry(task["id"], failed["version"])
 
 
 @pytest.mark.parametrize("evidence", ["request_started", "agent", "testing", "tool_call"])
@@ -192,7 +191,7 @@ def test_old_recovery_cannot_refund_an_attempt_that_entered_model_work(pending, 
     repairs, task, _ = historical_failure(pending)
     repairs.event(task["id"], evidence, "synthetic")
     current = repairs.get(task["id"])
-    assert not current["docker_recovery_available"] and not current["can_retry"]
+    assert not current["docker_recovery_available"] and current["can_retry"]
 
 
 def test_new_revision_clones_clean_snapshot_and_does_not_inherit_test_evidence(optimized):

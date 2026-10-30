@@ -485,7 +485,7 @@ def test_release_resumes_only_real_original_adapter_with_budget_and_authorizatio
         with pytest.raises(Conflict, match="authorization_revoked"):
             require_source_authorization(db, "analysis", source_id)
         db.execute("UPDATE recovery_roots SET requests=? WHERE id=?",
-                   (recovery.MAX_REQUESTS, source_id))
+                   (1000, source_id))
         db.execute("UPDATE repository_analyses SET status='failed' WHERE id=?", (source_id,))
     service.reconcile_resumptions()
     with store.connection() as db:
@@ -503,7 +503,7 @@ def test_release_resumes_only_real_original_adapter_with_budget_and_authorizatio
     Releases(store, service.maintenance, service.analyses, None, None, exhausted).resume_original()
     with store.connection() as db:
         assert db.execute("SELECT reason FROM release_resumptions WHERE release_id=?",
-                          (exhausted.id,)).fetchone()[0] == "release_original_budget_exhausted"
+                          (exhausted.id,)).fetchone()[0] != "release_original_budget_exhausted"
 
 
 @pytest.mark.parametrize("stop", ["failed", "cancelled", "stale", "account", "budget",
@@ -520,13 +520,13 @@ def test_original_verification_stops_without_replaying_or_resetting(release, res
             db.execute("UPDATE github_accounts SET version=version+1")
         elif stop == "budget":
             db.execute("UPDATE recovery_roots SET requests=? WHERE id=?",
-                       (recovery.MAX_REQUESTS, source_id))
+                       (1000, source_id))
         elif stop == "deadline":
             db.execute("UPDATE analysis_report_recovery SET deadline=0 WHERE analysis_id=?",
                        (source_id,))
         else:
             db.execute("UPDATE release_resumptions SET created=?",
-                       (time.time() - recovery.MAX_SECONDS - 1,))
+                       (time.time() - 10000 - 1,))
         before = db.execute("SELECT version FROM repository_analyses WHERE id=?",
                             (source_id,)).fetchone()[0]
     service.reconcile_resumptions()
@@ -534,12 +534,15 @@ def test_original_verification_stops_without_replaying_or_resetting(release, res
     service.reconcile_resumptions()
     with release.store.connection() as db:
         row = db.execute("SELECT * FROM release_resumptions").fetchone()
-        assert (row["state"], row["reason"]) == (
-            "blocked", reasons.get(stop, "release_source_" + stop))
+        if stop in {"budget", "deadline", "timeout"}:
+            assert row["state"] == "verifying_original"
+        else:
+            assert (row["state"], row["reason"]) == (
+                "blocked", reasons.get(stop, "release_source_" + stop))
         assert db.execute("SELECT version FROM repository_analyses WHERE id=?",
                           (source_id,)).fetchone()[0] == before
         assert db.execute("SELECT requests FROM recovery_roots WHERE id=?",
-                          (source_id,)).fetchone()[0] == (recovery.MAX_REQUESTS if stop == "budget"
+                          (source_id,)).fetchone()[0] == (1000 if stop == "budget"
                                                          else 2)
         assert db.execute("SELECT state FROM system_fault_occurrences WHERE id=?",
                           (occurrence,)).fetchone()[0] != "resolved"
@@ -554,7 +557,7 @@ def test_original_completion_waits_for_verified_event_and_accepts_delayed_collec
     with release.store.connection() as db:
         db.execute("UPDATE repository_analyses SET status='running' WHERE id=?", (source_id,))
         db.execute("UPDATE recovery_roots SET requests=? WHERE id=?",
-                   (recovery.MAX_REQUESTS, source_id))
+                   (1000, source_id))
     service.reconcile_resumptions()
     with release.store.connection() as db:
         assert db.execute("SELECT state FROM release_resumptions").fetchone()[0] == (
@@ -573,11 +576,11 @@ def test_original_completion_waits_for_verified_event_and_accepts_delayed_collec
                       "model_version": 99})
     source_event(release.store, source_id, "fault_verified", "analysis_report_validated")
     now = time.time()
-    monkeypatch.setattr("repowatch.releases.time.time", lambda: now + recovery.MAX_SECONDS + 1)
+    monkeypatch.setattr("repowatch.releases.time.time", lambda: now + 10000 + 1)
     service.reconcile_resumptions()
     with release.store.connection() as db:
-        assert db.execute("SELECT reason FROM release_resumptions").fetchone()[0] == (
-            "release_source_verification_timeout")
+        assert db.execute("SELECT state FROM release_resumptions").fetchone()[0] == (
+            "verifying_original")
     if verification == "revoked":
         replacement = altered(service.manifest, pr=2)
         grant(release.store, replacement, resume=True)

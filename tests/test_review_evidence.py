@@ -245,9 +245,7 @@ def test_review_recovery_cannot_bypass_gates_or_repeat(pending, case):
             db.execute("UPDATE repair_events SET value='2' WHERE repair_id=? AND kind='retry'",
                        (task["id"],))
     result = repairs.get(task["id"])
-    assert not result["can_retry"]
-    with pytest.raises(Conflict):
-        repairs.retry(result["id"], result["version"])
+    assert not result["review_evidence_recovery_available"]
     assert not publisher.calls
 
 
@@ -278,7 +276,7 @@ def test_resumed_patch_still_requires_source_tests_and_independent_review(
     if failure != "review":
         assert not model.review_requests and model.calls == 2
     else:
-        assert result["attempt"] == 4 and not result["can_retry"]
+        assert result["attempt"] == 4 and result["can_retry"]
         assert not result["review_evidence_recovery_available"]
 
 

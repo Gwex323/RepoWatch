@@ -236,15 +236,12 @@ export function TaskScopePanel({ scope, analysisId, analysisVersion, analysisSta
           : '完整性未核验：原始任务范围尚未通过当前版本的独立审查。'}</p>
     <AutomaticAcceptance progress={scope.automation} />
     {canReview && !scope.stale && scope.automation?.state === 'failed' && <>
-      <button className="button secondary" disabled={busy
-        || scope.automation.attempt >= 2 + (scope.automation.additional_attempts ?? 0)
-        || (scope.automation.model_calls ?? 0) >= 12} onClick={() => {
+      <button className="button secondary" disabled={busy} onClick={() => {
         setBusy(true); setNotice('');
         void api(`/analyses/${analysisId}/acceptance/retry`, { version: analysisVersion })
           .then(refresh).catch(error => setNotice(errorText(error))).finally(() => setBusy(false));
       }}><RefreshCw size={15} />继续当前验收</button>
-      <p className="diagnosis-meta">保留原要求、证据和已用次数；剩余额度内继续处理。
-        原时限已到时，此次操作会开启新的 30 分钟处理窗口。</p>
+      <p className="diagnosis-meta">保留原要求、证据和累计用量；不设累计请求、续办次数或任务总时限。</p>
     </>}
     {scope.stale && <p role="status">原问题或执行依据已变化，请继续范围审查；执行依据过期时需开始新分析。</p>}
     {scope.original.clipped && <p role="status">原始问题内容存在截断，不能自动判定整体完成。</p>}

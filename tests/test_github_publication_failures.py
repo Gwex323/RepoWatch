@@ -92,7 +92,7 @@ def test_verified_publication_retry_bypasses_only_model_budget_and_preserves_his
     assert not result["context"].get("resume_publication")
 
 
-def test_publication_retry_limit_cannot_be_reset_by_normal_retry(pending):  # noqa: F811
+def test_publication_retries_preserve_usage_beyond_the_old_limit(pending):  # noqa: F811
     repairs, failed, runtime, publisher = failed_publication(pending)
     for used in range(1, 4):
         assert failed["publication_retry_available"]
@@ -101,9 +101,8 @@ def test_publication_retry_limit_cannot_be_reset_by_normal_retry(pending):  # no
         failed = repairs.get(failed["id"])
         assert failed["context"]["publication_retries"] == used
         assert failed["attempt"] == 9 + used
-    assert not failed["can_retry"] and not failed["publication_retry_available"]
-    with pytest.raises(Conflict, match="repair_publication_retry_limit"):
-        repairs.retry(failed["id"], failed["version"])
+    assert failed["can_retry"] and failed["publication_retry_available"]
+    repairs.retry(failed["id"], failed["version"])
     assert len(repairs.engine.models) == 1 and len(publisher.calls) == 4
 
 
@@ -174,8 +173,12 @@ def test_publication_allowance_is_bounded_one_use_and_cannot_expand_model_work(p
                     (json.dumps(context), failed["id"]),
                 )
         if case == "unverified_claim":
-            assert repairs.claim() is None
-            assert repairs.get(failed["id"])["error"] == "repair_attempt_limit"
+            claimed = repairs.claim()
+            assert claimed and claimed["attempt"] > 0
+            assert not repairs._verified(claimed)
+        elif case == "budget":
+            assert repairs.get(failed["id"])["can_retry"]
+            repairs.retry(failed["id"], failed["version"])
         else:
             assert not repairs.get(failed["id"])["can_retry"]
             with pytest.raises(Conflict):

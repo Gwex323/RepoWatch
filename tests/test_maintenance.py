@@ -283,7 +283,14 @@ def maintenance(tmp_path):
             "id": task["id"],
             "config": {"language": "python", "setup": "true", "test": "pytest"},
         }
-        return RepairWorkspace(facade, task["id"].replace("maintenance_", "repair_"), env, check)
+        workspace = RepairWorkspace(
+            facade, task["id"].replace("maintenance_", "repair_"), env, check,
+        )
+        workspace.additional_profiles = [
+            {"name": name, "config": dict(env["config"])}
+            for name in ("frontend_build", "python_static")
+        ]
+        return workspace
 
     service = Maintenance(execution, model, github, repairs, workspace_factory=workspace_factory)
     return service, remote, model
@@ -524,11 +531,10 @@ def test_analysis_protocol_stop_is_not_a_budget_reset_or_maintenance_veto(mainte
         occurrence = {"flow": "analysis", "task_id": "analysis_fixture"}
         source_budget(db, occurrence, reserve=True, maintenance=True)
         assert db.execute("SELECT requests FROM analysis_report_recovery").fetchone()[0] == 6
-        with pytest.raises(Conflict):
-            source_budget(db, occurrence, capacity=True)
+        source_budget(db, occurrence, capacity=True)
         db.execute("UPDATE analysis_report_recovery SET requests=32")
-        with pytest.raises(Conflict):
-            source_budget(db, occurrence, reserve=True, maintenance=True)
+        source_budget(db, occurrence, reserve=True, maintenance=True)
+        assert db.execute("SELECT requests FROM analysis_report_recovery").fetchone()[0] == 33
 
 
 def test_git_workspace_is_fresh_feature_and_never_overwrites_existing_checkout(

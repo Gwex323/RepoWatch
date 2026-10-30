@@ -14,7 +14,6 @@ from openai import APIConnectionError, APIStatusError, AsyncOpenAI
 from repowatch.acceptance import Acceptance
 from repowatch.acceptance_failures import failure_code, failure_details
 from repowatch.acceptance_model import run_acceptance
-from repowatch.acceptance_output import AcceptanceOutputError
 from repowatch.acceptance_store import initialize, progress
 from repowatch.analysis_model import ObservedModel, OutputTruncated, observe_response
 from repowatch.store import Conflict
@@ -138,7 +137,7 @@ def test_transient_failure_preserves_budget_and_saved_result(controller, monkeyp
     assert worker.claim() is None
     monkeypatch.setattr('repowatch.acceptance.time.time', lambda: 1111)
     resumed = worker.claim()
-    assert resumed['attempt'] == 2 and resumed['model_calls'] == 1 and resumed['deadline'] == 2000
+    assert resumed['attempt'] == 2 and resumed['model_calls'] == 1 and resumed['deadline'] is None
     worker._stop(resumed, error)
     with connection() as db:
         final = db.execute("SELECT * FROM scope_acceptance_runs").fetchone()
@@ -151,13 +150,13 @@ def test_transient_failure_preserves_budget_and_saved_result(controller, monkeyp
 
 
 @pytest.mark.parametrize('field,value', [('attempt', 2), ('model_calls', 12), ('deadline', 1101)])
-def test_transient_error_cannot_bypass_persisted_limits(controller, field, value):
+def test_transient_error_keeps_retrying_beyond_legacy_limits(controller, field, value):
     worker, connection = controller
     with connection() as db:
         db.execute(f'UPDATE scope_acceptance_runs SET {field}=?', (value,))
     worker._stop({'id': 'run', 'analysis_id': 'analysis'}, TimeoutError('secret body'))
     with connection() as db:
-        assert db.execute('SELECT state FROM scope_acceptance_runs').fetchone()[0] == 'failed'
+        assert db.execute('SELECT state FROM scope_acceptance_runs').fetchone()[0] == 'retry_wait'
 
 
 def test_owner_continuation_reopens_expired_time_window_without_resetting_counts(controller):
@@ -168,13 +167,12 @@ def test_owner_continuation_reopens_expired_time_window_without_resetting_counts
     assert worker.retry('analysis', 7) == {'id': 'run', 'state': 'queued'}
     with connection() as db:
         row = db.execute('SELECT * FROM scope_acceptance_runs').fetchone()
-        assert row['deadline'] == 2900 and row['model_calls'] == 5 and row['attempt'] == 1
+        assert row['deadline'] is None and row['model_calls'] == 5 and row['attempt'] == 1
         event = json.loads(db.execute('SELECT value FROM task_scope_events').fetchone()[0])
         assert event['previous_deadline'] == 1050 and event['previous_error']
     assert worker.claim()['attempt'] == 2
     worker._stop({'id': 'run', 'analysis_id': 'analysis'}, OutputTruncated('secret body'))
-    with pytest.raises(Conflict, match='acceptance_model_budget'):
-        worker.retry('analysis', 7)
+    worker.retry('analysis', 7)
 
 
 @pytest.mark.parametrize('additional', [False, True])
@@ -208,56 +206,41 @@ def test_continuation_checks_current_authorization(controller, monkeypatch, gate
         ).fetchone()[0] == 0
 
 
-def test_owner_grants_one_extra_attempt_only_and_preserves_all_history(controller):
+def test_owner_continuations_preserve_history_without_extra_attempt_allowances(controller):
     worker, connection = controller
-    worker._stop({'id': 'run', 'analysis_id': 'analysis'}, OutputTruncated('not persisted'))
     with connection() as db:
-        db.execute("UPDATE scope_acceptance_runs SET attempt=2,model_calls=3,deadline=1050")
-        db.execute("INSERT INTO scope_acceptance_checks "
-                   "(id,run_id,item_key,kind,state,attempt,specification,result,created,updated) "
-                   "VALUES('check','run','item','integration','running',1,'{}','saved',1000,1000)")
-    with pytest.raises(Conflict, match='acceptance_model_budget'):
-        worker.retry('analysis', 7)
+        db.execute("UPDATE scope_acceptance_runs SET state='failed',attempt=20,"
+                   "model_calls=300,deadline=1050")
     for wrong_id in (None, 'another-run'):
         with pytest.raises(Conflict, match='acceptance_retry_unavailable'):
             worker.retry('analysis', 7, additional_attempt=True, run_id=wrong_id)
     worker.retry('analysis', 7, additional_attempt=True, run_id='run')
     with connection() as db:
-        initialize(db)  # A restart cannot discard the grant or its spent budget.
+        initialize(db)
         row = db.execute('SELECT * FROM scope_acceptance_runs').fetchone()
-        assert row['additional_attempts'] == 1 and row['attempt'] == 2 and row['model_calls'] == 3
-        assert row['deadline'] == 2900
+        assert row['additional_attempts'] == 0 and row['attempt'] == 20
+        assert row['model_calls'] == 300
+        assert row['deadline'] is None
         event = json.loads(db.execute("SELECT value FROM task_scope_events "
                                       "WHERE kind='acceptance_retry_requested'").fetchone()[0])
-        assert event['additional_attempt_granted'] is True and event['attempt_limit'] == 3
-        assert progress(db, {'id': 'scope', 'version': 3})['additional_attempts'] == 1
-    assert worker.claim()['attempt'] == 3
-    worker._stop({'id': 'run', 'analysis_id': 'analysis'}, TimeoutError('not persisted'))
-    with connection() as db:
-        assert db.execute('SELECT state FROM scope_acceptance_runs').fetchone()[0] == 'failed'
-        assert db.execute('SELECT result FROM scope_acceptance_checks').fetchone()[0] == 'saved'
-        assert db.execute('SELECT COUNT(*) FROM scope_acceptance_failures').fetchone()[0] == 2
-    assert worker.claim() is None
-    for extra in (False, True):
-        with pytest.raises(Conflict):
-            worker.retry('analysis', 7, additional_attempt=extra, run_id='run')
+        assert event['attempt_limit'] is None
+    assert worker.claim()['attempt'] == 21
 
 
 @pytest.mark.parametrize('attempt,calls', [(1, 3), (2, 12), (3, 3)])
-def test_extra_grant_does_not_bypass_attempt_or_request_limits(controller, attempt, calls):
+def test_legacy_grant_parameter_does_not_create_a_quota(controller, attempt, calls):
     worker, connection = controller
     with connection() as db:
         db.execute("UPDATE scope_acceptance_runs SET state='failed',attempt=?,model_calls=?",
                    (attempt, calls))
-    with pytest.raises(Conflict):
-        worker.retry('analysis', 7, additional_attempt=True, run_id='run')
+    worker.retry('analysis', 7, additional_attempt=True, run_id='run')
     with connection() as db:
-        assert db.execute(
-            'SELECT additional_attempts FROM scope_acceptance_runs'
-        ).fetchone()[0] == 0
+        row = db.execute('SELECT * FROM scope_acceptance_runs').fetchone()
+        assert row['additional_attempts'] == 0 and row['attempt'] == attempt
+        assert row['model_calls'] == calls
 
 
-@pytest.mark.parametrize('attempt,expected', [(2, 3), (3, None)])
+@pytest.mark.parametrize('attempt,expected', [(2, 3), (3, 4)])
 def test_interrupted_lease_uses_persisted_extra_allowance(controller, attempt, expected):
     worker, connection = controller
     with connection() as db:
@@ -345,10 +328,9 @@ def test_every_retry_spends_the_same_request_budget_and_metadata_is_allowlisted(
         assert recorded['truncated'] is True and recorded['output_tokens'] == 12000
         assert 'secret' not in json.dumps(recorded) and 'finish_reason' not in recorded
         db.execute('UPDATE scope_acceptance_runs SET model_calls=12')
-    with pytest.raises(Conflict, match='acceptance_model_budget'):
-        worker._event({'id': 'run', 'analysis_id': 'analysis'}, 'request_started', 'role')
+    worker._event({'id': 'run', 'analysis_id': 'analysis'}, 'request_started', 'role')
     with connection() as db:
-        assert db.execute('SELECT model_calls FROM scope_acceptance_runs').fetchone()[0] == 12
+        assert db.execute('SELECT model_calls FROM scope_acceptance_runs').fetchone()[0] == 13
 
 
 @pytest.mark.parametrize('category', ['invalid_json', 'schema_mismatch'])
@@ -365,6 +347,8 @@ def test_format_retry_supplies_precise_feedback_and_saves_no_rejected_values(cat
     async def transport(request):
         payload = json.loads(request.content)
         requests.append(payload)
+        if len(requests) > 3:
+            return httpx.Response(401, json={"error": {"message": "Fixture stopped"}})
         text = candidate
         if len(requests) == 2:
             feedback = json.loads(payload['messages'][-1]['content'])['validation_feedback']
@@ -393,10 +377,10 @@ def test_format_retry_supplies_precise_feedback_and_saves_no_rejected_values(cat
     if corrected:
         assert asyncio.run(run()) == valid
     else:
-        with pytest.raises(AcceptanceOutputError) as failure:
+        with pytest.raises(Exception) as failure:
             asyncio.run(run())
         details = failure_details(failure.value)
-        assert details['output_validation']['category'] == category
+        assert failure_code(failure.value) == 'acceptance_authentication_failed'
         assert secret not in json.dumps(details)
-    assert len(requests) == 2
+    assert len(requests) == (2 if corrected else 4)
     assert requests[0]['messages'][-1] == requests[1]['messages'][1]

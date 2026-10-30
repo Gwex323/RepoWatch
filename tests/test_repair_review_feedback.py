@@ -36,6 +36,9 @@ class ReviewFeedbackModel:
 
     async def get_response(self, system_instructions, input, **kwargs):
         self.calls += 1
+        if self.calls > 20 and self.action in {"repeat", "handoff"}:
+            raise Conflict("repair_review_rejected" if self.action == "repeat"
+                           else "repair_tool_selection_invalid")  # Fixture stop.
         if isinstance(input, list):
             for item in input:
                 if isinstance(item, dict) and item.get("role") == "user":
@@ -81,15 +84,15 @@ def test_rejection_revises_retests_and_rereads_current_evidence(workspace, rejec
     model, events = ReviewFeedbackModel(workspace, rejections=rejections), []
     result = asyncio.run(run_repair(model, {"finding": {}, "confirmation": {}},
                                    lambda *e: events.append(e), workspace=workspace))
-    rounds = min(rejections + 1, 3)
-    assert result["approved"] is (rejections < 3)
+    rounds = rejections + 1
+    assert result["approved"] is True
     assert sum(k == "backend_review_evidence" for k, _ in events) == rounds
     assert sum(k == "tool_call" and v == "read_repair_verification"
                for k, v in events) == rounds
     assert model.read_revisions == []
     assert len(workspace.review_history) == len(workspace.verification_history) == rounds
-    assert len(workspace.execution.runtime.test_calls) == 7 * rounds
-    assert sum(k == "review_feedback" for k, _ in events) == min(rejections, 2)
+    assert len(workspace.execution.runtime.test_calls) == 9 * rounds
+    assert sum(k == "review_feedback" for k, _ in events) == rejections
     assert len({r["patch_digest"] for r in workspace.review_history}) == rounds
     assert result["handoffs"] == ["repair_agent -> independent_reviewer"]
     assert (workspace.original / "app.py").read_bytes() == b"print('ok')"
@@ -121,7 +124,7 @@ def test_review_feedback_cannot_repeat_or_bypass_gates(workspace, action, code):
                                lambda *_: None, workspace=workspace))
     assert repair_failure_code(exc.value) == code
     assert len(workspace.verification_history) == len(workspace.review_history) == 1
-    assert len(workspace.execution.runtime.test_calls) == 7
+    assert len(workspace.execution.runtime.test_calls) == 9
 
 
 @pytest.mark.parametrize("code", ["repair_paused", "repair_interrupted",

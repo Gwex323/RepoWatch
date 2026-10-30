@@ -23,7 +23,7 @@ from .diagnosis import redact, redact_values
 from .execution_pipeline import empty_tests
 from .finding_eligibility import origin as finding_origin
 from .finding_eligibility import register as register_repair_origin
-from .repair_workspace import MAX_FILE_BYTES, safe_path, source_tree, test_path
+from .repair_workspace import safe_path, source_tree, test_path
 from .repository_analysis import source_snapshot
 from .repository_source import ExecutionError
 from .source_safety import source_problem
@@ -39,10 +39,10 @@ from .task_scopes import (
     skipped_tests,
 )
 
-MAX_SECONDS = 1800
-MAX_RESUMES = 2
-MAX_FOLLOWUPS = 2
-MAX_MODEL_REQUESTS = 12
+LEASE_SECONDS = 600
+MAX_RESUMES = None
+MAX_FOLLOWUPS = None
+MAX_MODEL_REQUESTS = None
 RETRY_DELAY_SECONDS = 10
 
 
@@ -221,11 +221,10 @@ class Acceptance:
             if self.store.draining(db):
                 return None
             db.execute(
-                "UPDATE scope_acceptance_runs SET state=CASE WHEN attempt>=?+additional_attempts "
-                "THEN 'failed' "
-                "ELSE 'queued' END,error='acceptance_interrupted',owner=NULL,updated=? "
+                "UPDATE scope_acceptance_runs SET state='queued',"
+                "error='acceptance_interrupted',owner=NULL,updated=? "
                 "WHERE state='running' AND lease<?",
-                (MAX_RESUMES, now, now),
+                (now, now),
             )
             for run in db.execute(
                 "SELECT * FROM scope_acceptance_runs WHERE state IN "
@@ -242,16 +241,12 @@ class Acceptance:
                     (analysis["env_id"], run["id"]),
                 ).fetchone():
                     continue
-                if (run["deadline"] and run["deadline"] <= now) or (
-                    run["model_identity"] and run["model_identity"] != model_identity
-                ):
+                if run["model_identity"] and run["model_identity"] != model_identity:
                     db.execute(
                         "UPDATE scope_acceptance_runs SET state='failed',error=?,updated=? "
                         "WHERE id=?",
                         (
-                            "acceptance_deadline_exceeded"
-                            if run["deadline"] and run["deadline"] <= now
-                            else "acceptance_model_changed",
+                            "acceptance_model_changed",
                             now,
                             run["id"],
                         ),
@@ -271,25 +266,23 @@ class Acceptance:
                     continue
                 # Waiting for Docker does not spend a model/attempt recovery allowance.
                 attempt = run["attempt"] + (run["state"] in ("queued", "retry_wait"))
-                if attempt > MAX_RESUMES + run["additional_attempts"]:
-                    continue
                 action = recovery.claim(
                     db, "acceptance", run, [attempt, run["updated"]],
                     [json.loads(run["basis"]), model_identity], self.owner,
-                    now+MAX_SECONDS+30,
+                    now+LEASE_SECONDS,
                 )
                 if not action:
                     continue
                 db.execute(
                     "UPDATE scope_acceptance_runs SET state='running',owner=?,lease=?,"
-                    "attempt=?,deadline=COALESCE(deadline,?),"
+                    "attempt=?,deadline=?,"
                     "model_identity=COALESCE(model_identity,?),error=NULL,retry_after=0,"
                     "updated=? WHERE id=?",
                     (
                         self.owner,
-                        now + MAX_SECONDS + 30,
+                        now + LEASE_SECONDS,
                         attempt,
-                        now + MAX_SECONDS,
+                        None,
                         model_identity,
                         now,
                         run["id"],
@@ -332,23 +325,14 @@ class Acceptance:
             if run["analysis_id"] != analysis_id:
                 raise Conflict("acceptance_basis_changed")
             additional = run["additional_attempts"]
-            if additional_attempt:
-                # An explicit owner grant targets this exact exhausted run, once only.
-                if run_id != run["id"] or additional or run["attempt"] != MAX_RESUMES:
-                    raise Conflict("acceptance_retry_unavailable")
-                additional = 1
-            if (run["attempt"] >= MAX_RESUMES + additional
-                    or run["model_calls"] >= MAX_MODEL_REQUESTS):
-                raise Conflict("acceptance_model_budget")
+            if additional_attempt and run_id != run["id"]:
+                raise Conflict("acceptance_retry_unavailable")
             if self._basis(db, analysis, self._repairs(db, analysis)) != json.loads(run["basis"]):
                 raise Conflict("acceptance_basis_changed")
             if run["model_identity"] != digest(status.get("role_models", {})):
                 raise Conflict("acceptance_model_changed")
             now = time.time()
-            deadline = run["deadline"]
-            if not deadline or deadline <= now:
-                # Only this explicit user action can open a fresh time window. Counts persist.
-                deadline = now + MAX_SECONDS
+            deadline = None
             db.execute(
                 "UPDATE scope_acceptance_runs SET state='queued',owner=NULL,lease=0,"
                 "retry_after=0,deadline=?,additional_attempts=?,updated=? WHERE id=?",
@@ -359,15 +343,13 @@ class Acceptance:
                 "previous_deadline": run["deadline"], "deadline": deadline,
                 "attempt": run["attempt"], "model_calls": run["model_calls"],
                 "additional_attempt_granted": additional_attempt,
-                "attempt_limit": MAX_RESUMES + additional,
+                "attempt_limit": None,
             })
             return {"id": run["id"], "state": "queued"}
 
     def _guard(self, run, model_identity, deadline):
         if self.closing.is_set() or self.execution.closing.is_set():
             raise Conflict("acceptance_paused")
-        if time.monotonic() > deadline:
-            raise Conflict("acceptance_deadline_exceeded")
         status = self.engine.status()
         if not status["enabled"]:
             raise Conflict("acceptance_paused")
@@ -447,11 +429,11 @@ class Acceptance:
             if kind == "request_started":
                 changed = db.execute(
                     "UPDATE scope_acceptance_runs SET model_calls=model_calls+1 WHERE id=? "
-                    "AND owner=? AND state='running' AND model_calls<?",
-                    (run["id"], self.owner, MAX_MODEL_REQUESTS),
+                    "AND owner=? AND state='running'",
+                    (run["id"], self.owner),
                 ).rowcount
                 if not changed:
-                    raise Conflict("acceptance_model_budget")
+                    raise Conflict("acceptance_basis_changed")
             _event(
                 db,
                 _bound(db, run["analysis_id"]),
@@ -717,7 +699,6 @@ class Acceptance:
                 or path.exists()
                 or path.name in ("__init__.py", "conftest.py")
                 or path.suffix != ".py"
-                or len(file.content.encode()) > MAX_FILE_BYTES
                 or source_problem(file.content, file.path)
             ):
                 raise Conflict("acceptance_test_invalid")
@@ -767,17 +748,12 @@ class Acceptance:
                 continue
             specification = json.loads(row["specification"])
             files = AcceptanceCheck.model_validate(specification).files
-            for correction in range(2):
+            while True:
                 guard()
                 if row["state"] == "running" and row["result"] and not row["review"]:
                     # The execution finished before interruption; only its review remains.
                     result = json.loads(row["result"])
                 else:
-                    if row["attempt"] >= 2:
-                        self._block(
-                            row, "acceptance_budget_exhausted", "已达到本项自动验证次数上限。"
-                        )
-                        break
                     # Persist intent before execution; interrupted executions consume an attempt.
                     with self.store.connection() as db:
                         db.execute(
@@ -838,9 +814,7 @@ class Acceptance:
                 if (
                     not passed
                     and verdict.corrected_files
-                    and correction == 0
                     and not verdict.behavioral_failure
-                    and row["attempt"] < 2
                 ):
                     files = verdict.corrected_files
                     specification = {
@@ -962,9 +936,6 @@ class Acceptance:
             data = json.loads(finding["data"])
             feedback = json.loads(finding["feedback"] or "{}")
             root = feedback.get("acceptance_root", finding["id"])
-            count = db.execute(
-                "SELECT COUNT(*) FROM scope_acceptance_followups WHERE root_finding_id=?", (root,)
-            ).fetchone()[0]
             mapped = db.execute(
                 "SELECT 1 FROM task_scope_findings WHERE scope_id=? "
                 "AND item_key=? AND finding_id=?",
@@ -973,14 +944,13 @@ class Acceptance:
             if (
                 not mapped
                 or finding_origin(db, analysis, finding) is None
-                or count >= MAX_FOLLOWUPS
             ):
                 _event(
                     db,
                     _bound(db, run["analysis_id"]),
                     "acceptance_followup_blocked",
                     "system",
-                    {"run_id": run["id"], "reason": "eligibility_or_budget_required"},
+                    {"run_id": run["id"], "reason": "eligibility_required"},
                 )
                 return
             finding_id = uid("finding")
@@ -1068,7 +1038,7 @@ class Acceptance:
         run = await asyncio.to_thread(self.claim)
         if not run:
             return False
-        deadline = time.monotonic() + max(0, run["deadline"] - time.time())
+        deadline = None
         identity = digest(self.engine.status().get("role_models", {}))
 
         def guard():
@@ -1077,7 +1047,7 @@ class Acceptance:
         try:
             packet, env, repairs, tree_hash = await asyncio.to_thread(self._packet, run)
             if not run["plan"]:
-                for correction in range(2):
+                while True:
                     response = await self._model(run, packet, guard)
                     plan = AcceptancePlan.model_validate(
                         {
@@ -1089,8 +1059,6 @@ class Acceptance:
                     try:
                         self._validate_plan(plan, packet)
                     except Conflict as exc:
-                        if correction:
-                            raise
                         packet["validation_feedback"] = {
                             "code": str(exc),
                             "previous_plan": plan.model_dump(),
@@ -1184,18 +1152,15 @@ class Acceptance:
                 "attempt": live["attempt"],
                 "budget": {
                     "attempt": live["attempt"],
-                    "attempt_limit": MAX_RESUMES + live["additional_attempts"],
+                    "attempt_limit": None,
                     "model_calls": live["model_calls"],
                     "max_model_calls": MAX_MODEL_REQUESTS,
-                    "deadline": live["deadline"],
+                    "deadline": None,
                 },
             }
             now = time.time()
             retryable = bool(
                 code in TRANSIENT_CODES
-                and live["attempt"] < MAX_RESUMES + live["additional_attempts"]
-                and live["model_calls"] < MAX_MODEL_REQUESTS
-                and live["deadline"] and live["deadline"] > now + RETRY_DELAY_SECONDS
             )
             state = (
                 "waiting_environment" if code == "docker_unavailable"

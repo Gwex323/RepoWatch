@@ -9,13 +9,26 @@ Status updated: 2026-10-30
   `d22226a`: persist unaccepted evidence/scope correction candidates and resume
   the same correction with fresh validation and safe quote diagnostics.
   Static checks and frontend build passed; test cases and runtime acceptance
-  were not run. Not merged or deployed. See [delivery](evidence-recovery-103.md).
+  were not run. PR #104 integrates main `fd42113` (PR #102); it is not merged
+  or deployed. See [delivery](evidence-recovery-103.md).
+
+- Issue #101 is implemented on `feature/unlimited-workflows-101` (base `d22226a`):
+  remove cumulative workflow quotas and broaden patch permissions, with actual
+  usage, renewable ownership, cancellation, single-request timeouts and evidence/
+  review gates retained. Static checks and build are recorded in
+  [review](tasks/0101/review.md); no test cases, paid model or Docker acceptance
+  were run. Delivery PR #102 was merged as `fd42113` on 2026-10-30;
+  deployment is unverified. See
+  [policy and limitations](unlimited-workflows-101.md), which supersedes earlier
+  finite-quota and Python-only patch descriptions in this plan.
 
 - Issue #99 is implemented on `feature/unified-issues-99`, based on `7b79e8e`:
   five repository pages, a combined GitHub Issue/analysis-finding page with
   source filters, and preserved analysis selection, dispositions and repair
-  navigation. PR #100 was merged as `d22226a` on 2026-10-29 and started in the
-  local workbench using the original database after backup. See
+  navigation. PR #100 was merged as `d22226a` on 2026-10-29 and started
+  at port 8765 with the original database after a consistent backup. Startup and
+  served assets were checked; no test suite/live-model acceptance was run during
+  restart, and managed release supervision was not enabled. See
   [delivery and validation](unified-issues-99.md).
 
 - Issue #97 is implemented on `feature/remove-manual-reproduction-97`, based

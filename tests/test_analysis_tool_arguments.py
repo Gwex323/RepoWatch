@@ -203,13 +203,14 @@ def test_correction_budget_is_shared_across_roles_and_stops_without_execution():
         "path": "app.py", "start_line": 1, "end_line": 1}))])
     asyncio.run(call(stage(first, retries=retries)))
     assert retries.tool_arguments_used == 2
-    second = Script([bad])
-    with pytest.raises(AnalysisFailure, match="analysis_tool_arguments_exhausted"):
-        asyncio.run(call(stage(second, role=ROLES[1], retries=retries)))
-    assert len(second.requests) == 1
+    second = Script([bad, response(("read_source_file", {
+        "path": "app.py", "start_line": 1, "end_line": 1}))])
+    asyncio.run(call(stage(second, role=ROLES[1], retries=retries)))
+    assert len(second.requests) == 2 and retries.tool_arguments_used == 3
 
 
-def test_expansion_exhaustion_is_terminal_in_diagnostics():
+def test_expansion_exhaustion_is_terminal_in_diagnostics(monkeypatch):
+    monkeypatch.setattr("repowatch.repository_analysis.MAX_OUTPUT_TOKENS", 8000)
     events = []
     delegate = Script([response(("read_source_file", '{"path":'))], {"output_tokens": 8000})
     with pytest.raises(AnalysisFailure, match="analysis_output_truncated"):
@@ -417,6 +418,8 @@ def test_missing_scope_report_is_corrected_from_same_real_evidence(persistent):
             return result
     def event(kind, value):
         events.append((kind, value))
+        if persistent and kind == "format_retry" and len(packets) == 3:
+            raise AnalysisFailure("analysis_report_invalid")  # Caller stops fixture.
         if kind == "scope_batch_check":
             return []
         if kind == "scope_batch_execute":
@@ -431,8 +434,8 @@ def test_missing_scope_report_is_corrected_from_same_real_evidence(persistent):
         report = asyncio.run(run_analysis(MissingScope(), context, event))
         assert report["scope_review"]["version"] == 2
         assert len(report["scope_review"]["items"]) == 1
-    assert len(packets) == 2
+    assert len(packets) == (3 if persistent else 2)
     assert events.count(("evidence", "execution_records")) == 1
     assert events.count(("source", "app.py")) == 1
-    assert events.count(("format_retry", ROLES[3])) == 1
+    assert events.count(("format_retry", ROLES[3])) == (3 if persistent else 1)
     assert sum(k == "handoff" for k, _ in events) == 3

@@ -35,8 +35,8 @@ from .store import Conflict, Missing, uid
 from .task_scopes import TaskScopes, digest, scope_packet, scope_snapshot
 
 REPAIR_TIMEOUT_SECONDS = 1800
-REPAIR_MAX_ATTEMPTS = 3
-PUBLICATION_MAX_RETRIES = 3
+REPAIR_MAX_ATTEMPTS = None
+PUBLICATION_MAX_RETRIES = None
 PUBLICATION_RETRY_ERRORS = {
     "github_invalid_token", "github_permission_denied", "github_forbidden",
     "github_rate_limited", "github_denied_or_rate_limited", "github_unreachable",
@@ -100,7 +100,7 @@ class Repairs(EnvironmentRecovery):
             row = db.execute("SELECT * FROM repair_settings WHERE id=1").fetchone()
         return {"enabled": bool(row["enabled"]), "version": row["version"],
                 "model_enabled": bool(self.engine and self.engine.status()["enabled"]),
-                "max_attempts": REPAIR_MAX_ATTEMPTS, "timeout_seconds": REPAIR_TIMEOUT_SECONDS}
+                "max_attempts": REPAIR_MAX_ATTEMPTS, "timeout_seconds": None}
 
     def configure(self, version, enabled):
         with self.store.connection() as db:
@@ -188,17 +188,6 @@ class Repairs(EnvironmentRecovery):
             result["can_retry"] = (
                 row["status"] in ("failed", "interrupted", "waiting_environment")
                 and (not publication_failure or result["publication_retry_available"])
-                and (result["publication_retry_available"] or result["docker_recovery_available"]
-                     or row["attempt"] < self._attempt_limit(row) or self._timeout_recovery(row)
-                     or self._source_read_recovery(row) or self._failure_recovery(row)
-                     or result["submission_recovery_available"]
-                     or result["output_recovery_available"]
-                     or result["protocol_recovery_available"]
-                     or result["workspace_recovery_available"]
-                     or result["verification_recovery_available"]
-                     or result["review_evidence_recovery_available"]
-                     or result["handoff_recovery_available"]
-                     or result["review_feedback_recovery_available"])
                 and self.current(db, row)
             )
             if result["source_error"] or row["error"] in (
@@ -219,30 +208,13 @@ class Repairs(EnvironmentRecovery):
     def _publication_retry_available(cls, row):
         used = json.loads(row["context"]).get("publication_retries", 0)
         return (cls._publication_failure(row) and type(used) is int
-                and 0 <= used < PUBLICATION_MAX_RETRIES)
-
-    @staticmethod
-    def _attempt_limit(row):
-        context = json.loads(row["context"])
-        return (REPAIR_MAX_ATTEMPTS + int(context.get("timeout_recovery_used") is True)
-                + int(context.get("source_read_recovery_used") is True)
-                + int(context.get("submission_recovery_used") is True)
-                + int(context.get("owner_model_retry_used") is True)
-                + int(context.get("handoff_recovery_used") is True)
-                + int(context.get("failure_recovery_used") is True)
-                + int(context.get("output_recovery_used") is True)
-                + int(context.get("protocol_recovery_used") is True)
-                + int(context.get("workspace_recovery_used") is True)
-                + int(context.get("verification_recovery_used") is True)
-                + int(context.get("review_evidence_recovery_used") is True)
-                + int(context.get("environment_recovery_used") is True)
-                + int(context.get("review_feedback_recovery_used") is True))
+                and used >= 0)
 
     @classmethod
     def _review_feedback_recovery(cls, row):
         context = json.loads(row["context"])
         if (row["status"] != "failed" or row["error"] != "repair_review_rejected"
-                or not 1 <= row["attempt"] <= cls._attempt_limit(row)
+                or row["attempt"] < 1
                 or context.get("review_feedback_policy") == REVIEW_FEEDBACK_POLICY
                 or context.get("review_feedback_recovery_used") or row["remote"]
                 or not re.fullmatch(r"[a-f0-9]{64}", row["source_digest"] or "")):
@@ -287,7 +259,7 @@ class Repairs(EnvironmentRecovery):
         verification = cls._json(row, "verification")
         return bool(
             row["status"] == "failed" and row["error"] == "repair_tests_failed"
-            and row["attempt"] == cls._attempt_limit(row)
+            and row["attempt"] >= 1
             and context.get("verification_policy") != VERIFICATION_POLICY
             and not context.get("verification_recovery_used")
             and row["patch"] and row["source_digest"] and not row["review"] and not row["remote"]
@@ -301,7 +273,7 @@ class Repairs(EnvironmentRecovery):
         if not (
             row["status"] == "failed" and row["error"] == "repair_handoff_incomplete"
             and row["stage"] == "independent_reviewer"
-            and row["attempt"] == cls._attempt_limit(row)
+            and row["attempt"] >= 1
             and context.get("review_evidence_policy") != REVIEW_EVIDENCE_POLICY
             and not context.get("review_evidence_recovery_used")
             and row["patch"] and row["diff"] and row["source_digest"]
@@ -332,7 +304,7 @@ class Repairs(EnvironmentRecovery):
         if not (
             row["status"] == "failed" and row["error"] == "repair_handoff_incomplete"
             and row["stage"] in ("candidate", "repair_agent")
-            and 1 <= row["attempt"] <= cls._attempt_limit(row)
+            and row["attempt"] >= 1
             and context.get("handoff_policy") != HANDOFF_POLICY
             and not context.get("handoff_recovery_used")
             and row["patch"] and row["diff"]
@@ -375,7 +347,7 @@ class Repairs(EnvironmentRecovery):
         context = json.loads(row["context"])
         return (
             row["status"] == "failed" and row["error"] == "repair_model_timeout"
-            and row["attempt"] == REPAIR_MAX_ATTEMPTS
+            and row["attempt"] >= 1
             and context.get("request_policy") != REPAIR_REQUEST_POLICY
             and not context.get("timeout_recovery_used")
         )
@@ -385,7 +357,7 @@ class Repairs(EnvironmentRecovery):
         context = json.loads(row["context"])
         return (
             row["status"] == "failed" and row["error"] == "repair_file_unavailable"
-            and row["attempt"] == cls._attempt_limit(row)
+            and row["attempt"] >= 1
             and context.get("source_read_policy") != SOURCE_READ_POLICY
             and not context.get("source_read_recovery_used")
         )
@@ -396,7 +368,7 @@ class Repairs(EnvironmentRecovery):
         if not (
             row["status"] == "failed" and row["stage"] == "repair_agent"
             and row["error"] in {"repair_read_budget", "repair_verification_required"}
-            and row["attempt"] == cls._attempt_limit(row)
+            and row["attempt"] >= 1
             and context.get("submission_policy") != SUBMISSION_POLICY
             and not context.get("submission_recovery_used")
             and not row["patch"] and not row["verification"]
@@ -419,7 +391,7 @@ class Repairs(EnvironmentRecovery):
         context = json.loads(row["context"])
         return (
             row["status"] == "failed" and row["error"] == "repair_failed"
-            and row["attempt"] == cls._attempt_limit(row)
+            and row["attempt"] >= 1
             and context.get("failure_policy") != FAILURE_POLICY
             and not context.get("failure_recovery_used")
             and not row["patch"] and not row["verification"] and not row["remote"]
@@ -431,7 +403,7 @@ class Repairs(EnvironmentRecovery):
         if not (
             row["status"] == "failed"
             and row["error"] in {"repair_output_invalid", "repair_output_truncated"}
-            and row["attempt"] == cls._attempt_limit(row)
+            and row["attempt"] >= 1
             and context.get("output_policy") != OUTPUT_POLICY
             and not context.get("output_recovery_used")
             and not row["patch"] and not row["verification"]
@@ -463,7 +435,7 @@ class Repairs(EnvironmentRecovery):
         context = json.loads(row["context"])
         if not (
             row["status"] == "failed" and row["error"] == "repair_tests_failed"
-            and row["attempt"] == cls._attempt_limit(row)
+            and row["attempt"] >= 1
             and context.get("protocol_policy") != PROTOCOL_POLICY
             and not context.get("protocol_recovery_used")
             and not row["patch"] and not row["verification"] and not row["remote"]
@@ -494,7 +466,7 @@ class Repairs(EnvironmentRecovery):
     def _workspace_recovery(cls, db, row):
         context = json.loads(row["context"])
         if not (
-            row["status"] == "failed" and row["attempt"] == cls._attempt_limit(row)
+            row["status"] == "failed" and row["attempt"] >= 1
             and context.get("workspace_policy") != WORKSPACE_POLICY
             and not context.get("workspace_recovery_used") and not row["remote"]
             and not cls._json(row, "verification") and not cls._json(row, "review")
@@ -700,7 +672,7 @@ class Repairs(EnvironmentRecovery):
                 or row["error"] not in {
                     "repair_submission_not_followed", "repair_tool_selection_invalid",
                 }
-                or row["attempt"] != self._attempt_limit(row)
+                or row["attempt"] < 1
                 or context.get("owner_model_retry_used")
                 or any(row[key] for key in ("patch", "verification", "review", "remote"))):
             raise Conflict("repair_model_retry_unavailable")
@@ -792,17 +764,7 @@ class Repairs(EnvironmentRecovery):
             if (self._publication_failure(row) and not publication_retry):
                 raise Conflict("repair_publication_retry_limit")
             if (row["version"] != version
-                    or row["status"] not in ("failed", "interrupted", "waiting_environment")
-                    or (row["attempt"] >= self._attempt_limit(row)
-                        and not self._timeout_recovery(row)
-                        and not self._source_read_recovery(row)
-                        and not submission_recovery
-                        and not self._failure_recovery(row)
-                        and not output_recovery and not protocol_recovery
-                        and not workspace_recovery and not publication_retry
-                        and not docker_recovery and not verification_recovery
-                        and not review_evidence_recovery and not handoff_recovery
-                        and not model_authorization and not review_feedback_recovery)):
+                    or row["status"] not in ("failed", "interrupted", "waiting_environment")):
                 raise Conflict("repair_changed")
             if not self.current(db, row):
                 raise Conflict("repair_stale")
@@ -985,18 +947,7 @@ class Repairs(EnvironmentRecovery):
                 return None
             if candidate.get("preflight_source_digest"):
                 context["preflight_source_digest"] = candidate["preflight_source_digest"]
-            publication_resume = (
-                context.pop("resume_publication", False) is True and self._verified(row)
-                and type(context.get("publication_retries")) is int
-                and 1 <= context["publication_retries"] <= PUBLICATION_MAX_RETRIES
-            )
-            if row["attempt"] >= self._attempt_limit(row) and not publication_resume:
-                db.execute(
-                    "UPDATE repair_tasks SET status='failed',"
-                    "error='repair_attempt_limit',updated=? "
-                    "WHERE id=?", (now, row["id"]),
-                )
-                return None
+            context.pop("resume_publication", None)
             context["request_policy"] = REPAIR_REQUEST_POLICY
             context["source_read_policy"] = SOURCE_READ_POLICY
             context["submission_policy"] = SUBMISSION_POLICY
@@ -1048,14 +999,12 @@ class Repairs(EnvironmentRecovery):
         started, workspace = time.monotonic(), None
         self.event(row["id"], "fault_attempt", json.dumps({
             "attempt": row["attempt"], "workbench_version": self.store.workbench_version,
-            "attempt_limit": self._attempt_limit(row),
+            "attempt_limit": None,
         }))
         stop = threading.Event()
         def check():
             if self.closing.is_set() or self.execution.closing.is_set() or stop.is_set():
                 raise Conflict("repair_interrupted")
-            if time.monotonic() - started > REPAIR_TIMEOUT_SECONDS:
-                raise Conflict("repair_deadline_exceeded")
             with self.store.connection() as db:
                 recovery_ledger.require(db, row["_recovery_action"], self.owner)
                 recovery_ledger.automatic_guard(db, json.loads(row["context"]))
@@ -1233,7 +1182,7 @@ class Repairs(EnvironmentRecovery):
             self.event(row["id"], "failure_details", json.dumps({
                 "code": code, **repair_failure_details(exc),
                 "attempt_elapsed_seconds": round(time.monotonic() - started, 3),
-                "attempt_timeout_seconds": REPAIR_TIMEOUT_SECONDS, "timing_scope": "attempt",
+                "attempt_timeout_seconds": None, "timing_scope": "attempt",
             }))
             if workspace:
                 self._save_artifacts(row["id"], workspace, action=row["_recovery_action"],

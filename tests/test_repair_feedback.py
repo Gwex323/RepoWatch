@@ -65,6 +65,10 @@ class FeedbackModel(RepairModel):
 
     async def get_response(self, system_instructions, input, **kwargs):
         self.calls += 1
+        if self.action == "repeat" and self.calls > 15:
+            raise Conflict("repair_tests_failed")  # Explicit fixture stop.
+        if self.action == "handoff" and self.calls > 5:
+            raise Conflict("repair_tool_selection_invalid")
         self.requests.append(kwargs)
         if self.calls == 1:
             return tool(self.calls, "read_repair_source", {"path": "app.py", "candidate": False})
@@ -130,20 +134,12 @@ def test_failed_verification_is_fed_back_then_revised_or_bounded(workspace, fail
     events, model = [], FeedbackModel(workspace, failures=failures)
     run = run_repair(model, {"finding": {}, "confirmation": {}},
                      lambda *i: events.append(i), workspace=workspace)
-    if failures == 3:
-        with pytest.raises(Exception) as error:
-            asyncio.run(run)
-        assert repair_failure_code(error.value) == "repair_tests_failed"
-        assert not any(k == "handoff" for k, _ in events)
-    else:
-        result = asyncio.run(run)
-        assert result["approved"] and result["handoffs"] == [
-            "repair_agent -> independent_reviewer",
-        ]
-    revisions = min(failures + 1, 3)
-    assert model.submissions == revisions and len(model.feedback) == min(failures, 2)
+    result = asyncio.run(run)
+    assert result["approved"] and result["handoffs"] == ["repair_agent -> independent_reviewer"]
+    revisions = failures + 1
+    assert model.submissions == revisions and len(model.feedback) == failures
     assert [r["revision"] for r in workspace.verification_history] == list(range(1, revisions + 1))
-    assert len(workspace.execution.runtime.test_calls) == 7 * revisions
+    assert len(workspace.execution.runtime.test_calls) == 9 * revisions
     assert (workspace.original / "app.py").read_bytes() == b"print('ok')"
     assert (workspace.original / "tests/test_original.py").read_text() == "assert True\n"
     assert (workspace.root / "candidate/app.py").read_text() == "print('fixed')\n"
@@ -156,7 +152,7 @@ def test_failed_verification_is_fed_back_then_revised_or_bounded(workspace, fail
 @pytest.mark.parametrize("action,code", [
     ("handoff", "repair_tool_selection_invalid"), ("unresolved", "repair_tests_failed"),
     ("unsafe", "repair_unsafe_path"), ("wrong_hash", "repair_source_changed"),
-    ("old_test", "repair_existing_tests_protected"),
+    ("old_test", "repair_source_changed"),
 ])
 def test_feedback_never_authorizes_early_handoff_or_unsafe_revision(workspace, action, code):
     events, model = [], FeedbackModel(workspace, action=action)
@@ -175,7 +171,7 @@ def test_summary_only_or_reordered_patch_is_not_retested(workspace):
     result = asyncio.run(run_repair(model, {"finding": {}, "confirmation": {}},
                                    lambda *i: events.append(i), workspace=workspace))
     assert result["approved"] and events.count(("patch_unchanged", "rejected")) == 1
-    assert len(workspace.execution.runtime.test_calls) == 14
+    assert len(workspace.execution.runtime.test_calls) == 18
 
 
 def test_persistent_identical_proposals_exhaust_model_budget_without_rerunning_tests(workspace):
@@ -184,8 +180,8 @@ def test_persistent_identical_proposals_exhaust_model_budget_without_rerunning_t
         asyncio.run(run_repair(model, {"finding": {}, "confirmation": {}}, lambda *_: None,
                                workspace=workspace))
     assert repair_failure_code(error.value) == "repair_tests_failed"
-    assert model.calls == 13 and len(workspace.verification_history) == 1
-    assert len(workspace.execution.runtime.test_calls) == 7
+    assert model.calls == 16 and len(workspace.verification_history) == 1
+    assert len(workspace.execution.runtime.test_calls) == 9
 
 
 @pytest.mark.parametrize("code", ["repair_paused", "repair_deadline_exceeded"])
@@ -297,7 +293,7 @@ def test_old_verification_recovery_is_narrow(case):
         row["error"] = "repair_unsafe_path"
     elif case == "not_exhausted":
         row["attempt"] = 2
-    assert Repairs._verification_recovery(row) is (case == "eligible")
+    assert Repairs._verification_recovery(row) is (case in {"eligible", "not_exhausted"})
 
 
 def test_exhausted_old_task_offers_one_explicit_recovery_with_prior_evidence(pending):  # noqa: F811
@@ -321,12 +317,12 @@ def test_exhausted_old_task_offers_one_explicit_recovery_with_prior_evidence(pen
     assert previous["full_suite_after"]["exit_code"] == 1
     assert queued["attempts"][-1]["attempt"] == 3
     assert queued["attempts"][-1]["error"] == "repair_tests_failed"
-    assert repairs._attempt_limit({"context": json.dumps(queued["context"])}) == 4
+    assert repairs.settings()["max_attempts"] is None
     with repairs.store.connection() as db:
         db.execute("UPDATE repair_tasks SET status='failed',attempt=4,error='repair_tests_failed' "
                    "WHERE id=?", (task["id"],))
     final = repairs.get(task["id"])
-    assert not final["verification_recovery_available"] and not final["can_retry"]
+    assert not final["verification_recovery_available"] and final["can_retry"]
 
 
 def test_passed_patch_cannot_be_revised(workspace):
@@ -352,7 +348,7 @@ def test_returning_to_any_previous_failed_candidate_is_not_retested(workspace):
     first["edits"][0]["content"] = "print('candidate 0')\n"
     with pytest.raises(Conflict, match="repair_patch_unchanged"):
         workspace.prepare(Patch.model_validate(first), revise=True)
-    assert workspace.revision == 2 and len(workspace.execution.runtime.test_calls) == 14
+    assert workspace.revision == 2 and len(workspace.execution.runtime.test_calls) == 18
 
 
 @pytest.mark.parametrize("code", ["repair_unsafe_path", "repair_source_changed", "repair_paused",

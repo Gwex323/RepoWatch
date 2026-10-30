@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from agents import (
     Agent,
+    Model,
     ModelSettings,
     OpenAIChatCompletionsModel,
     OpenAIResponsesModel,
@@ -232,7 +233,21 @@ class HandoffAudit(TracingHooks):
         await super().on_handoff(context, from_agent, to_agent)
 
 
-def agents_for(model, reasoning_effort=None):
+class DiagnosisRequestModel(Model):
+    def __init__(self, delegate, timeout):
+        self.delegate, self.timeout = delegate, timeout
+
+    async def get_response(self, *args, **kwargs):
+        return await asyncio.wait_for(
+            self.delegate.get_response(*args, **kwargs), timeout=self.timeout,
+        )
+
+    async def stream_response(self, *args, **kwargs):
+        raise NotImplementedError("Diagnosis uses non-streaming requests.")
+        yield
+
+
+def agents_for(model, reasoning_effort=None, request_timeout=120):
     from .roles import FLOW_ROLES, model_for_role, reasoning_for_role
 
     boundary = (
@@ -248,7 +263,9 @@ def agents_for(model, reasoning_effort=None):
                  for role in FLOW_ROLES["diagnosis"]
                  if (effort := reasoning_for_role(reasoning_effort, role)) is not None}
     reviewer = Agent(
-        name="independent_reviewer", model=model_for_role(model, "independent_reviewer"),
+        name="independent_reviewer", model=DiagnosisRequestModel(
+            model_for_role(model, "independent_reviewer"), request_timeout,
+        ),
         output_type=Advice,
         model_settings=ModelSettings(
             max_tokens=2000, reasoning=reasoning.get("independent_reviewer"),
@@ -259,7 +276,9 @@ def agents_for(model, reasoning_effort=None):
         "use null fields when unsupported or uncertain.",
     )
     assistant = Agent(
-        name="reproduction_assistant", model=model_for_role(model, "reproduction_assistant"),
+        name="reproduction_assistant", model=DiagnosisRequestModel(
+            model_for_role(model, "reproduction_assistant"), request_timeout,
+        ),
         handoffs=[reviewer],
         model_settings=ModelSettings(tool_choice="required", max_tokens=1500,
                                      reasoning=reasoning.get("reproduction_assistant")),
@@ -267,7 +286,9 @@ def agents_for(model, reasoning_effort=None):
         "observed evidence and hand off to independent_reviewer.",
     )
     return Agent(
-        name="repository_analyst", model=model_for_role(model, "repository_analyst"),
+        name="repository_analyst", model=DiagnosisRequestModel(
+            model_for_role(model, "repository_analyst"), request_timeout,
+        ),
         handoffs=[assistant],
         model_settings=ModelSettings(tool_choice="required", max_tokens=1500,
                                      reasoning=reasoning.get("repository_analyst")),
@@ -276,11 +297,12 @@ def agents_for(model, reasoning_effort=None):
     )
 
 
-async def run_agents(model, context, *, reasoning_effort=None, event=None):
+async def run_agents(model, context, *, reasoning_effort=None, event=None, request_timeout=120):
     audit = HandoffAudit(event)
     result = await Runner.run(
-        agents_for(model, reasoning_effort), input=json.dumps(context, ensure_ascii=False),
-        hooks=audit, max_turns=6,
+        agents_for(model, reasoning_effort, request_timeout),
+        input=json.dumps(context, ensure_ascii=False),
+        hooks=audit, max_turns=None,
         run_config=RunConfig(tracing_disabled=True, workflow_name="RepoWatch execution diagnosis"),
     )
     expected = [
@@ -340,6 +362,7 @@ class Diagnoser:
             ) == "chat_completions" else OpenAIResponsesModel
             return await run_agents(
                 model_class(os.environ["REPOWATCH_DIAGNOSIS_MODEL"], client), context,
+                request_timeout=20,
             )
 
 
@@ -508,6 +531,7 @@ class Diagnoses:
                 "fault_workbench_version=? WHERE job_id=?",
                 (now + 120, now, self.store.workbench_version, row["job_id"]),
             )
+        lease = now + 120
         report = json.loads(row["report"])
         try:
             with task_binding(task_id=row["job_id"], env_id=row["env_id"], repo_id=row["repo_id"],
@@ -516,11 +540,21 @@ class Diagnoses:
                 if isinstance(self.engine, AnalysisModelDiagnoser):
                     packet["_fault_job_id"] = row["job_id"]
                 task = asyncio.create_task(self.engine.analyze(packet))
-            deadline = time.monotonic() + 90
             try:
                 while not task.done():
-                    if self.execution.closing.is_set() or time.monotonic() >= deadline:
+                    if self.execution.closing.is_set():
                         raise TimeoutError()
+                    if lease < time.time() + 60:
+                        renewed = time.time() + 120
+                        with self.store.connection() as db:
+                            changed = db.execute(
+                                "UPDATE execution_diagnoses SET lease=? WHERE job_id=? "
+                                "AND state='running' AND lease=?",
+                                (renewed, row["job_id"], lease),
+                            ).rowcount
+                        if not changed:
+                            raise ValueError("diagnosis_changed")
+                        lease = renewed
                     await asyncio.wait({task}, timeout=0.5)
                 candidate = redact_values(await task)
                 Advice.model_validate({key: candidate[key] for key in Advice.model_fields})
@@ -543,14 +577,14 @@ class Diagnoses:
             with self.store.connection() as db:
                 db.execute("UPDATE execution_diagnoses SET fault_diagnostic=? WHERE job_id=?",
                            (json.dumps(diagnostic({"exception_type": type(exc).__name__,
-                                                  "attempt_timeout_seconds": 90,
+                                                  "attempt_timeout_seconds": None,
                                                   "timing_scope": "attempt",
                                                   "timeout_kind": "unknown"})), row["job_id"]))
         with self.store.connection() as db:
             db.execute(
                 "UPDATE execution_diagnoses SET report=?,state=?,lease=0,updated=? "
-                "WHERE job_id=? AND state='running'",
-                (json.dumps(report, ensure_ascii=False), state, time.time(), row["job_id"]),
+                "WHERE job_id=? AND state='running' AND lease=?",
+                (json.dumps(report, ensure_ascii=False), state, time.time(), row["job_id"], lease),
             )
         return True
 

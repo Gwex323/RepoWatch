@@ -100,9 +100,9 @@ def test_expired_worker_is_fenced_and_elapsed_is_retained(db, monkeypatch):
 @pytest.mark.parametrize(
     "metric,amount",
     [
-        ("requests", recovery.MAX_REQUESTS),
-        ("tokens", recovery.MAX_TOKENS),
-        ("seconds", recovery.MAX_SECONDS),
+        ("requests", 1000),
+        ("tokens", 4000000),
+        ("seconds", 10000),
     ],
 )
 def test_root_budget_survives_role_and_child_changes(db, metric, amount):
@@ -110,8 +110,7 @@ def test_root_budget_survives_role_and_child_changes(db, metric, amount):
     recovery.spend(db, first, "one", "consume", metric, amount)
     recovery.finish(db, first, "one", "failed")
     second = claim(db, "acceptance", "followup", owner="two")
-    with pytest.raises(Conflict, match="budget_exhausted"):
-        recovery.spend(db, second, "two", "new-request", "requests")
+    recovery.spend(db, second, "two", "new-request", "requests")
     assert recovery.snapshot(db, "root")["budget"][metric] >= amount
 
 
@@ -130,20 +129,19 @@ def test_upgrade_seeds_known_historical_requests_once(db):
     assert recovery.snapshot(db, "root")["budget"]["corrections"] == 2
 
 
-def test_root_elapsed_guard_stops_tools_not_only_model_requests(db, monkeypatch):
+def test_root_elapsed_usage_does_not_stop_an_owned_worker(db, monkeypatch):
     monkeypatch.setattr(recovery.time, "time", lambda: 1000)
     action = claim(db)
-    db.execute("UPDATE recovery_roots SET seconds=?", (recovery.MAX_SECONDS - 1,))
+    db.execute("UPDATE recovery_roots SET seconds=?", (9999,))
     recovery.require(db, action, "one")
     monkeypatch.setattr(recovery.time, "time", lambda: 1002)
-    with pytest.raises(Conflict, match="budget_exhausted"):
-        recovery.require(db, action, "one")
+    recovery.require(db, action, "one")
 
 
 def test_stopped_and_fenced_actions_still_account_late_usage_once(db):
     action = claim(db)
     recovery.observe(db, action, "one", "request_started")
-    db.execute("UPDATE recovery_roots SET seconds=?", (recovery.MAX_SECONDS,))
+    db.execute("UPDATE recovery_roots SET seconds=?", (10000,))
     recovery.observe(db, action, "one", "usage", 50)
     recovery.finish(db, action, "one", "failed")
     recovery.observe(db, action, "one", "usage", 50)
@@ -229,12 +227,12 @@ def test_crashed_repair_settles_unknown_receipt_then_resumes(pending):  # noqa: 
 
 
 @pytest.mark.parametrize("exhausted", ["resumptions", "seconds", "stop_reason"])
-def test_real_repair_resume_exhaustion_is_failed_not_stuck_queued(pending, exhausted):  # noqa: F811
+def test_legacy_quota_exhaustion_does_not_stop_explicit_resume(pending, exhausted):  # noqa: F811
     repairs, task = failed_repair(pending)
     with repairs.store.connection() as db:
         value = {
-            "resumptions": recovery.MAX_RESUMPTIONS,
-            "seconds": recovery.MAX_SECONDS,
+            "resumptions": 100,
+            "seconds": 10000,
             "stop_reason": "recovery_budget_exhausted",
         }[exhausted]
         db.execute(
@@ -243,7 +241,9 @@ def test_real_repair_resume_exhaustion_is_failed_not_stuck_queued(pending, exhau
     repairs.retry(task["id"], repairs.get(task["id"])["version"])
     assert asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert result["status"] == "failed" and result["error"] == "recovery_budget_exhausted"
+    assert result["error"] != "recovery_budget_exhausted"
+    with repairs.store.connection() as db:
+        assert recovery.snapshot(db, task["analysis_id"])["stop_reason"] is None
     assert not asyncio.run(repairs.tick())
 
 

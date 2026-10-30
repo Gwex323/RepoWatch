@@ -92,6 +92,10 @@ NUMBERS = frozenset(
         "tool_selection_corrections",
     }
 )
+NULLABLE_LIMITS = {
+    "attempt_limit", "max_model_calls", "max_requests", "max_resumptions",
+    "corrections_remaining", "remaining_seconds", "deadline", "attempt_timeout_seconds",
+}
 FLAGS = frozenset(
     {
         "accepted",
@@ -164,6 +168,8 @@ def diagnostic(value, depth=0):
                 result["truncated"] = True
         elif key in FLAGS and type(item) is bool:
             result[key] = item
+        elif key in NULLABLE_LIMITS and item is None:
+            result[key] = None
         elif key in NUMBERS and number(item) is not None:
             result[key] = number(item)
         elif key in LABELS:

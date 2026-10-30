@@ -39,7 +39,7 @@ type AnalysisNotice = {
   repair_failed?: number; repair_published?: number; repair_candidates?: number;
 };
 type System = {
-  sdk_version: string; platform: string; roles: string[]; agent_models?: AgentModels; max_turns: number; max_attempts: number;
+  sdk_version: string; platform: string; roles: string[]; agent_models?: AgentModels; max_turns: number | null; max_attempts: number | null;
   external_model_calls: boolean; execution_diagnosis?: { enabled: boolean; model: string | null };
   repository_analysis?: { enabled: boolean; model: string };
   automatic_repair?: { enabled: boolean; model_enabled?: boolean };
@@ -559,7 +559,7 @@ function App() {
                 ['每日检查', system?.schedule?.enabled_repositories
                   ? `${system.schedule.enabled_repositories} 个仓库` : '未启用'],
                 ['自动合并', '禁止'],
-                ['分析任务最大轮数', String(system?.max_turns)], ['修复任务最大尝试次数', String(system?.max_attempts)],
+                ['分析任务最大轮数', system?.max_turns === null ? '不限额' : String(system?.max_turns)], ['修复任务最大尝试次数', system?.max_attempts === null ? '不限额' : String(system?.max_attempts)],
                 ['外部 Trace 上传', system?.tracing_export ? 'Langfuse · 仅运行元数据' : '关闭'],
                 ['Langfuse', system?.langfuse?.instrumentation_error ? '追踪组件异常 · 任务继续运行'
                   : langfuseReasons[system?.langfuse?.reason ?? 'disabled'] ?? '状态未知'],

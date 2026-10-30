@@ -259,15 +259,15 @@ def test_sdk_structured_plan_has_no_tools_or_handoffs(coordination):
     assert model.calls == 1 and events[0][0] == "request_started"
 
 
-def test_invalid_plan_corrected_once_then_rules_without_recursive_jobs(coordination):
+def test_invalid_plans_continue_until_valid_without_recursive_jobs(coordination):
     coordination.model = Model(outputs=[{"action": "shell"}, {"facts": ["invented"]}])
     fault(coordination)
     asyncio.run(coordination.tick())
-    assert len(coordination.model.calls) == 2
-    assert coordination.list()[0]["budget"]["corrections"] == 1
+    assert len(coordination.model.calls) == 3
+    assert coordination.list()[0]["budget"]["corrections"] == 2
     for _ in range(3):
         asyncio.run(coordination.tick())
-    assert len(coordination.list()) == 1 and len(coordination.model.calls) == 2
+    assert len(coordination.list()) == 1 and len(coordination.model.calls) == 3
 
 
 def test_authorized_fallback_only_used_after_first_failure(coordination, catalog):  # noqa: F811
@@ -281,15 +281,15 @@ def test_authorized_fallback_only_used_after_first_failure(coordination, catalog
     service.configure(version=1, enabled=True, fallback=backup, fallback_authorized=True)
     fault(service)
     asyncio.run(service.tick())
-    assert [entry[1] for entry in service.model.calls] == [None, backup]
-    assert service.list()[0]["budget"]["requests"] == 2
+    assert [entry[1] for entry in service.model.calls] == [None, backup, backup]
+    assert service.list()[0]["budget"]["requests"] == 3
 
 
-def test_model_outage_without_backup_is_bounded_and_local_ledger_survives(coordination):
+def test_model_outage_recovers_without_backup_and_retains_local_ledger(coordination):
     coordination.model = Model(outputs=[TimeoutError(), TimeoutError()])
     fault(coordination)
     asyncio.run(coordination.tick())
-    assert [entry[1] for entry in coordination.model.calls] == [None, None]
+    assert [entry[1] for entry in coordination.model.calls] == [None, None, None]
     assert coordination.list()[0]["state"] == "blocked"
     assert SystemFaults(coordination.store).health()["error"] is None
 
@@ -343,7 +343,7 @@ def test_saved_backup_protects_provider_and_model_even_without_authorization(cat
     service.model = Model(outputs=[TimeoutError(), {}])
     fault(service)
     asyncio.run(service.tick())
-    assert [call[1] for call in service.model.calls] == [None, None]
+    assert [call[1] for call in service.model.calls] == [None, None, None]
 
 
 def test_crashed_diagnosis_is_unknown_not_replayed(coordination):
@@ -428,9 +428,9 @@ def test_source_gate_stops_before_model_invocation(pending, stop):  # noqa: F811
         )
     SystemFaults(repairs.store).tick()
     asyncio.run(coordinator.tick())
-    assert not coordinator.model.calls
+    assert len(coordinator.model.calls) == (0 if stop == "cancelled" else 1)
     job = coordinator.list()[0]
-    assert job["requests"] == 0
+    assert job["requests"] == (0 if stop == "cancelled" else 1)
     assert job["state"] == ("cancelled" if stop == "cancelled" else "blocked")
 
 

@@ -26,7 +26,7 @@ type History = { id: number; occurrence_id: string; state: string; actor: string
   evidence: string | null; created: number; details: Record<string, unknown> };
 type Health = { enabled: boolean | null; version: number; error: string | null; pending: number | null;
   sources: { source: string; error: string | null; failures: number; last_success: number | null }[] };
-type Recovery = { enabled: boolean; version: number; max_requests: number; max_seconds: number };
+type Recovery = { enabled: boolean; version: number; max_requests: number | null; max_seconds: number | null };
 
 const states: Record<string, string> = {
   pending: '待诊断', diagnosing: '诊断中', recovering: '恢复中', verifying: '验证中',
@@ -73,7 +73,10 @@ const show = (value: unknown): string => value === null || value === undefined ?
 function Metadata({ data }: { data: Record<string, unknown> }) {
   return Object.keys(data).length ? <dl className="fault-metadata">{Object.entries(data).map(([key, value]) =>
     <div key={key}><dt>{fields[key] ?? key}</dt><dd>{typeof value === 'object' && value !== null
-      ? <pre>{JSON.stringify(value, null, 2)}</pre> : show(value)}</dd></div>)}</dl> :
+      ? <pre>{JSON.stringify(value, null, 2)}</pre> : value === null && [
+        'attempt_limit', 'max_model_calls', 'max_requests', 'max_resumptions',
+        'corrections_remaining', 'remaining_seconds', 'deadline',
+      ].includes(key) ? '不限额' : show(value)}</dd></div>)}</dl> :
     <p className="action-hint">来源未记录，未知</p>;
 }
 
@@ -159,7 +162,7 @@ export function SystemFaults({ api, repositories, onSource }: {
     {recovery && <div className="execution-actions">
       <label className="checkbox-label"><input type="checkbox" checked={recovery.enabled} disabled={busy}
         onChange={e => changeRecovery(e.target.checked)} />自动恢复新发生的流程故障</label>
-      <span className="action-hint">根任务上限：{recovery.max_requests} 次请求 / {recovery.max_seconds} 秒</span>
+      <span className="action-hint">根任务：{recovery.max_requests === null ? '请求不限额' : `${recovery.max_requests} 次请求`} / {recovery.max_seconds === null ? '无总时限' : `${recovery.max_seconds} 秒`}</span>
     </div>}
     {health && <div className="execution-actions"><button className="text-link" disabled={busy}
       onClick={() => void action(() => api('/system/faults/settings', { version: health.version, enabled: !health.enabled }))}>
@@ -217,7 +220,7 @@ export function SystemFaults({ api, repositories, onSource }: {
               workbench_version: item.workbench_version, trace_id: item.trace_id }} />
             <h4>字段诊断</h4><Metadata data={item.diagnostic} />
             <h4>本次实际模型绑定</h4><Metadata data={item.model_binding} />
-            <h4>预算与停止原因</h4><Metadata data={item.budget} />
+            <h4>累计用量与停止原因</h4><Metadata data={item.budget} />
             {!['dismissed', 'resolved'].includes(item.state) && <>
               {closing === item.id ? <form onSubmit={e => { e.preventDefault(); void action(async () => {
                 await api(`/system/faults/${detail.id}/occurrences/${item.id}/dismiss`, { version: item.version, reason });
