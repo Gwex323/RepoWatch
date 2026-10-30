@@ -678,7 +678,15 @@ class StageModel(Model):
                     self.event("tool_arguments_repaired", self.role)
                 if required:
                     check = self.required_read_validation(response, required, reads)
-                    retry = check["reason"] == "missing_call" and tool_repair is None
+                    scope_wrong_tool = (
+                        tool_repair is None
+                        and not required_retried
+                        and required == "register_task_scope"
+                        and check["reason"] == "wrong_tool"
+                        and check["matching"] == 0
+                    )
+                    retry = (check["reason"] == "missing_call" and tool_repair is None)
+                    retry = retry or scope_wrong_tool
                     recovery = (
                         "not_needed" if check["accepted"] else "retry" if retry
                         else "request_mismatch" if check["reason"] != "missing_call"
@@ -694,13 +702,27 @@ class StageModel(Model):
                         self.retries.required_read_used += 1
                         self.retries.tool_arguments_used += 1
                         self.event("required_read_retry", read_kind)
-                        required_correction = (
-                            f"\nThe previous response contained no callable {required} request. "
-                            "No tool ran and no prerequisite was satisfied. Return only a real "
-                            f"function call to {required}, using its supplied tool schema. "
-                            "Do not return an empty response, tool-call prose, a report, another "
-                            "tool or a handoff. Preserve the original task and collected evidence."
-                        )
+                        if scope_wrong_tool:
+                            required_correction = (
+                                "\nThe previous response did not satisfy the mandatory "
+                                f"{required} call. No tool ran and no prerequisite was satisfied. "
+                                "Return only a real function call to "
+                                f"{required}, using its supplied tool schema. "
+                                "Do not return an empty response, tool-call prose, a report, "
+                                "another tool or a handoff. Do not mention or resend any "
+                                "incorrect tool name or arguments. Preserve the original task "
+                                "and collected evidence."
+                            )
+                        else:
+                            required_correction = (
+                                "\nThe previous response contained no callable "
+                                f"{required} request. No tool ran and no prerequisite was "
+                                "satisfied. Return only a real function call to "
+                                f"{required}, using its supplied tool schema. "
+                                "Do not return an empty response, tool-call prose, a report, "
+                                "another tool or a handoff. Preserve the original task and "
+                                "collected evidence."
+                            )
                         continue
                     if required_retried:
                         self.event("required_read_recovered", read_kind)
