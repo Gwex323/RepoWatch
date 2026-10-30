@@ -2,7 +2,7 @@
 
 Status: local execution, real Issue intake, daily checks and controlled repair/publication
 implemented; central coordination is in staged development
-Updated: 2026-10-29
+Updated: 2026-10-30
 
 ## Goal
 
@@ -11,12 +11,21 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
 
+Issue #103 is implemented on `feature/evidence-recovery-103` (base `d22226a`):
+private unaccepted correction candidates survive interrupted evidence/scope
+correction requests, with checkpoint bindings, freshly computed errors and
+metadata-only quote comparisons. Static checks and frontend build passed; no
+test cases or runtime acceptance were run. This increment is not merged or
+deployed. See [correction recovery](evidence-recovery-103.md).
+
 Issue #99 is implemented on `feature/unified-issues-99` (base `7b79e8e`): the
 repository flow has five pages, and Issue combines GitHub issues with local
 analysis findings, source filters, evidence and disposition. Reports remain in
 analysis; patches, tests and independent review remain in repair. The legacy
 `reproduction` section maps to Issue. Validation and delivery status are recorded
-in [unified Issue](unified-issues-99.md); this increment is not merged or deployed.
+in [unified Issue](unified-issues-99.md). PR #100 was merged as `d22226a` on
+2026-10-29 and started in the local workbench with the original database after
+a consistent backup. That startup did not validate this new #103 increment.
 
 The local single-user workbench supports fixed-revision Docker execution, model-based
 analysis, GitHub Issue synchronization and Issue-based analysis, daily repository

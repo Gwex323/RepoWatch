@@ -1,14 +1,21 @@
 # Implementation Plan
 
 Date: 2026-10-09
-Status updated: 2026-10-29
+Status updated: 2026-10-30
 
 ## Current Delivery Status
+
+- Issue #103 is implemented on `feature/evidence-recovery-103`, based on
+  `d22226a`: persist unaccepted evidence/scope correction candidates and resume
+  the same correction with fresh validation and safe quote diagnostics.
+  Static checks and frontend build passed; test cases and runtime acceptance
+  were not run. Not merged or deployed. See [delivery](evidence-recovery-103.md).
 
 - Issue #99 is implemented on `feature/unified-issues-99`, based on `7b79e8e`:
   five repository pages, a combined GitHub Issue/analysis-finding page with
   source filters, and preserved analysis selection, dispositions and repair
-  navigation. This increment is not merged or deployed. See
+  navigation. PR #100 was merged as `d22226a` on 2026-10-29 and started in the
+  local workbench using the original database after backup. See
   [delivery and validation](unified-issues-99.md).
 
 - Issue #97 is implemented on `feature/remove-manual-reproduction-97`, based

@@ -87,6 +87,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_provider_timeout_exhausted: '模型请求超过等待时限，且本次允许的自动重试已用完。请检查模型服务负载或网络后再重试。',
   analysis_recovery_budget_exhausted: '本条分析的累计恢复额度已用完。已有证据和失败记录已保留；重试不会重置额度。',
   analysis_recovery_basis_changed: '恢复依据已变化，本次自动续办停止，未复用过期证据。请确认当前任务后重新分析。',
+  analysis_correction_checkpoint_invalid: '证据纠正现场未能安全保存，报告未获接受。请查看服务日志后重试。',
   analysis_provider_unreachable: '无法连接模型服务，请检查地址与网络。',
   analysis_evidence_unverified: '源码证据未通过完整校验，本次未保存问题。请查看具体原因；若可恢复报告，可从已保存证据继续。',
   analysis_review_incomplete: 'Agent 未完成规定的源码读取与交接，本次未保存问题，请重试。',
@@ -221,6 +222,10 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'report_checkpoint_saved') return '已保存最终审查输入及真实读取、交接记录';
   if (item.kind === 'report_checkpoint_invalidated') return '已保存的审查依据发生变化，重新执行完整分析';
   if (item.kind === 'report_resumed') return '从已保存证据恢复最终报告，仅调用独立审查员';
+  if (item.kind === 'report_correction_saved') return '已保存待纠正报告；中断后可继续处理原报告';
+  if (item.kind === 'report_correction_resumed') return '正在继续纠正原报告，已重新核对错误位置与源码依据';
+  if (item.kind === 'report_correction_invalidated' || item.kind === 'report_correction_cleared') return '原纠正现场已失效，将使用有效审查依据重新生成报告';
+  if (item.kind === 'evidence_comparison') return '已记录引用差异诊断，可用于区分错行号、空白差异与文本不匹配';
   if (item.kind === 'report_recovery_scheduled') {
     try {
       const detail = JSON.parse(item.agent) as { attempt: number; delay_seconds: number };
