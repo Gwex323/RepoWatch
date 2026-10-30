@@ -5,11 +5,13 @@ import base64
 import hashlib
 import re
 from datetime import datetime, timezone
+from pathlib import PurePosixPath
 from urllib.parse import quote
 
 from .github_accounts import GitHubError
 from .github_contributions import GitHubPublisher, remote_link, sha
 from .issue_reuse import issue_comment
+from .repair_workspace import safe_relative_name
 from .source_safety import source_problem
 from .store import Conflict
 from .task_scopes import strip_closing_references
@@ -95,18 +97,23 @@ class MaintenanceTarget(GitHubPublisher):
         tree = request("GET", f"/repos/{REPOSITORY}/git/trees/{revision}?recursive=1")
         if tree.get("truncated") is not False or not isinstance(tree.get("tree"), list):
             raise Conflict("maintenance_source_scan_limit")
-        entries = {
-            row["path"]: row
-            for row in tree["tree"]
-            if row.get("type") == "blob"
-            and row.get("mode") in ("100644", "100755")
-            and (
-                row.get("path", "").startswith("repowatch/")
-                and row["path"].endswith(".py")
-                or row.get("path", "").startswith("frontend/")
-                and row["path"].endswith((".ts", ".tsx"))
-            )
-        }
+        entries = {}
+        for row in tree["tree"]:
+            name = row.get("path", "")
+            if row.get("type") != "blob" or row.get("mode") not in ("100644", "100755"):
+                continue
+            path = PurePosixPath(name)
+            if path.suffix.lower() not in {
+                ".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".json", ".toml",
+                ".yaml", ".yml", ".ini", ".cfg", ".txt", ".md", ".sh", ".ps1",
+                ".css", ".html", ".lock",
+            } and path.name not in {"Dockerfile", "Makefile"}:
+                continue
+            try:
+                safe_relative_name(name)
+            except Conflict:
+                continue
+            entries[name] = row
         hints = " ".join(str(v) for v in facts.values()).lower()
         names = sorted(
             entries,

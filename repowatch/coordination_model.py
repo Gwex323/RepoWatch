@@ -1,5 +1,6 @@
 """The coordinator produces data only; it receives no execution tools."""
 
+import asyncio
 import json
 from typing import Literal
 
@@ -7,7 +8,7 @@ from agents import Agent, ModelSettings, RunConfig, Runner
 from openai.types.shared import Reasoning
 from pydantic import BaseModel, ConfigDict, Field
 
-from .analysis_model import report_tokens
+from .analysis_model import REPAIR_REQUEST_TIMEOUT_SECONDS, report_tokens
 from .roles import COORDINATOR, model_for_role, reasoning_for_role
 from .store import Conflict
 
@@ -48,11 +49,14 @@ async def run_coordination(model, context, event, *, reasoning_effort=None):
     )
     event("request_started", "")
     try:
-        result = await Runner.run(
-            agent,
-            json.dumps(context, ensure_ascii=False),
-            max_turns=1,
-            run_config=RunConfig(tracing_disabled=True),
+        result = await asyncio.wait_for(
+            Runner.run(
+                agent,
+                json.dumps(context, ensure_ascii=False),
+                max_turns=1,
+                run_config=RunConfig(tracing_disabled=True),
+            ),
+            timeout=REPAIR_REQUEST_TIMEOUT_SECONDS,
         )
     except Exception:
         report_tokens(event, delegate=delegate)

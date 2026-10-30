@@ -11,6 +11,7 @@ from agents.models.interface import ModelTracing
 from openai import AsyncOpenAI
 from openai.types.shared import Reasoning
 from test_execution import service  # noqa: F401
+from test_repository_analysis import force_fixture_closing
 
 from repowatch.analysis_model import (
     AnalysisModel,
@@ -20,7 +21,7 @@ from repowatch.analysis_model import (
     finalization_mode,
     output_protocol,
 )
-from repowatch.repository_analysis import ROLES, STAGE_LIMITS, AnalysisFailure, Review
+from repowatch.repository_analysis import ROLES, AnalysisFailure, Review
 
 
 @pytest.mark.parametrize("base_url,api,compatible", [
@@ -88,15 +89,22 @@ def test_saved_deepseek_config_runs_forced_reads_handoffs_and_validated_report(
     assert "synthetic-not-a-real-key" not in json.dumps(status)
     # Close stages as soon as mandatory reads finish, exercising named handoffs
     # rather than relying only on voluntary tool_choice=auto transfers.
-    for index, role in enumerate(ROLES):
-        _, reads, chars = STAGE_LIMITS[role]
-        monkeypatch.setitem(STAGE_LIMITS, role, (2 if index == 0 else 0, reads, chars))
+    force_fixture_closing(monkeypatch)
     requests, events = [], []
     next_tool = 0
     mismatch_emitted = False
     expected_tools = ["read_execution_records", "read_source_file", *[
         f"transfer_to_{role}" for role in ROLES[1:]
     ]]
+
+    def record(kind, value):
+        events.append((kind, value))
+        if kind == "format_retry" and sum(k == kind for k, _ in events) >= 3:
+            raise AnalysisFailure("analysis_report_invalid")  # Caller stops the fixture.
+        if kind == "handoff_validation" and not json.loads(value).get("accepted"):
+            rejected = [v for k, v in events if k == kind and not json.loads(v).get("accepted")]
+            if len(rejected) >= 3:
+                raise AnalysisFailure("analysis_handoff_not_followed")
 
     async def transport(request):
         nonlocal next_tool, mismatch_emitted
@@ -138,16 +146,16 @@ def test_saved_deepseek_config_runs_forced_reads_handoffs_and_validated_report(
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     if handoff_behavior == "invalid":
         with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
-            asyncio.run(engine.analyze(context, lambda *item: events.append(item)))
-        assert len(requests) == 4
+            asyncio.run(engine.analyze(context, record))
+        assert len(requests) == 5
         assert not any(kind == "handoff" for kind, _ in events)
     elif invalid_report:
         with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
-            asyncio.run(engine.analyze(context, lambda *item: events.append(item)))
-        assert sum(kind == "format_retry" for kind, _ in events) == 1
-        assert len(requests) == 7 + (handoff_behavior == "recover")
+            asyncio.run(engine.analyze(context, record))
+        assert sum(kind == "format_retry" for kind, _ in events) >= 2
+        assert len(requests) == 8 + (handoff_behavior == "recover")
     else:
-        report = asyncio.run(engine.analyze(context, lambda *item: events.append(item)))
+        report = asyncio.run(engine.analyze(context, record))
         assert len(report["handoffs"]) == 3
         assert sum(kind == "evidence" for kind, _ in events) == 1
         assert report["files_read"] == ["app.py"]

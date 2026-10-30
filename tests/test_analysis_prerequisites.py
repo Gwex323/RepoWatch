@@ -13,7 +13,6 @@ from test_repository_analysis import Engine, ReviewModel, prepare_tested
 
 from repowatch.repository_analysis import (
     ROLES,
-    STAGE_LIMITS,
     Analyses,
     AnalysisFailure,
     StageBudget,
@@ -110,9 +109,11 @@ def test_ignoring_required_tool_fails_before_handoff_or_execution(which):
     assert not any(kind == "source" for kind, _ in events)
 
 
-def test_missing_source_reads_never_bypass_stage_budget():
+def test_missing_source_reads_do_not_authorize_handoff_without_a_quota():
     class InvalidSource(GateAwareModel):
         async def get_response(self, system_instructions, input, **kwargs):
+            if self.calls >= 12:
+                raise AnalysisFailure("analysis_source_unread")  # Fixture termination.
             result = await super().get_response(system_instructions, input, **kwargs)
             for output in result.output:
                 if output.type == "function_call" and output.name == "read_source_file":
@@ -123,14 +124,15 @@ def test_missing_source_reads_never_bypass_stage_budget():
     model, events = InvalidSource(), []
     with pytest.raises(AnalysisFailure, match="analysis_source_unread"):
         asyncio.run(run_analysis(model, context(), lambda *args: events.append(args)))
-    assert model.calls == STAGE_LIMITS[ROLES[0]][0]
+    assert model.calls == 12
     assert not any(kind in ("handoff", "source") for kind, _ in events)
 
 
-def test_expired_stage_with_missing_execution_never_calls_provider():
+def test_explicit_closing_with_missing_execution_never_calls_provider():
     stage = StageModel(
         ReviewModel(), ROLES[0], StageBudget(started=time.monotonic() - 500), lambda *_: None,
         required_read=lambda: "read_execution_records",
+        force_closing=True,
     )
     with pytest.raises(AnalysisFailure, match="analysis_execution_unread"):
         asyncio.run(stage.get_response("fixture", "fixture", tools=[],
@@ -197,7 +199,7 @@ def test_required_source_accepts_bounded_pure_read_batches(count):
     assert sum(kind == "source" for kind, _ in events) == count
     checks = [json.loads(value) for kind, value in events if kind == "required_read_validation"]
     assert checks[-1] == {"required": "source", "calls": count, "matching": count,
-                         "other": 0, "allowed": 10, "messages": 0, "refusals": 0,
+                         "other": 0, "allowed": count, "messages": 0, "refusals": 0,
                          "text_chars": 0, "accepted": True, "reason": "accepted",
                          "recoverable": False, "recovery": "not_needed",
                          "corrections_remaining": 0}
@@ -228,8 +230,17 @@ def test_required_batch_rejection_is_pre_execution_and_diagnostics_do_not_leak(c
     model, events = BadBatch(), []
     code = ("analysis_execution_read_not_followed" if case == "duplicate_execution"
             else "analysis_source_read_not_followed")
+    if case == "too_many":
+        report = asyncio.run(run_analysis(model, context(), lambda *args: events.append(args)))
+        assert len(report["handoffs"]) == 3
+        assert sum(kind == "source" for kind, _ in events) == 11
+        return
+    def record(kind, value):
+        events.append((kind, value))
+        if case == "empty" and kind == "required_read_retry" and model.calls >= 5:
+            raise AnalysisFailure(code)  # Caller stops the fixture.
     with pytest.raises(AnalysisFailure, match=code):
-        asyncio.run(run_analysis(model, context(), lambda *args: events.append(args)))
+        asyncio.run(run_analysis(model, context(), record))
     assert not any(kind in ("source", "handoff") for kind, _ in events)
     checks = [json.loads(value) for kind, value in events if kind == "required_read_validation"]
     assert checks[-1]["calls"] == (0 if case == "empty" else 11 if case == "too_many" else 2)
@@ -237,12 +248,14 @@ def test_required_batch_rejection_is_pre_execution_and_diagnostics_do_not_leak(c
         assert checks[-1]["other"] == 1 and checks[-1]["matching"] == 1
     assert "credential-sentinel" not in str(events)
     assert "unknown_sensitive_tool_name" not in str(events)
-    assert model.calls == (1 if case == "duplicate_execution" else 3 if case == "empty" else 2)
+    assert model.calls == (1 if case == "duplicate_execution" else 5 if case == "empty" else 2)
 
 
 def test_invalid_source_batch_still_consumes_original_read_budget():
     class InvalidBatch(GateAwareModel):
         async def get_response(self, system_instructions, input, **kwargs):
+            if self.calls >= 5:
+                raise AnalysisFailure("analysis_source_unread")  # Fixture stop.
             result = await super().get_response(system_instructions, input, **kwargs)
             if kwargs["model_settings"].tool_choice == "read_source_file":
                 original = result.output[0]
@@ -256,5 +269,5 @@ def test_invalid_source_batch_still_consumes_original_read_budget():
     model, events = InvalidBatch(), []
     with pytest.raises(AnalysisFailure, match="analysis_source_unread"):
         asyncio.run(run_analysis(model, context(), lambda *args: events.append(args)))
-    assert model.calls == 2
+    assert model.calls == 5
     assert not any(kind in ("source", "handoff") for kind, _ in events)

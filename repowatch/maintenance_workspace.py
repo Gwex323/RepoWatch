@@ -8,7 +8,7 @@ import time
 from types import SimpleNamespace
 
 from .maintenance_target import REPOSITORY
-from .repair_workspace import RepairWorkspace, digest, source_tree
+from .repair_workspace import RepairWorkspace, digest, safe_path, source_tree
 from .store import Conflict
 
 
@@ -126,6 +126,17 @@ def create_workspace(execution, task, token, check):
         },
     }
     workspace = RepairWorkspace(facade, task["id"].replace("maintenance_", "repair_"), env, check)
+    # RepoWatch contains a Python service and a TypeScript frontend. Always
+    # verify both when repairing RepoWatch, including dependency/build changes.
+    workspace.additional_profiles = [{
+        "name": "frontend_build",
+        "config": {**env["config"], "language": "typescript", "install": "npm ci",
+                   "test": "npm run build"},
+    }, {
+        "name": "python_static",
+        "config": {**env["config"],
+                   "test": "python -m compileall -q repowatch && python -m ruff check repowatch"},
+    }]
     return workspace
 
 
@@ -154,16 +165,17 @@ def approved_artifacts(workspace, review):
         or review.get("handoffs") != ["repair_agent -> independent_reviewer"]
     ):
         raise Conflict("maintenance_review_stale")
-    if any(
-        not (
-            edit["path"].startswith("repowatch/")
-            and edit["path"].endswith(".py")
-            or edit["path"].startswith("tests/")
-            and edit["path"].endswith(".py")
-        )
-        for edit in patch["edits"]
-    ):
-        raise Conflict("maintenance_verifier_scope_unsupported")
+    for edit in patch["edits"]:
+        safe_path(workspace.candidate, edit["path"])
+    required_profiles = {"frontend_build", "python_static"}
+    if {profile["name"] for profile in workspace.additional_profiles} != required_profiles:
+        raise Conflict("maintenance_verification_incomplete")
+    for name in required_profiles:
+        for variant in ("original", "candidate"):
+            evidence = workspace.verification.get(name + "_" + variant, {})
+            if (type(evidence.get("exit_code")) is not int
+                    or variant == "candidate" and evidence["exit_code"] != 0):
+                raise Conflict("maintenance_verification_incomplete")
     if source_tree(workspace.original, workspace.check) != workspace.files:
         raise Conflict("maintenance_source_changed")
     expected = dict(workspace.files)
@@ -171,7 +183,8 @@ def approved_artifacts(workspace, review):
         expected[edit["path"]] = digest(edit["content"].encode())
     if source_tree(workspace.candidate, workspace.check) != expected:
         raise Conflict("maintenance_candidate_changed")
-    for key in ("original_suite", "regression_before", "regression_after", "full_suite_after"):
+    for key in ("original_suite", "original_suite_after", "regression_before",
+                "regression_after", "full_suite_after"):
         if key not in workspace.verification:
             raise Conflict("maintenance_verification_incomplete")
     if workspace.verification["original_suite"]["exit_code"] != 0:

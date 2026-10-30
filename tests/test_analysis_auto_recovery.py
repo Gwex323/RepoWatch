@@ -1,16 +1,14 @@
-"""Acceptance for bounded automatic final-review recovery."""
+"""Persistent usage and automatic final-review recovery without quotas."""
 
 import asyncio
 import json
 from types import SimpleNamespace
 
-import pytest
 from test_analysis_report_recovery import RecoveryEngine
 from test_execution import service  # noqa: F401
 from test_repository_analysis import prepare_tested
 
 from repowatch.repository_analysis import Analyses, report_diagnostics
-from repowatch.store import Conflict
 
 
 def failed_review(execution_fixture):
@@ -75,12 +73,12 @@ def test_valid_checkpoint_is_automatically_resumed_without_manual_retry(service)
     assert any(item["kind"] == "report_resumed" for item in completed["events"])
 
 
-def test_automatic_retries_keep_the_same_persistent_budget_and_stop_at_limit(service):  # noqa: F811
+def test_automatic_retries_keep_usage_beyond_the_old_limit(service):  # noqa: F811
     analyses, engine, queued = failed_review(service)
     analysis_id = queued["id"]
     initial_requests = queued["automatic_recovery"]["requests"]
 
-    for expected_resume in (2, 3, 3):
+    for expected_resume in (2, 3, 4):
         with analyses.store.connection() as db:
             db.execute("UPDATE analysis_report_recovery SET retry_after=0 "
                        "WHERE analysis_id=?", (analysis_id,))
@@ -89,22 +87,16 @@ def test_automatic_retries_keep_the_same_persistent_budget_and_stop_at_limit(ser
         assert current["automatic_recovery"]["resumptions"] == expected_resume
 
     stopped = analyses.get(analysis_id)
-    assert stopped["status"] == "failed"
-    assert stopped["automatic_recovery"]["state"] == "stopped"
-    assert stopped["automatic_recovery"]["stop_reason"] == "resumption_limit"
-    assert stopped["automatic_recovery"]["max_resumptions"] == 3
+    assert stopped["status"] == "queued"
+    assert stopped["automatic_recovery"]["state"] == "waiting"
+    assert stopped["automatic_recovery"]["stop_reason"] is None
+    assert stopped["automatic_recovery"]["max_resumptions"] is None
     assert stopped["automatic_recovery"]["requests"] == initial_requests + 3
     assert stopped["report"] is None
     scheduled = [json.loads(event["agent"]) for event in stopped["events"]
                  if event["kind"] == "report_recovery_scheduled"]
-    assert [item["delay_seconds"] for item in scheduled] == [10, 30, 60]
-    assert stopped["events"][-1]["kind"] == "report_recovery_stopped"
-
-    with pytest.raises(Conflict, match="analysis_recovery_budget_exhausted"):
-        analyses.retry(analysis_id, stopped["version"])
-    rejected = analyses.get(analysis_id)["automatic_recovery"]
-    for key in ("requests", "resumptions", "deadline", "retry_budget", "state"):
-        assert rejected[key] == stopped["automatic_recovery"][key]
+    assert [item["delay_seconds"] for item in scheduled] == [10, 30, 60, 60]
+    assert stopped["automatic_recovery"]["deadline"] is None
 
 
 def test_third_manual_continuation_preserves_existing_budget_after_restart(service):  # noqa: F811
@@ -124,7 +116,7 @@ def test_third_manual_continuation_preserves_existing_budget_after_restart(servi
     retried = restarted.retry(analysis_id, failed["version"])
     assert retried["status"] == "queued"
     assert retried["automatic_recovery"]["resumptions"] == 3
-    assert retried["automatic_recovery"]["max_resumptions"] == 3
+    assert retried["automatic_recovery"]["max_resumptions"] is None
     assert retried["automatic_recovery"]["requests"] == before["requests"]
     with restarted.store.connection() as db:
         after = dict(db.execute("SELECT * FROM analysis_report_recovery WHERE analysis_id=?",

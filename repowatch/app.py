@@ -36,7 +36,7 @@ from .provider_probe import ProviderProbe
 from .release_manifest import Manifest
 from .releases import Releases
 from .repairs import REPAIR_MAX_ATTEMPTS, Repairs
-from .repository_analysis import MAX_TURNS, Analyses
+from .repository_analysis import Analyses
 from .repository_source import ExecutionError
 from .roles import ROLES
 from .schedules import RepositorySchedules
@@ -549,7 +549,7 @@ def create_app(
             "storage": "SQLite",
             "runtime": "Python",
             "platform": platform.system(),
-            "max_turns": MAX_TURNS,
+            "max_turns": None,
             "max_attempts": REPAIR_MAX_ATTEMPTS,
             "memory": {"enabled": True, "scope": "repository_and_exact_revision",
                        "retrieval": "literal_relevance_and_recency", "semantic_search": False},

@@ -7,12 +7,13 @@ import time
 from .store import Conflict
 
 POLICY = "workflow-recovery-v1"
-MAX_REQUESTS = 128
-MAX_TOKENS = 3200000
-MAX_SECONDS = 5400
-MAX_ACTIONS = 3
-MAX_CORRECTIONS = 32
-MAX_RESUMPTIONS = 12
+MAX_REQUESTS = None
+MAX_TOKENS = None
+MAX_SECONDS = None
+MAX_ACTIONS = None
+MAX_CORRECTIONS = None
+MAX_RESUMPTIONS = None
+LEASE_SECONDS = 600
 DELAYS = (10, 30, 60)
 FLOWS = {"analysis", "repair", "acceptance", "coordination", "maintenance"}
 AUTOMATIC_ERRORS = {
@@ -141,28 +142,19 @@ def claim(db, flow, task, attempt, basis, owner, lease, now=None):
         (action, root, flow, task["id"], digest(basis), owner, now),
     )
     db.execute(
-        "UPDATE recovery_roots SET owner=?,action_id=?,lease=? WHERE id=?",
+        "UPDATE recovery_roots SET owner=?,action_id=?,lease=?,"
+        "stop_reason=CASE WHEN stop_reason='recovery_budget_exhausted' THEN NULL "
+        "ELSE stop_reason END WHERE id=?",
         (owner, action, lease, root),
     )
     if db.execute(
         "SELECT 1 FROM recovery_actions WHERE flow=? AND task_id=? AND id<>?",
         (flow, task["id"], action),
     ).fetchone():
-        saved = db.execute("SELECT * FROM recovery_roots WHERE id=?", (root,)).fetchone()
-        if (
-            saved["resumptions"] >= MAX_RESUMPTIONS
-            or saved["seconds"] >= MAX_SECONDS
-            or saved["stop_reason"]
-        ):
-            db.execute(
-                "UPDATE recovery_roots SET stop_reason='recovery_budget_exhausted' WHERE id=?",
-                (root,),
-            )
-        else:
-            db.execute(
-                "INSERT INTO recovery_usage VALUES(?,'resume','resumptions',1,?)", (action, now)
-            )
-            db.execute("UPDATE recovery_roots SET resumptions=resumptions+1 WHERE id=?", (root,))
+        db.execute(
+            "INSERT INTO recovery_usage VALUES(?,'resume','resumptions',1,?)", (action, now)
+        )
+        db.execute("UPDATE recovery_roots SET resumptions=resumptions+1 WHERE id=?", (root,))
     return action
 
 
@@ -215,14 +207,30 @@ def require(db, action, owner):
     from .release_state import require_source_authorization
 
     require_source_authorization(db, saved["flow"], saved["task_id"])
-    root = db.execute(
-        "SELECT stop_reason,seconds FROM recovery_roots WHERE id=?", (saved["root_id"],)
-    ).fetchone()
-    if (
-        root["stop_reason"]
-        or root["seconds"] + max(0, time.time() - saved["started"]) >= MAX_SECONDS
-    ):
-        raise Conflict("recovery_budget_exhausted")
+    # Active workers renew a finite lease. Duration is never a task quota;
+    # a vanished worker still becomes recoverable after the last heartbeat.
+    now = time.time()
+    root = db.execute("SELECT lease FROM recovery_roots WHERE id=?",
+                      (saved["root_id"],)).fetchone()
+    if root["lease"] < now + LEASE_SECONDS / 2:
+        lease = now + LEASE_SECONDS
+        changed = db.execute(
+            "UPDATE recovery_roots SET lease=? WHERE id=? AND action_id=? AND owner=? AND lease>?",
+            (lease, saved["root_id"], action, owner, now),
+        ).rowcount
+        if not changed:
+            raise Conflict("recovery_ownership_changed")
+        table = {"analysis": "repository_analyses", "repair": "repair_tasks",
+                 "acceptance": "scope_acceptance_runs", "coordination": "coordination_jobs",
+                 "maintenance": "maintenance_tasks"}[saved["flow"]]
+        column = ("state" if saved["flow"] in {"acceptance", "coordination", "maintenance"}
+                  else "status")
+        state = "diagnosing" if saved["flow"] == "coordination" else "running"
+        if not db.execute(
+            f"UPDATE {table} SET lease=? WHERE id=? AND {column}=?",
+            (lease, saved["task_id"], state),
+        ).rowcount:
+            raise Conflict("recovery_ownership_changed")
 
 
 def spend(db, action, owner, event_key, kind, amount=1):
@@ -245,20 +253,6 @@ def spend(db, action, owner, event_key, kind, amount=1):
         "SELECT 1 FROM recovery_usage WHERE action_id=? AND event_key=?", (action, event_key)
     ).fetchone():
         return
-    root = db.execute("SELECT * FROM recovery_roots WHERE id=?", (saved["root_id"],)).fetchone()
-    if kind == "requests" and (
-        root["requests"] + amount > MAX_REQUESTS
-        or root["tokens"] >= MAX_TOKENS
-        or root["seconds"] + max(0, time.time() - saved["started"]) >= MAX_SECONDS
-    ):
-        raise Conflict("recovery_budget_exhausted")
-    if (
-        kind == "corrections"
-        and root[kind] + amount > MAX_CORRECTIONS
-        or kind == "resumptions"
-        and root[kind] + amount > MAX_RESUMPTIONS
-    ):
-        raise Conflict("recovery_budget_exhausted")
     db.execute(
         "INSERT INTO recovery_usage VALUES(?,?,?,?,?)",
         (action, event_key, kind, amount, time.time()),
@@ -399,14 +393,9 @@ def authorize_automatic(db, task, binding, now=None):
         or last["finished"] is None
         or last["finished"] < settings["enabled_since"]
         or context.get("_recovery_binding") != binding
-        or count >= MAX_ACTIONS
         or now < task["updated"] + DELAYS[min(count, len(DELAYS) - 1)]
         or not root
         or root["action_id"]
-        or root["requests"] >= MAX_REQUESTS
-        or root["tokens"] >= MAX_TOKENS
-        or root["seconds"] >= MAX_SECONDS
-        or root["resumptions"] >= MAX_RESUMPTIONS
     ):
         raise Conflict("recovery_automatic_unavailable")
     action = digest([POLICY, "retry", task["id"], task["version"]])
@@ -421,7 +410,8 @@ def authorize_automatic(db, task, binding, now=None):
             task["version"],
             settings["version"],
             now,
-            json.dumps({"state": "queued", "reason": task["error"], "delay": DELAYS[count]}),
+            json.dumps({"state": "queued", "reason": task["error"],
+                        "delay": DELAYS[min(count, len(DELAYS) - 1)]}),
         ),
     )
     return settings["version"]

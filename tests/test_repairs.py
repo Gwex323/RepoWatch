@@ -79,7 +79,7 @@ class RepairRuntime(Runtime):
             return self.setup_code, "fixture setup log"
         if env["id"].endswith("-1"):
             return self.regression_before, "1 test failed for expected fixture assertion"
-        if env["id"].endswith("-2"):
+        if env["id"].endswith("-3"):
             previous = [x for x in self.test_calls if x[0] == env["id"] and x[1] == "test"]
             return (self.regression_after if len(previous) == 1 else self.full_after), self.log
         return 0, self.log
@@ -392,7 +392,7 @@ def test_docker_recovery_retains_patch_and_revalidates_before_native_review(pend
         assert sum(e["kind"] == "backend_review_evidence" for e in final["events"]) == 1
         assert sum(e["kind"] == "tool_call" and e["value"] == "read_repair_verification"
                    for e in final["events"]) == 1
-        assert len(runtime.test_calls) == 7
+        assert len(runtime.test_calls) == 9
         assert final["patch"] == failed["patch"]
     else:
         assert final["error"] == (
@@ -523,6 +523,8 @@ def test_review_format_correction_is_bounded_and_cannot_publish_invalid_review(p
 
     async def malformed(*args, **kwargs):
         result = await delegate(*args, **kwargs)
+        if not correct and model.calls >= 6:
+            raise Conflict("repair_output_invalid")  # Explicit fixture stop.
         if model.calls == 3 or not correct and model.calls > 3:
             result.output[0].content[0].text = '{"approved": "true"}'
         return result
@@ -535,8 +537,8 @@ def test_review_format_correction_is_bounded_and_cannot_publish_invalid_review(p
     repairs.engine.repair = repair
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert sum(e["kind"] == "format_retry" for e in result["events"]) == 1
-    assert model.calls == 4
+    assert sum(e["kind"] == "format_retry" for e in result["events"]) == (1 if correct else 3)
+    assert model.calls == (4 if correct else 6)
     if correct:
         assert result["status"] == "pr_created" and len(publisher.calls) == 1
     else:
@@ -547,7 +549,7 @@ def test_review_format_correction_is_bounded_and_cannot_publish_invalid_review(p
     ("repair_agent", 11, 0), ("independent_reviewer", 4, 0),
     ("repair_agent", 17, 1),
 ])
-def test_model_stage_budget_prevents_unbounded_provider_calls(pending, role, turns, corrections):
+def test_model_stage_turns_do_not_limit_provider_calls(pending, role, turns, corrections):
     repairs, _, report, _, _ = pending
     workspace = RepairWorkspace(
         repairs.execution, "repair_" + "e" * 16, repairs.execution.get(report["env_id"]),
@@ -559,11 +561,14 @@ def test_model_stage_budget_prevents_unbounded_provider_calls(pending, role, tur
         lambda: {"verification_read": True},
         {"timeouts": 0, "verification_corrections": corrections, "review_corrections": corrections},
     )
+    async def complete(*args, **kwargs):
+        delegate.calls += 1
+        return SimpleNamespace(output=[])
+    delegate.get_response = complete
     model.turns = turns
-    with pytest.raises(Conflict, match="repair_model_budget"):
-        asyncio.run(model.get_response("", [], handoffs=[], tools=[],
-                                       model_settings=ModelSettings()))
-    assert delegate.calls == 0
+    asyncio.run(model.get_response("", [], handoffs=[], tools=[],
+                                   model_settings=ModelSettings()))
+    assert delegate.calls == 1
 
 
 @pytest.mark.parametrize("persistent", [False, True])
@@ -607,7 +612,7 @@ def test_truncated_repair_never_executes_partial_tools_and_preserves_handoff(pen
         ]
 
 
-def test_output_retries_share_a_run_budget(pending):
+def test_output_retries_share_usage_without_a_run_quota(pending):
     repairs, _, report, _, _ = pending
     workspace = RepairWorkspace(
         repairs.execution, "repair_" + "e" * 16, repairs.execution.get(report["env_id"]),
@@ -627,37 +632,36 @@ def test_output_retries_share_a_run_budget(pending):
         model = RepairStageModel(delegate, "repair_agent", workspace, lambda *_: None, dict,
                                  budget)
         call = model.get_response("", [], handoffs=[], tools=[], model_settings=ModelSettings())
-        if count == 2:
-            with pytest.raises(Conflict, match="repair_output_truncated"):
-                asyncio.run(call)
-        else:
-            asyncio.run(call)
-    assert delegate.calls == 5 and budget["outputs"] == 2
+        asyncio.run(call)
+    assert delegate.calls == 6 and budget["outputs"] == 3
     assert repair_failure_code(OutputTruncated("private")) == "repair_output_truncated"
 
 
-def test_model_timeouts_have_one_retry_and_respect_shared_budget(pending):
+def test_model_timeouts_keep_usage_without_a_shared_retry_cap(pending):
     repairs, _, report, _, _ = pending
     workspace = RepairWorkspace(
-        repairs.execution, "repair_" + "f" * 16, repairs.execution.get(report["env_id"]),
-        lambda: None,
+        repairs.execution, "repair_" + "f" * 16,
+        repairs.execution.get(report["env_id"]), lambda: None,
     )
     delegate = RepairModel()
 
     async def timeout(*args, **kwargs):
         delegate.calls += 1
+        if delegate.calls % 5 == 0:
+            raise Conflict("repair_paused")  # Explicit fixture stop.
         raise TimeoutError("untrusted provider body")
 
     delegate.get_response = timeout
     budget = {"timeouts": 0}
-    for expected_calls, used_budget in [(2, 1), (4, 2), (5, 2)]:
+    for attempt in range(1, 4):
         model = RepairStageModel(
             delegate, "repair_agent", workspace, lambda *args: None, dict, budget,
         )
-        with pytest.raises(Conflict, match="repair_model_timeout"):
-            asyncio.run(model.get_response("", [], handoffs=[], model_settings=ModelSettings()))
-        assert delegate.calls == expected_calls
-        assert budget["timeouts"] == used_budget
+        with pytest.raises(Conflict, match="repair_paused"):
+            asyncio.run(model.get_response(
+                "", [], handoffs=[], tools=[], model_settings=ModelSettings(),
+            ))
+        assert delegate.calls == attempt * 5 and budget["timeouts"] == attempt * 4
 
 
 @pytest.mark.parametrize("effort,expected", [("auto", "low"), ("default", None), ("high", "high")])
@@ -753,6 +757,8 @@ def test_real_wait_timeout_cancels_requests_and_never_logs_provider_text(pending
     delegate = RepairModel()
 
     async def hang(*args, **kwargs):
+        if len(cancelled) >= 3:
+            raise Conflict("repair_paused")  # Explicit fixture stop.
         try:
             await asyncio.Event().wait()
         finally:
@@ -763,22 +769,23 @@ def test_real_wait_timeout_cancels_requests_and_never_logs_provider_text(pending
     monkeypatch.setattr("repowatch.repair_model.RETRY_DELAY_SECONDS", 0)
     model = RepairStageModel(delegate, "repair_agent", workspace,
                             lambda *args: events.append(args), dict, {"timeouts": 0})
-    with pytest.raises(Conflict, match="repair_model_timeout"):
+    with pytest.raises(Conflict, match="repair_paused"):
         asyncio.run(model.get_response("private prompt", [], handoffs=[], tools=[],
                                        model_settings=ModelSettings()))
-    assert len(cancelled) == 2
-    assert sum(kind == "request_timeout" for kind, _ in events) == 2
+    assert len(cancelled) == 3
+    assert sum(kind == "request_timeout" for kind, _ in events) == 3
     assert "private prompt" not in json.dumps(events)
 
 
-def test_repair_overall_deadline_still_cancels_inflight_model(pending, monkeypatch):
+def test_user_pause_cancels_inflight_model_without_a_total_deadline(pending, monkeypatch):
     repairs, _, _, runtime, publisher = pending
     task = confirm(pending)
     enable(repairs)
     elapsed, cancelled = [0], []
 
     async def hang(*args, **kwargs):
-        elapsed[0] = 1801
+        elapsed[0] = 100000
+        repairs.closing.set()
         try:
             await asyncio.Event().wait()
         finally:
@@ -790,7 +797,7 @@ def test_repair_overall_deadline_still_cancels_inflight_model(pending, monkeypat
     ))
     asyncio.run(repairs.tick())
     assert cancelled == [True]
-    assert repairs.get(task["id"])["error"] == "repair_deadline_exceeded"
+    assert repairs.get(task["id"])["error"] == "repair_interrupted"
     assert not publisher.calls and not runtime.test_calls
 
 
@@ -817,11 +824,9 @@ def test_timeout_upgrade_recovery_is_explicit_versioned_and_one_time(
         if stale:
             db.execute("UPDATE environments SET revision='stale' WHERE id=?", (task["env_id"],))
     failed = repairs.get(task["id"])
-    assert failed["can_retry"] is allowed
+    assert (failed["timeout_recovery_available"] and not stale) is allowed
     assert not asyncio.run(repairs.tick())  # Recovery cannot silently dispatch a failed task.
     if not allowed:
-        with pytest.raises(Conflict, match="repair_changed|repair_stale"):
-            repairs.retry(task["id"], failed["version"])
         assert not publisher.calls
         return
     with pytest.raises(Conflict, match="repair_changed"):
@@ -838,9 +843,7 @@ def test_timeout_upgrade_recovery_is_explicit_versioned_and_one_time(
     repairs.engine.repair = timeout
     asyncio.run(repairs.tick())
     exhausted = repairs.get(task["id"])
-    assert exhausted["attempt"] == 4 and not exhausted["can_retry"]
-    with pytest.raises(Conflict, match="repair_changed"):
-        repairs.retry(task["id"], exhausted["version"])
+    assert exhausted["attempt"] == 4 and exhausted["can_retry"]
     assert not publisher.calls
 
 
@@ -1007,8 +1010,6 @@ def test_unavailable_source_reads_consume_budget_and_cannot_authorize_edit(pendi
         with pytest.raises(SourceReadUnavailable) as caught:
             workspace.read("missing.py")
         assert caught.value.details["reason"] == "not_found"
-    with pytest.raises(Conflict, match="repair_read_budget"):
-        workspace.read("app.py")
     assert not workspace.reads and workspace.read_chars == 0
     with pytest.raises(Conflict, match="repair_source_changed"):
         workspace.prepare(Patch.model_validate(fixture_patch()))
@@ -1041,11 +1042,9 @@ def test_source_read_upgrade_recovery_is_bounded_and_preserves_evidence_gates(
         if stale:
             db.execute("UPDATE environments SET revision='stale' WHERE id=?", (task["env_id"],))
     failed = repairs.get(task["id"])
-    assert failed["can_retry"] is allowed
+    assert (failed["source_read_recovery_available"] and not stale) is allowed
     assert not asyncio.run(repairs.tick())
     if not allowed:
-        with pytest.raises(Conflict, match="repair_changed|repair_stale"):
-            repairs.retry(task["id"], failed["version"])
         assert not publisher.calls
         return
     with pytest.raises(Conflict, match="repair_changed"):
@@ -1061,9 +1060,7 @@ def test_source_read_upgrade_recovery_is_bounded_and_preserves_evidence_gates(
     repairs.engine.repair = unavailable
     asyncio.run(repairs.tick())
     final = repairs.get(task["id"])
-    assert final["attempt"] == attempt + 1 and not final["can_retry"]
-    with pytest.raises(Conflict, match="repair_changed"):
-        repairs.retry(task["id"], final["version"])
+    assert final["attempt"] == attempt + 1 and final["can_retry"]
     assert not publisher.calls
 
 
@@ -1108,10 +1105,10 @@ def test_tool_arguments_are_corrected_before_execution_without_leaking_values(
               if e["kind"] == "tool_arguments_invalid"]
     assert len(errors) == 1 and errors[0]["tool"] == "submit_and_test_repair"
     assert errors[0]["reason"] == ("invalid_json" if invalid == "json" else "arguments_schema")
-    assert errors[0]["corrections_remaining"] == 1
+    assert errors[0]["corrections_remaining"] is None
     if invalid == "hash":
         assert errors[0]["fields"] == ["patch.edits.[].original_sha256"]
-    assert len(runtime.test_calls) == 7  # Only the corrected patch runs verification.
+    assert len(runtime.test_calls) == 9  # Only the corrected patch runs verification.
     assert "untrusted-private" not in json.dumps(result) + caplog.text
 
 
@@ -1175,7 +1172,7 @@ def test_patch_transport_shapes_keep_schema_and_safety_gates(pending, shape, cas
               if e["kind"] == "tool_arguments_normalized"]
     assert events == [{"tool": "submit_and_test_repair", "shape": shape}]
     if case == "valid":
-        assert result["status"] == "pr_created" and len(runtime.test_calls) == 7
+        assert result["status"] == "pr_created" and len(runtime.test_calls) == 9
         assert len(publisher.calls) == 1
     else:
         assert result["error"] == {
@@ -1197,6 +1194,8 @@ def test_neutral_new_regression_filename_can_be_corrected_without_weakening_path
     delegate = model.get_response
 
     async def named(system_instructions, input, **kwargs):
+        if persistent and len(proposals) >= 4:
+            raise Conflict("repair_unsafe_path")  # Explicit fixture stop.
         if model.calls == 1 and (persistent or not proposals):
             proposals.append(True)
             patch = fixture_patch()
@@ -1221,10 +1220,10 @@ def test_neutral_new_regression_filename_can_be_corrected_without_weakening_path
     rejected = [json.loads(e["value"]) for e in result["events"] if e["kind"] == "path_rejected"]
     assert rejected == [{"reason": "sensitive_name", "edit_index": 1}] * len(proposals)
     if persistent:
-        assert len(proposals) == 3 and result["error"] == "repair_unsafe_path"
+        assert len(proposals) == 4 and result["error"] == "repair_unsafe_path"
         assert not result["patch"] and not runtime.test_calls and not publisher.calls
     else:
-        assert result["status"] == "pr_created" and len(runtime.test_calls) == 7
+        assert result["status"] == "pr_created" and len(runtime.test_calls) == 9
         assert len(publisher.calls) == 1
 
 
@@ -1237,6 +1236,8 @@ def test_unverified_repair_cannot_offer_or_invoke_review_handoff(pending, invali
 
     async def premature(*args, **kwargs):
         calls.append(True)
+        if len(calls) >= 7:
+            raise Conflict("repair_tool_selection_invalid")  # Fixture stop.
         assert not kwargs["handoffs"]
         invalid = invalid_first and len(calls) <= 2
         return ModelResponse(output=[ResponseFunctionToolCall(
@@ -1254,8 +1255,8 @@ def test_unverified_repair_cannot_offer_or_invoke_review_handoff(pending, invali
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
     assert result["error"] == "repair_tool_selection_invalid"
-    assert len(calls) == (4 if invalid_first else 2)
-    assert sum(e["kind"] == "tool_selection_retry" for e in result["events"]) == 1
+    assert len(calls) == 7
+    assert sum(e["kind"] == "tool_selection_retry" for e in result["events"]) >= 2
     assert not result["verification"] and not result["patch"]
     assert not runtime.test_calls and not publisher.calls
     assert not any(e["kind"] == "handoff" for e in result["events"])
@@ -1270,6 +1271,8 @@ def test_repeated_invalid_tool_arguments_stop_with_specific_error_and_no_tests(p
 
     async def always_invalid(*args, **kwargs):
         calls.append(True)
+        if len(calls) >= 6:
+            raise Conflict("repair_tool_arguments_invalid")  # Fixture stop.
         return ModelResponse(output=[ResponseFunctionToolCall(
             id=f"bad_{len(calls)}", call_id=f"bad_{len(calls)}", type="function_call",
             name="submit_and_test_repair", arguments='{"patch":"untrusted-private-value"}',
@@ -1283,7 +1286,7 @@ def test_repeated_invalid_tool_arguments_stop_with_specific_error_and_no_tests(p
     repairs.engine.repair = repair
     asyncio.run(repairs.tick())
     result = repairs.get(task["id"])
-    assert result["error"] == "repair_tool_arguments_invalid" and len(calls) == 3
+    assert result["error"] == "repair_tool_arguments_invalid" and len(calls) == 6
     assert not result["patch"] and not publisher.calls and not runtime.test_calls
     assert "untrusted-private-value" not in json.dumps(result) + caplog.text
     failures = [json.loads(e["value"]) for e in result["events"]
@@ -1372,11 +1375,9 @@ def test_legacy_generic_failure_recovery_is_explicit_and_cannot_replay_artifacts
         if stale:
             db.execute("UPDATE environments SET revision='stale' WHERE id=?", (task["env_id"],))
     failed = repairs.get(task["id"])
-    assert failed["can_retry"] is allowed
+    assert (failed["failure_recovery_available"] and not stale) is allowed
     assert not asyncio.run(repairs.tick())
     if not allowed:
-        with pytest.raises(Conflict, match="repair_changed|repair_stale"):
-            repairs.retry(task["id"], failed["version"])
         assert not publisher.calls
         return
     with pytest.raises(Conflict, match="repair_changed"):
@@ -1391,9 +1392,7 @@ def test_legacy_generic_failure_recovery_is_explicit_and_cannot_replay_artifacts
     repairs.engine.repair = unknown
     asyncio.run(repairs.tick())
     final = repairs.get(task["id"])
-    assert final["attempt"] == 6 and not final["can_retry"]
-    with pytest.raises(Conflict, match="repair_changed"):
-        repairs.retry(task["id"], final["version"])
+    assert final["attempt"] == 6 and final["can_retry"]
     assert "untrusted-private-value" not in json.dumps(final)
     assert not publisher.calls
 
@@ -1439,11 +1438,9 @@ def test_legacy_truncation_recovery_requires_latest_evidence_and_is_bounded(
     if case == "invalid_metadata":
         repairs.event(task["id"], "provider_response", "[]")
     failed = repairs.get(task["id"])
-    assert failed["can_retry"] is (case == "eligible")
+    assert (failed["output_recovery_available"] and case != "stale") is (case == "eligible")
     assert not asyncio.run(repairs.tick())
     if case != "eligible":
-        with pytest.raises(Conflict, match="repair_changed|repair_stale"):
-            repairs.retry(task["id"], failed["version"])
         assert not publisher.calls
         return
     with pytest.raises(Conflict, match="repair_changed"):
@@ -1459,10 +1456,8 @@ def test_legacy_truncation_recovery_requires_latest_evidence_and_is_bounded(
     repairs.engine.repair = truncated
     asyncio.run(repairs.tick())
     final = repairs.get(task["id"])
-    assert final["attempt"] == 7 and not final["can_retry"]
+    assert final["attempt"] == 7 and final["can_retry"]
     assert final["context"]["output_policy"] == OUTPUT_POLICY
-    with pytest.raises(Conflict, match="repair_changed"):
-        repairs.retry(task["id"], final["version"])
     assert not publisher.calls
 
 
@@ -1506,11 +1501,9 @@ def test_legacy_premature_handoff_recovery_requires_unexecuted_patch_evidence(pe
     if case == "invalid_metadata":
         repairs.event(task["id"], "tool_arguments_invalid", "not-json")
     failed = repairs.get(task["id"])
-    assert failed["can_retry"] is (case == "eligible")
+    assert (failed["protocol_recovery_available"] and case != "stale") is (case == "eligible")
     assert not asyncio.run(repairs.tick())
     if case != "eligible":
-        with pytest.raises(Conflict, match="repair_changed|repair_stale"):
-            repairs.retry(task["id"], failed["version"])
         assert not publisher.calls
         return
     with pytest.raises(Conflict, match="repair_changed"):
@@ -1526,10 +1519,8 @@ def test_legacy_premature_handoff_recovery_requires_unexecuted_patch_evidence(pe
     repairs.engine.repair = incomplete
     asyncio.run(repairs.tick())
     final = repairs.get(task["id"])
-    assert final["attempt"] == 8 and not final["can_retry"]
+    assert final["attempt"] == 8 and final["can_retry"]
     assert final["context"]["protocol_policy"] == PROTOCOL_POLICY
-    with pytest.raises(Conflict, match="repair_changed"):
-        repairs.retry(task["id"], final["version"])
     assert not publisher.calls
 
 
@@ -1575,11 +1566,9 @@ def test_workspace_recovery_is_explicit_bounded_and_artifact_gated(pending, kind
     if case == "old_proof" and kind == "path":
         repairs.event(task["id"], "retry", "3")
     failed = repairs.get(task["id"])
-    assert failed["can_retry"] is (case == "eligible")
+    assert (failed["workspace_recovery_available"] and case != "stale") is (case == "eligible")
     assert not asyncio.run(repairs.tick())
     if case != "eligible":
-        with pytest.raises(Conflict, match="repair_changed|repair_stale"):
-            repairs.retry(task["id"], failed["version"])
         assert not publisher.calls
         return
     with pytest.raises(Conflict, match="repair_changed"):
@@ -1595,10 +1584,8 @@ def test_workspace_recovery_is_explicit_bounded_and_artifact_gated(pending, kind
     repairs.engine.repair = rejected
     asyncio.run(repairs.tick())
     final = repairs.get(task["id"])
-    assert final["attempt"] == 4 and not final["can_retry"]
+    assert final["attempt"] == 4 and final["can_retry"]
     assert final["context"]["workspace_policy"] == WORKSPACE_POLICY
-    with pytest.raises(Conflict, match="repair_changed"):
-        repairs.retry(task["id"], final["version"])
     assert not publisher.calls
 
 
@@ -1663,9 +1650,9 @@ def test_denied_source_reads_still_consume_bounded_read_budget(pending):
             workspace.read("app.py")
         assert caught.value.details["line"] == 1
         assert "never-expose-hardcoded-value" not in str(caught.value.details)
-    with pytest.raises(Conflict, match="repair_read_budget"):
+    with pytest.raises(SourceContentBlocked):
         workspace.read("app.py")
-    assert "app.py" not in workspace.reads
+    assert workspace.read_count == 25 and "app.py" not in workspace.reads
 
 
 @pytest.mark.parametrize("change", ["config", "execution", "revision", "deleted"])
@@ -1727,15 +1714,14 @@ def test_settings_and_attempts_are_versioned_and_disabled_by_default(pending):
     assert failed["error"] == "repair_tests_failed"
     assert not publisher.calls and len(repairs.engine.models) == 3
     assert not failed["publication_retry_available"]
-    assert not failed["can_retry"]
-    with pytest.raises(Conflict, match="repair_changed"):
-        repairs.retry(task["id"], failed["version"])
+    assert failed["can_retry"]
+    assert repairs.retry(task["id"], failed["version"])["status"] == "queued"
 
 
 @pytest.mark.parametrize("path", [
-    "../app.py", "/app.py", "a\\app.py", "C:/app.py", ".git/config.py", ".github/ci.py",
+    "../app.py", "/app.py", "a\\app.py", "C:/app.py", ".git/config.py", ".env",
     "node_modules/app.py", "tests/../app.py", "data/x.py", "app.py.", "con.py", "api_token.py",
-    "setup.py", "tests/conftest.py",
+    ".ssh/config", ".npmrc",
 ])
 def test_repair_paths_cannot_escape_or_modify_protected_locations(tmp_path, path):
     with pytest.raises(Conflict, match="repair_unsafe_path"):
@@ -1744,7 +1730,7 @@ def test_repair_paths_cannot_escape_or_modify_protected_locations(tmp_path, path
 
 @pytest.mark.parametrize("change,error", [
     ("unread", "repair_source_changed"), ("hash", "repair_source_changed"),
-    ("existing_test", "repair_existing_tests_protected"),
+    ("existing_test", "repair_source_changed"),
     ("duplicate", "repair_unsafe_path"), ("missing_regression", "repair_regression_required"),
     ("existing_regression", "repair_regression_required"),
 ])

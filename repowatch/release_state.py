@@ -91,8 +91,6 @@ def require_source_authorization(db, flow, task_id, *, release_id=None):
 
 def verifies_released_source(db, occurrence, event):
     """Accept delayed success only for the exact, explicitly dispatched release."""
-    from . import recovery
-
     if (event.get("state") != "resolved" or event.get("attempt") is None
             or occurrence["attempt"] is None or event["attempt"] <= occurrence["attempt"]):
         return False
@@ -106,7 +104,7 @@ def verifies_released_source(db, occurrence, event):
         "AND d.kind='deployed')", (occurrence["id"],)).fetchall()
     for row in rows:
         proof = json.loads(row["details"])
-        if (not row["created"] <= event["occurred"] <= row["resumed"] + recovery.MAX_SECONDS
+        if (event["occurred"] < row["created"]
                 or proof != {"occurrence_id": occurrence["id"], "flow": event["flow"],
                              "task_id": event["task_id"],
                              "workbench_version": event.get("workbench_version")}):

@@ -314,11 +314,9 @@ def test_selected_deepseek_role_keeps_its_own_provider_compatibility(catalog):
 
 
 def test_handoff_retry_does_not_require_a_provider_flag_in_the_native_graph(monkeypatch):
-    from repowatch.repository_analysis import STAGE_LIMITS
+    from test_repository_analysis import force_fixture_closing
 
-    for role, turns in zip(("repository_analyst", "problem_investigator",
-                            "reproduction_assistant", "independent_reviewer"), (2, 0, 0, 0)):
-        monkeypatch.setitem(STAGE_LIMITS, role, (turns, 10, 25000))
+    force_fixture_closing(monkeypatch)
     shared, events = ReviewModel(), []
 
     class HandoffProbe(RoleProbe):

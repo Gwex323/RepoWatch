@@ -45,8 +45,6 @@ from repowatch.repository_analysis import (
     REQUEST_TIMEOUT_SECONDS,
     RETRY_DELAY_SECONDS,
     ROLES,
-    STAGE_LIMITS,
-    STAGE_SECONDS,
     Analyses,
     AnalysisFailure,
     Review,
@@ -69,6 +67,7 @@ class ReviewModel(Model):
         self.calls = 0
         self.invented, self.skip_review, self.findings = invented, skip_review, findings
         self.scope = None
+        self.invalid_corrections = 0
 
     async def get_response(self, system_instructions, input, **kwargs):
         packets = [input] if isinstance(input, str) else [
@@ -90,6 +89,11 @@ class ReviewModel(Model):
         identity = f"analysis_call_{self.calls}"
         schema = kwargs.get("output_schema")
         if schema is not None and "corrections" in schema.json_schema().get("properties", {}):
+            if self.invented:
+                self.invalid_corrections += 1
+                if self.invalid_corrections > 2:
+                    # Explicit fixture termination, never an application retry quota.
+                    raise AnalysisFailure("analysis_report_invalid")
             packet = json.loads(input)
             return final_message(json.dumps({"summary": None, "corrections": [{
                 "section": target["section"], "item": target["item"], "withdraw": False,
@@ -157,6 +161,19 @@ class Engine:
 
     async def analyze(self, context, event):
         return await run_analysis(ReviewModel(), context, event)
+
+
+def force_fixture_closing(monkeypatch, *, reviewer=True):
+    """Exercise named handoffs explicitly without installing production quotas."""
+    original = StageModel.get_response
+
+    async def closing(self, *args, **kwargs):
+        if ((self.role != ROLES[-1] or reviewer)
+                and (self.required_read is None or self.required_read() is None)):
+            self.force_closing = True
+        return await original(self, *args, **kwargs)
+
+    monkeypatch.setattr(StageModel, "get_response", closing)
 
 
 class BrowsingModel(ReviewModel):
@@ -425,23 +442,19 @@ def test_direct_finalization_thinking_is_sent_only_for_no_tools_report_requests(
 
 
 @pytest.mark.parametrize("stage_age,remaining", [(95, 590), (0, 200)])
-def test_time_budget_forces_native_handoff_before_exploration_exhausts(stage_age, remaining):
+def test_elapsed_stage_age_does_not_force_handoff(stage_age, remaining):
     events = []
-    budget = StageBudget(started=time.monotonic() - stage_age)
     model = BrowsingModel()
-    stage = StageModel(
-        model, ROLES[0], budget, lambda *item: events.append(item),
-        deadline=time.monotonic() + remaining,
-    )
+    budget = StageBudget(started=time.monotonic() - stage_age)
+    stage = StageModel(model, ROLES[0], budget, lambda *item: events.append(item))
     response = asyncio.run(stage.get_response(
-        "Fixture", "Fixture",
-        model_settings=ModelSettings(max_tokens=3000), tools=[object()],
+        "Fixture", "Fixture", model_settings=ModelSettings(max_tokens=3000),
+        tools=[SimpleNamespace(name="read_execution_records", params_json_schema={})],
         handoffs=[SimpleNamespace(tool_name="transfer_to_problem_investigator")],
     ))
-    assert response.output[0].name == "transfer_to_problem_investigator"
-    assert ("time_budget", ROLES[0]) in events
-    assert budget.turns == 1
-    assert model.requests[0]["tools"] == []
+    assert response.output[0].name == "read_execution_records"
+    assert not any(kind == "time_budget" for kind, _ in events)
+    assert budget.turns == 1 and model.requests[0]["tools"]
 
 
 def test_expired_stage_deadline_never_calls_provider():
@@ -570,12 +583,12 @@ def test_repeated_truncation_is_bounded_and_never_reaches_tools():
     model.get_response = truncated
     with pytest.raises(AnalysisFailure, match="analysis_output_truncated"):
         asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
-    assert limits == [3000, 6000]
+    assert limits == [3000, 6000, 12000, 24000, 48000, 96000, 100000]
     assert not any(kind == "source" for kind, _ in events)
     assert not any(kind == "handoff" for kind, _ in events)
 
 
-def test_output_retry_budget_is_shared_and_does_not_retry_third_truncation():
+def test_output_retries_can_continue_across_roles():
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     model, events, attempts = ReviewModel(), [], []
     original = model.get_response
@@ -587,10 +600,9 @@ def test_output_retry_budget_is_shared_and_does_not_retry_third_truncation():
         return await original(*args, **kwargs)
 
     model.get_response = sometimes_truncated
-    with pytest.raises(AnalysisFailure, match="analysis_output_truncated"):
-        asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
-    assert len(attempts) == 7
-    assert sum(kind == "output_retry" for kind, _ in events) == 2
+    report = asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
+    assert len(report["handoffs"]) == 3 and len(attempts) == 9
+    assert sum(kind == "output_retry" for kind, _ in events) == 3
 
 
 def test_output_retry_cannot_exceed_token_cap(monkeypatch):
@@ -745,19 +757,20 @@ def test_numbered_evidence_is_canonicalized_before_sdk_output_and_persistence():
     validate_report(report, context)
 
 
-def test_repeated_forged_evidence_fails_after_one_correction():
+def test_forged_evidence_remains_untrusted_until_the_fixture_stops():
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     events = []
     with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(ReviewModel(invented=True), context, lambda *e: events.append(e)))
     assert sum(kind == "evidence_retry" for kind, _ in events) == 1
+    assert sum(kind == "format_retry" for kind, _ in events) >= 2
     assert sum(kind == "source" for kind, _ in events) == 1
 
 
 @pytest.mark.parametrize("outcome,code,calls", [
     ("tool", "analysis_finalization_not_followed", 2),
     ("deadline", "analysis_deadline_exceeded", 1),
-    ("silent_empty", "analysis_report_invalid", 3),
+    ("silent_empty", "analysis_report_invalid", 4),
     ("disclosed_empty", None, 2),
 ])
 def test_evidence_correction_keeps_deadline_tool_and_disclosure_gates(outcome, code, calls):
@@ -776,6 +789,8 @@ def test_evidence_correction_keeps_deadline_tool_and_disclosure_gates(outcome, c
             if outcome == "deadline":
                 stage.deadline = time.monotonic() - 1
             return final_message(evidence_review("invented").model_dump_json())
+        if outcome == "silent_empty" and len(attempts) > 3:
+            raise AnalysisFailure("analysis_report_invalid")
         if outcome == "tool":
             return ModelResponse(output=[ResponseFunctionToolCall(
                 id="unexpected", call_id="unexpected", type="function_call",
@@ -848,7 +863,7 @@ def test_final_report_format_correction_preserves_evidence_and_handoffs(invalid)
 
 
 def test_budget_closing_report_uses_only_actually_read_source_without_tool_history(monkeypatch):
-    monkeypatch.setitem(STAGE_SECONDS, ROLES[-1], 0)
+    force_fixture_closing(monkeypatch)
     context = {
         "files": {"app.py": "print('ok')\n# second\n# third\nUNREAD_SOURCE_SENTINEL"},
         "config": {}, "jobs": [], "test_result": None,
@@ -927,7 +942,7 @@ def test_report_diagnostics_are_counts_and_fixed_categories_only(text, category)
     ("private-secret: not JSON", "analysis_json_invalid"),
     ('{"summary":"private-secret"}', "analysis_report_invalid"),
 ])
-def test_final_report_format_correction_is_bounded(text, code):
+def test_final_report_format_correction_continues_until_fixture_stop(text, code):
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     model, events, attempts = ReviewModel(), [], []
     original = model.get_response
@@ -935,14 +950,16 @@ def test_final_report_format_correction_is_bounded(text, code):
     async def invalid_final(system_instructions, input, **kwargs):
         if kwargs.get("output_schema") is not None:
             attempts.append(kwargs)
+            if len(attempts) > 3:
+                raise AnalysisFailure(code)  # Fixture termination.
             return final_message(text)
         return await original(system_instructions, input, **kwargs)
 
     model.get_response = invalid_final
     with pytest.raises(AnalysisFailure, match=code):
         asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
-    assert len(attempts) == 2
-    assert sum(kind == "format_retry" for kind, _ in events) == 1
+    assert len(attempts) == 4
+    assert sum(kind == "format_retry" for kind, _ in events) == 3
     assert "private-secret" not in json.dumps(events)
 
 
@@ -961,7 +978,7 @@ def test_correction_never_bypasses_source_evidence_checks():
     model.get_response = bad_then_invented
     with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(model, context))
-    assert len(attempts) == 3
+    assert len(attempts) >= 4
 
 
 def test_correction_cannot_restart_exploration():
@@ -1006,7 +1023,8 @@ def test_correction_respects_the_existing_deadline():
     assert len(attempts) == 1
 
 
-def test_budget_closing_report_can_be_corrected_without_replaying_exploration():
+def test_explicit_closing_report_can_be_corrected_without_replaying_exploration(monkeypatch):
+    force_fixture_closing(monkeypatch)
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     model, events, emitted = BrowsingModel(), [], []
     original = model.get_response
@@ -1022,7 +1040,7 @@ def test_budget_closing_report_can_be_corrected_without_replaying_exploration():
     assert len(report["handoffs"]) == 3
     assert sum(kind == "format_retry" for kind, _ in events) == 1
     assert sum(item == ("model_call", ROLES[-1]) for item in events) == (
-        STAGE_LIMITS[ROLES[-1]][0] + 1
+        1
     )
 
 
@@ -1118,7 +1136,7 @@ def test_saved_provider_wires_direct_report_mode_without_rewriting_credentials(
     assert before == after
 
 
-def test_timeout_retries_are_bounded_and_reuse_the_same_call(monkeypatch):
+def test_timeout_retries_reuse_the_same_call(monkeypatch):
     monkeypatch.setattr("repowatch.repository_analysis.RETRY_DELAY_SECONDS", 0)
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     events = []
@@ -1148,20 +1166,23 @@ def test_timeout_retries_are_bounded_and_reuse_the_same_call(monkeypatch):
     assert ANALYSIS_TIMEOUT_SECONDS == 600
 
 
-def test_timeout_retries_stop_after_two_requests(monkeypatch):
+def test_timeout_retries_continue_until_explicit_provider_stop(monkeypatch):
     monkeypatch.setattr("repowatch.repository_analysis.RETRY_DELAY_SECONDS", 0)
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
-    events = []
-    model = BrowsingModel()
+    events, attempts = [], []
+    model = ReviewModel()
 
     async def stalled(*args, **kwargs):
+        attempts.append(1)
+        if len(attempts) == 5:
+            raise ModelBehaviorError("fixture_stop")
         raise TimeoutError("provider stalled")
 
     model.get_response = stalled
-    with pytest.raises(AnalysisFailure, match="analysis_provider_timeout_exhausted"):
+    with pytest.raises(ModelBehaviorError, match="fixture_stop"):
         asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
-    assert sum(kind == "timeout_retry" for kind, _ in events) == 1
-    assert sum(kind == "retry_call" for kind, _ in events) == 1
+    assert len(attempts) == 5
+    assert sum(kind == "timeout_retry" for kind, _ in events) == 4
 
 
 def test_timeout_retry_budget_is_shared_across_roles(monkeypatch):
@@ -1178,10 +1199,9 @@ def test_timeout_retry_budget_is_shared_across_roles(monkeypatch):
         return await original(*args, **kwargs)
 
     model.get_response = sometimes_stalled
-    with pytest.raises(AnalysisFailure, match="analysis_provider_timeout_exhausted"):
-        asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
-    assert len(attempts) == 7
-    assert sum(kind == "timeout_retry" for kind, _ in events) == 2
+    report = asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
+    assert len(report["handoffs"]) == 3 and len(attempts) == 9
+    assert sum(kind == "timeout_retry" for kind, _ in events) == 3
 
 
 def test_cancel_during_backoff_does_not_retry():
@@ -1218,15 +1238,17 @@ def test_call_deadline_cancels_hanging_requests(monkeypatch):
     model, cancelled = ReviewModel(), []
 
     async def hanging(*args, **kwargs):
+        if len(cancelled) >= 3:
+            raise ModelBehaviorError("fixture_stop")
         try:
             await asyncio.sleep(10)
         finally:
             cancelled.append(True)
 
     model.get_response = hanging
-    with pytest.raises(AnalysisFailure, match="analysis_provider_timeout_exhausted"):
+    with pytest.raises(ModelBehaviorError, match="fixture_stop"):
         asyncio.run(run_analysis(model, context))
-    assert len(cancelled) == 2
+    assert len(cancelled) == 3
 
 
 def test_non_timeout_errors_are_not_retried():
@@ -1243,46 +1265,48 @@ def test_non_timeout_errors_are_not_retried():
 
 
 @pytest.mark.parametrize("burst,oversized", [(1, False), (20, False), (1, True)])
-def test_continuous_browsing_reserves_all_stages_and_forces_native_handoffs(burst, oversized):
+def test_continuous_browsing_can_exceed_old_quotas_until_caller_stops(burst, oversized):
     context = {"files": {"app.py": "print('ok')", "large.py": "x" * 16000},
                "config": {}, "jobs": [], "test_result": None}
     events = []
     model = BrowsingModel(burst=burst, oversized=oversized)
-    report = asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
-    assert len(report["handoffs"]) == 3
-    assert [agent for kind, agent in events if kind == "agent"] == list(ROLES)
-    assert [agent for kind, agent in events if kind == "budget"] == list(ROLES)
-    assert model.calls <= MAX_TURNS
-    role, reads = None, {role: 0 for role in ROLES}
-    for kind, name in events:
-        if kind == "agent":
-            role = name
-        elif kind == "source":
-            reads[role] += 1
-    assert all(reads[role] <= STAGE_LIMITS[role][1] for role in ROLES)
-    for role in ROLES:
-        assert sum(item == ("model_call", role) for item in events) <= STAGE_LIMITS[role][0] + 1
+    original = model.get_response
 
+    async def browse(*args, **kwargs):
+        if model.calls >= 35:
+            raise ModelBehaviorError("fixture_stop")
+        return await original(*args, **kwargs)
 
-def test_provider_ignoring_forced_handoff_is_rejected_without_fabricated_handoff():
-    context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
-    events = []
-    model = BrowsingModel(ignore_choice=True)
-    with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
+    model.get_response = browse
+    with pytest.raises(ModelBehaviorError, match="fixture_stop"):
         asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
-    assert not any(kind == "handoff" for kind, _ in events)
-    assert model.calls == STAGE_LIMITS[ROLES[0]][0] + 2
+    assert model.calls == 35 and MAX_TURNS is None
+    assert not any(kind in {"handoff", "budget", "time_budget"} for kind, _ in events)
+    assert sum(kind == "source" for kind, _ in events) > 10
 
 
-def test_reviewer_cannot_continue_reading_after_finalization_budget():
-    context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
-    events = []
+def test_provider_ignoring_explicit_handoff_cannot_execute_source_tools():
+    rejected = []
+    def stop(kind, value):
+        if kind == "handoff_retry":
+            rejected.append(value)
+            if len(rejected) == 3:
+                raise AnalysisFailure("analysis_handoff_not_followed")
+    stage = StageModel(BrowsingModel(ignore_choice=True), ROLES[0], StageBudget(),
+                       stop, force_closing=True)
+    with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
+        asyncio.run(stage.get_response("fixture", [], tools=[],
+            handoffs=[SimpleNamespace(tool_name="transfer_to_problem_investigator")],
+            model_settings=ModelSettings()))
+
+
+def test_reviewer_cannot_continue_reading_after_explicit_finalization():
     model = BrowsingModel()
     model.ignore_final = True
+    stage = StageModel(model, ROLES[-1], StageBudget(), lambda *_: None, force_closing=True)
     with pytest.raises(AnalysisFailure, match="analysis_finalization_not_followed"):
-        asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
-    assert sum(kind == "handoff" for kind, _ in events) == 3
-    assert model.calls == MAX_TURNS
+        asyncio.run(stage.get_response("fixture", [], tools=[], handoffs=[],
+            output_schema=AgentOutputSchema(Review), model_settings=ModelSettings()))
 
 
 def prepare_tested(execution_fixture):
