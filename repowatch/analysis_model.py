@@ -14,6 +14,7 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageFunctionToolCall
 
 from .diagnosis import redact_values
+from .model_escalation import ModelEscalation
 from .model_providers import ModelProviders, validate_model_config
 from .observability import Telemetry, model_observation, record_event, record_usage
 from .report_recovery import digest
@@ -523,17 +524,33 @@ class AnalysisModel:
         return dict(row) if row else None, roles, direct
 
     @staticmethod
-    def _identity(row, rows):
+    def _identity(row, rows, policy=None):
         # Hash encrypted credentials as well: even a key-only replacement must
         # invalidate recovery. Neither keys nor encrypted values leave this hash.
         return digest({"settings": dict(row) if row else None,
                        "roles": {role: {k: v for k, v in rows[role].items()
                                         if k != "routing_version"} if role in rows else None
-                                 for role in FLOW_ROLES["analysis"]}})
+                                 for role in FLOW_ROLES["analysis"]},
+                       "escalation": ({
+                           "enabled": bool(policy["enabled"]),
+                           "version": policy["version"],
+                           "monitor_route": ModelEscalation.route(
+                               policy["monitor_route"],
+                           ),
+                           "repair_route": ModelEscalation.route(
+                               policy["repair_route"],
+                           ),
+                       } if policy else None)})
 
     def recovery_identity(self):
-        row, rows, _ = self._snapshot()
-        return self._identity(row, rows)
+        with self.store.connection() as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
+            policy = ModelEscalation.policy_row(db)
+            rows, _ = ModelEscalation.apply_analysis(
+                db, ModelProviders.role_rows(db), policy,
+            )
+            return self._identity(row, rows, policy)
 
     def configuration(self):
         row, rows, direct = self._snapshot()
@@ -727,22 +744,29 @@ class AnalysisModel:
                           force_monitor=False, **options):
         required = FLOW_ROLES[flow]
         original_event = event
+        policy = None
+        identity = None
         with self.store.connection() as db:
             db.execute("BEGIN")
             row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
             rows = ModelProviders.role_rows(db)
+            policy = ModelEscalation.policy_row(db)
             if flow == "coordination" and route_override is not None:
                 rows[COORDINATOR] = {**rows[COORDINATOR],
                                      **ModelProviders.resolve(db, route_override)}
                 rows[COORDINATOR]["config"] = json.dumps(rows[COORDINATOR]["config"])
             escalation = None
             if not route_override or flow != "coordination":
-                from .model_escalation import ModelEscalation
-
                 try:
-                    rows, escalation = ModelEscalation.apply(
-                        db, rows, flow=flow, context=context, force_monitor=force_monitor,
-                    )
+                    if flow == "analysis":
+                        rows, escalation = ModelEscalation.apply_analysis(
+                            db, rows, policy,
+                        )
+                    else:
+                        rows, escalation = ModelEscalation.apply(
+                            db, rows, flow=flow, context=context,
+                            force_monitor=force_monitor, policy=policy,
+                        )
                 except Conflict as exc:
                     policy = ModelEscalation.policy_row(db)
                     self._record_escalation_event(
@@ -765,9 +789,13 @@ class AnalysisModel:
                            for role in required}
             except (InvalidToken, UnicodeError):
                 raise Conflict("analysis_model_key_unavailable") from None
+            if flow == "analysis":
+                # Identity always uses the canonical analysis routing, never
+                # context or authorization flags from a repair phase.
+                identity = self._identity(row, rows, policy)
         configs = {role: json.loads(rows[role]["config"]) for role in required}
         if (flow == "analysis" and context.get("_review_model_identity") is not None
-                and context["_review_model_identity"] != self._identity(row, rows)):
+                and context["_review_model_identity"] != identity):
             raise Conflict("analysis_model_changed")
         if flow == "analysis":
             def redact_review_candidate(value):

@@ -87,6 +87,68 @@ class ModelEscalation:
         }
 
     @classmethod
+    def _resolved_policy(cls, db, policy=None):
+        policy = policy if policy is not None else cls.policy_row(db)
+        if not policy or not policy["enabled"]:
+            return policy, None, None
+        return (
+            policy,
+            cls.resolve_route(db, policy["monitor_route"]),
+            cls.resolve_route(db, policy["repair_route"]),
+        )
+
+    @classmethod
+    def _apply_routes(cls, rows, policy, monitor, repair, *, flow, repair_allowed):
+        applied = {}
+        for role, value in rows.items():
+            if role == REPAIR_ROLE:
+                choice = repair if repair_allowed else monitor
+                route_kind = "repair" if repair_allowed else "monitor"
+            elif role in MONITOR_ROLES:
+                choice, route_kind = monitor, "monitor"
+            else:
+                applied[role] = value
+                continue
+            applied[role] = {**value, "config": json.dumps(choice["config"]),
+                             "encrypted_key": choice["encrypted_key"],
+                             "provider_id": choice["provider_id"],
+                             "provider_name": choice["provider_name"],
+                             "provider_version": choice["provider_version"],
+                             "selection_choice": choice["route"],
+                             "routing_version": policy["version"],
+                             "escalation_route": route_kind,
+                             "escalation_version": policy["version"]}
+        info = {
+            "enabled": True,
+            "version": policy["version"],
+            "monitor": {
+                "model": monitor["config"]["model"],
+                "provider_id": monitor["provider_id"],
+                "provider_name": monitor["provider_name"],
+                "provider_version": monitor["provider_version"],
+            },
+            "repair": {
+                "model": repair["config"]["model"],
+                "provider_id": repair["provider_id"],
+                "provider_name": repair["provider_name"],
+                "provider_version": repair["provider_version"],
+            },
+            "flow": flow,
+            "repair_model_used": repair_allowed,
+        }
+        return applied, info
+
+    @classmethod
+    def apply_analysis(cls, db, rows, policy=None):
+        """Canonical, side-effect-free analysis routing for identity and execution."""
+        policy, monitor, repair = cls._resolved_policy(db, policy)
+        if not policy or not policy["enabled"]:
+            return rows, None
+        return cls._apply_routes(
+            rows, policy, monitor, repair, flow="analysis", repair_allowed=False,
+        )
+
+    @classmethod
     def state_from_row(cls, db, row=None):
         row = row or cls.policy_row(db)
         if row is None:
@@ -187,12 +249,10 @@ class ModelEscalation:
         return True
 
     @classmethod
-    def apply(cls, db, rows, *, flow, context, force_monitor=False):
-        row = cls.policy_row(db)
+    def apply(cls, db, rows, *, flow, context, force_monitor=False, policy=None):
+        row, monitor, repair = cls._resolved_policy(db, policy)
         if not row or not row["enabled"]:
             return rows, None
-        monitor = cls.resolve_route(db, row["monitor_route"])
-        repair = cls.resolve_route(db, row["repair_route"])
         repair_allowed = (
             flow == "repair"
             and not force_monitor
@@ -202,44 +262,9 @@ class ModelEscalation:
             # A repair phase must never silently downgrade code editing to the
             # monitoring model when its durable authorization is no longer valid.
             raise Conflict("model_escalation_authorization_required")
-        applied = {}
-        for role, value in rows.items():
-            if role == REPAIR_ROLE:
-                choice = repair if repair_allowed else monitor
-                route_kind = "repair" if repair_allowed else "monitor"
-            elif role in MONITOR_ROLES:
-                choice, route_kind = monitor, "monitor"
-            else:
-                applied[role] = value
-                continue
-            applied[role] = {**value, "config": json.dumps(choice["config"]),
-                             "encrypted_key": choice["encrypted_key"],
-                             "provider_id": choice["provider_id"],
-                             "provider_name": choice["provider_name"],
-                             "provider_version": choice["provider_version"],
-                             "selection_choice": choice["route"],
-                             "routing_version": row["version"],
-                             "escalation_route": route_kind,
-                             "escalation_version": row["version"]}
-        info = {
-            "enabled": True,
-            "version": row["version"],
-            "monitor": {
-                "model": monitor["config"]["model"],
-                "provider_id": monitor["provider_id"],
-                "provider_name": monitor["provider_name"],
-                "provider_version": monitor["provider_version"],
-            },
-            "repair": {
-                "model": repair["config"]["model"],
-                "provider_id": repair["provider_id"],
-                "provider_name": repair["provider_name"],
-                "provider_version": repair["provider_version"],
-            },
-            "flow": flow,
-            "repair_model_used": repair_allowed,
-        }
-        return applied, info
+        return cls._apply_routes(
+            rows, row, monitor, repair, flow=flow, repair_allowed=repair_allowed,
+        )
 
     @staticmethod
     def snapshot(rows, escalation):

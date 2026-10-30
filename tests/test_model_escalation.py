@@ -291,6 +291,156 @@ def test_offline_workflow_uses_repair_model_only_for_authorized_repair_then_retu
     assert all(client.closed for client in DummyOpenAI.instances)
 
 
+def test_analysis_recovery_identity_includes_effective_escalation_route(
+    catalog, monkeypatch,
+):
+    store, providers, escalation, monitor, repair = enabled_escalation(catalog)
+    engine = AnalysisModel(store, providers.credentials)
+    DummyOpenAI.instances.clear()
+    monkeypatch.setattr("repowatch.analysis_model.AsyncOpenAI", DummyOpenAI)
+    identity = engine.recovery_identity()
+    events = []
+
+    async def runner(model, context, event, *, reasoning_effort=None, **options):
+        return {"handoffs": ["independent_reviewer"]}
+
+    contexts = (
+        ({}, False),
+        ({"revision": "revision-1"}, False),
+        ({
+            "_repair_task_id": "repair_x",
+            "_model_escalation_authorized": True,
+        }, True),
+    )
+    for extra_context, force_monitor in contexts:
+        result = asyncio.run(engine._run(
+            runner,
+            {"_review_model_identity": identity, **extra_context},
+            lambda *event: events.append(event),
+            flow="analysis",
+            force_monitor=force_monitor,
+        ))
+        assert all(
+            value["model"] == monitor["model"]
+            for value in result["role_models"].values()
+        )
+    assert all(client.closed for client in DummyOpenAI.instances)
+
+    # A version-only policy change must also invalidate a saved recovery identity.
+    escalation.configure(
+        version=escalation.state()["version"],
+        enabled=True,
+        monitor_route=monitor,
+        repair_route=repair,
+    )
+    versioned_identity = engine.recovery_identity()
+    assert versioned_identity != identity
+
+    # Route changes must invalidate recovery even when both routes stay valid.
+    escalation.configure(
+        version=escalation.state()["version"],
+        enabled=True,
+        monitor_route=repair,
+        repair_route=monitor,
+    )
+    assert engine.recovery_identity() != versioned_identity
+
+    with pytest.raises(Conflict, match="analysis_model_changed"):
+        asyncio.run(engine._run(
+            runner,
+            {"_review_model_identity": versioned_identity},
+            lambda *_: None,
+            flow="analysis",
+        ))
+
+
+def test_analysis_recovery_identity_tracks_provider_key_and_model_config(catalog):
+    store, providers, escalation, _, _ = enabled_escalation(catalog)
+    engine = AnalysisModel(store, providers.credentials)
+    identity = engine.recovery_identity()
+    state = providers.state()
+    provider = state["providers"][0]
+
+    providers.save(
+        version=state["version"],
+        provider_id=provider["id"],
+        name=provider["name"],
+        base_url=provider["base_url"],
+        api=provider["api"],
+        api_key="synthetic-replacement-key",
+        models=provider["models"],
+    )
+    key_identity = engine.recovery_identity()
+    assert key_identity != identity
+
+    state = providers.state()
+    provider = state["providers"][0]
+    models = [dict(model) for model in provider["models"]]
+    models[0]["reasoning_effort"] = "medium"
+    providers.save(
+        version=state["version"],
+        provider_id=provider["id"],
+        name=provider["name"],
+        base_url=provider["base_url"],
+        api=provider["api"],
+        api_key="",
+        models=models,
+    )
+    assert engine.recovery_identity() != key_identity
+
+
+def test_analysis_identity_uses_side_effect_free_canonical_analysis_routing(catalog):
+    store, providers, escalation, _, _ = enabled_escalation(catalog)
+    with store.connection() as db:
+        db.execute("BEGIN")
+        policy = ModelEscalation.policy_row(db)
+        before = db.total_changes
+        routed, info = ModelEscalation.apply_analysis(
+            db, ModelProviders.role_rows(db), policy,
+        )
+        assert db.total_changes == before
+    assert info["flow"] == "analysis"
+    assert info["repair_model_used"] is False
+    assert routed[ROLES[3]]["escalation_route"] == "monitor"
+
+
+def test_analysis_recovery_identity_handles_missing_policy_row(catalog, monkeypatch):
+    store, providers, escalation = catalog
+    state = saved(providers)
+    monitor = route(state, "flash-monitor")
+    repair = route(state, "v4pro-repair")
+    configure(providers, monitor, repair)
+    engine = AnalysisModel(store, providers.credentials)
+    configured_identity = engine.recovery_identity()
+    with store.connection() as db:
+        db.execute("DELETE FROM model_escalation_policy WHERE id=1")
+    missing_identity = engine.recovery_identity()
+    assert missing_identity != configured_identity
+
+    DummyOpenAI.instances.clear()
+    monkeypatch.setattr("repowatch.analysis_model.AsyncOpenAI", DummyOpenAI)
+
+    async def runner(model, context, event, *, reasoning_effort=None, **options):
+        return {"handoffs": ["independent_reviewer"]}
+
+    asyncio.run(engine._run(
+        runner,
+        {"_review_model_identity": missing_identity},
+        lambda *_: None,
+        flow="analysis",
+    ))
+    assert all(client.closed for client in DummyOpenAI.instances)
+
+
+def test_analysis_recovery_identity_without_escalation_is_stable(catalog):
+    store, providers, escalation = catalog
+    saved(providers)
+    engine = AnalysisModel(store, providers.credentials)
+    first = engine.recovery_identity()
+    assert engine.recovery_identity() == first
+    assert escalation.state()["enabled"] is False
+
+
 def test_snapshot_freezes_phase_and_new_phase_takes_new_policy(catalog, monkeypatch):
     store, providers, escalation, monitor, repair = enabled_escalation(catalog)
     insert_repair_task(store)
