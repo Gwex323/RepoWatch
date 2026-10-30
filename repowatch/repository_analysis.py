@@ -5,6 +5,7 @@ import hashlib
 import json
 import logging
 import os
+import sqlite3
 import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass, replace
@@ -900,6 +901,8 @@ class StageModel(Model):
 def failure_code(exc):
     if isinstance(exc, (AnalysisFailure, Conflict)):
         return str(exc)
+    if isinstance(exc, sqlite3.DatabaseError):
+        return "analysis_storage_failed"
     for error_type, code in (
         (AuthenticationError, "analysis_authentication_failed"),
         (RateLimitError, "analysis_rate_limited"),
@@ -2469,6 +2472,10 @@ class Analyses:
             details = {"code": code, "stage": stage, "exception_type": type(exc).__name__[:60],
                        "elapsed_seconds": round(time.monotonic() - started),
                        "http_status": exc.status_code if isinstance(exc, APIStatusError) else None}
+            if isinstance(exc, sqlite3.DatabaseError):
+                error_number = getattr(exc, "sqlite_errorcode", None)
+                if type(error_number) is int:
+                    details["sqlite_errorcode"] = error_number
             with self.store.connection() as db:
                 saved_budget = report_scheduler.public_state(
                     report_scheduler.row(db, row["id"]), time.time(),
@@ -2477,7 +2484,9 @@ class Analyses:
                 details["budget"] = saved_budget
             record("failure", json.dumps(details))
             logging.getLogger(__name__).warning(
-                "Repository analysis %s failed: %s (stage=%s)", row["id"], code, stage,
+                "Repository analysis %s failed: %s "
+                "(stage=%s, exception_type=%s, sqlite_errorcode=%s)",
+                row["id"], code, stage, details["exception_type"], details.get("sqlite_errorcode"),
             )
             with self.store.connection() as db:
                 db.execute("BEGIN IMMEDIATE")

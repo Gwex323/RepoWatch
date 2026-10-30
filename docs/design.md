@@ -11,12 +11,22 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
 
+Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
+the correction-state INSERT explicitly binds six columns to six parameters;
+SQLite database failures have a fixed analysis error code and numeric-only
+diagnostics. Review and validation status are recorded in
+[storage fix](correction-storage-105.md). This increment is not merged or deployed.
+
 Issue #103 is implemented on `feature/evidence-recovery-103` (base `d22226a`):
 private unaccepted correction candidates survive interrupted evidence/scope
 correction requests, with checkpoint bindings, freshly computed errors and
 metadata-only quote comparisons. Static checks and frontend build passed; no
-test cases or runtime acceptance were run. This increment is not merged or
-deployed. PR #104 now integrates main `fd42113`, including PR #102.
+test cases or runtime acceptance were run before delivery. PR #104 was merged
+as `96f5105` on 2026-10-30, including PR #102, and started at local port 8765
+with the original database after a consistent backup. Startup, session API,
+served asset hashes and record counts were checked. A subsequent real analysis
+failed while saving its correction candidate; Issue #105 addresses that defect.
+Startup did not establish acceptance of the correction recovery path.
 See [correction recovery](evidence-recovery-103.md).
 
 Issue #101 is implemented on `feature/unlimited-workflows-101`, based on
@@ -27,7 +37,8 @@ Usage, finite renewable leases, single-request timeouts, cancellation, evidence,
 review and publication authority remain enforced. See [current policy](unlimited-workflows-101.md)
 and [review](tasks/0101/review.md). Static checks and frontend build are recorded;
 no test cases or live-model/Docker acceptance were run for this increment.
-Delivery PR #102 was merged as `fd42113` on 2026-10-30; deployment is unverified.
+Delivery PR #102 was merged as `fd42113` on 2026-10-30 and included in the
+local `96f5105` startup; no full workflow acceptance was run during restart.
 Earlier quota and patch-allowlist descriptions
 below document the preceding policy and are superseded by this increment.
 The coordinator still cannot independently invent a new analysis-retry action;
