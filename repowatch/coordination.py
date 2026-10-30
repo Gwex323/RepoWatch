@@ -14,7 +14,7 @@ from .store import Conflict, Missing, uid
 from .system_faults import SystemFaults, transition
 
 LOG = logging.getLogger(__name__)
-MAX_REQUESTS = 2
+MAX_REQUESTS = None
 DEADLINE = 250
 
 
@@ -52,7 +52,7 @@ def settings(db):
         "fallback": json.loads(row["fallback"]) if row["fallback"] else None,
         "fallback_authorized": bool(row["fallback_authorized"]),
         "max_requests": MAX_REQUESTS,
-        "max_seconds": DEADLINE,
+        "max_seconds": None,
     }
 
 
@@ -94,32 +94,17 @@ def source_budget(db, occurrence, *, reserve=False, capacity=False, maintenance=
     if state in {"cancelled", "stale", "completed", "pr_created"}:
         raise Conflict("coordination_source_inactive")
     if flow == "analysis":
-        from .report_scheduler import MAX_REQUESTS
         from .report_scheduler import row as recovery_row
 
         saved = recovery_row(db, task_id)
-        if saved and (
-            saved["deadline"] <= time.time()
-            or saved["stop_reason"] and not (maintenance and saved["stop_reason"] in {
-                "non_recoverable", "review_not_started", "checkpoint_invalid",
-            })
-            or saved["requests"] + int(reserve or capacity) > MAX_REQUESTS
-        ):
-            raise Conflict("coordination_source_budget_exhausted")
+        if saved and saved["stop_reason"] in {"basis_changed", "pipeline_stopped"}:
+            raise Conflict("coordination_source_inactive")
         if reserve and saved:
             db.execute(
                 "UPDATE analysis_report_recovery SET requests=requests+1 WHERE analysis_id=?",
                 (task_id,),
             )
     elif flow == "acceptance" and row:
-        from .acceptance import MAX_MODEL_REQUESTS
-
-        if (
-            row["deadline"]
-            and row["deadline"] <= time.time()
-            or row["model_calls"] + int(reserve or capacity) > MAX_MODEL_REQUESTS
-        ):
-            raise Conflict("coordination_source_budget_exhausted")
         if reserve:
             db.execute(
                 "UPDATE scope_acceptance_runs SET model_calls=model_calls+1 WHERE id=?", (task_id,)
@@ -393,8 +378,6 @@ class Coordinator:
                     "WHERE a.root_id=? AND a.flow='coordination' AND u.kind='requests'",
                     (job["root_id"],),
                 ).fetchone()[0]
-                if count >= MAX_REQUESTS:
-                    raise Conflict("coordination_budget_exhausted")
                 if count:
                     recovery.observe(db, job["action_id"], job["owner"], "plan_retry")
                 db.execute(
@@ -466,9 +449,6 @@ class Coordinator:
                 recovery.expire(db, job["root_id"])
                 self._finish(db, job, "blocked", error="coordination_interrupted")
             elif job["state"] == "waiting":
-                if time.time() >= job["created"] + recovery.MAX_SECONDS:
-                    self._finish(db, job, "blocked", error="source_verification_timeout")
-                    continue
                 # Source completion can precede consumption of its verified-success event.
                 state = source_state(db, occurrence)
                 if state in {"completed", "pr_created"}:
@@ -497,7 +477,10 @@ class Coordinator:
             return
         packet, plan, error = json.loads(job["packet"]), None, None
         try:
-            for attempt in range(MAX_REQUESTS):
+            attempt = 0
+            while plan is None:
+                with self.store.connection() as db:
+                    self._guard(db, job)
                 try:
                     with self.store.connection() as db:
                         config = settings(db)
@@ -533,23 +516,8 @@ class Coordinator:
                     error = str(exc)
                 except Exception:
                     error = "coordination_model_unavailable_or_invalid"
-            if plan is None:
-                # Deterministic fallback cannot grant an action absent from the packet.
-                plan = {
-                    "occurrence_id": packet["occurrence_id"],
-                    "basis": packet["basis"],
-                    "category": "protocol"
-                    if packet["facts"].get("diagnostic.reason") == "too_many_calls"
-                    else "unknown",
-                    "diagnosis": "协调模型不可用，保留规则处理结果。",
-                    "facts": list(packet["facts"]),
-                    "unknowns": ["根因尚未确认"],
-                    "action": "retry_repair"
-                    if "retry_repair" in packet["allowed_actions"]
-                    else "blocked",
-                    "expected": "按原流程验证，不能以排队代替通过。",
-                    "verification": "source_verification",
-                }
+                attempt += 1
+                await asyncio.sleep(recovery.DELAYS[min(attempt - 1, len(recovery.DELAYS) - 1)])
             with self.store.connection() as db:
                 db.execute("BEGIN IMMEDIATE")
                 self._guard(db, job)
@@ -619,7 +587,7 @@ class Coordinator:
             or saved["owner"] != job["owner"]
             or not config["enabled"]
             or config["version"] != job["configuration_version"]
-            or job["lease"] <= time.time()
+            or saved["lease"] <= time.time()
             or not occurrence
             or occurrence["state"] != "diagnosing"
             or self.closing.is_set()

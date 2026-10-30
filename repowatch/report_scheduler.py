@@ -1,9 +1,9 @@
-"""Durable limits for one analysis and its bounded final-review continuations."""
+"""Durable usage and backoff for final-review continuations without quotas."""
 
 import json
 
-MAX_REQUESTS = 32
-MAX_SECONDS = 1800
+MAX_REQUESTS = None
+MAX_SECONDS = None
 RECOVERY_DELAYS = (10, 30, 60)
 RETRY_FIELDS = ("used", "output_used", "format_used", "evidence_used",
                 "required_read_used", "tool_arguments_used")
@@ -39,7 +39,7 @@ def begin(db, analysis_id, now):
     # Only a newly claimed run opts in. Installing this table cannot restart old failures.
     db.execute(
         "INSERT OR IGNORE INTO analysis_report_recovery(analysis_id,state,started,deadline) "
-        "VALUES(?,'active',?,?)", (analysis_id, now, now + MAX_SECONDS),
+        "VALUES(?,'active',?,?)", (analysis_id, now, 0),
     )
     return row(db, analysis_id)
 
@@ -65,10 +65,7 @@ def new_scope_review(db, analysis_id, now):
 
 
 def limit_reason(saved, now):
-    if now >= saved["deadline"]:
-        return "total_deadline"
-    if saved["requests"] >= MAX_REQUESTS:
-        return "request_limit"
+    """Legacy deadlines and counts are accounting history, never a stop condition."""
     return None
 
 
@@ -85,9 +82,9 @@ def public_state(saved, now):
         return None
     return {
         "state": saved["state"], "requests": saved["requests"], "max_requests": MAX_REQUESTS,
-        "resumptions": saved["resumptions"], "max_resumptions": len(RECOVERY_DELAYS),
-        "retry_after": saved["retry_after"], "deadline": saved["deadline"],
-        "remaining_seconds": max(0, int(saved["deadline"] - now)),
+        "resumptions": saved["resumptions"], "max_resumptions": None,
+        "retry_after": saved["retry_after"], "deadline": None,
+        "remaining_seconds": None,
         "last_error": saved["last_error"], "stop_reason": saved["stop_reason"],
         "retry_budget": json.loads(saved["retry_budget"]),
     }

@@ -4,7 +4,7 @@ import { type ProviderCatalog, type ProviderChoice } from './model-providers';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
 type Config = { enabled: boolean; version: number; model_ready: boolean;
-  fallback: ProviderChoice | null; fallback_authorized: boolean; max_requests: number };
+  fallback: ProviderChoice | null; fallback_authorized: boolean; max_requests: number | null };
 type Job = { id: string; occurrence_id: string; state: string; version: number; error: string | null;
   plan: { diagnosis: string; facts: string[]; unknowns: string[]; expected: string; action: string } | null;
   requests: number; receipt: { state: string; task_id?: string } | null;
@@ -67,7 +67,7 @@ export function CoordinationPanel({ api, faultId }: { api: Api; faultId: string 
     {config && <><div className="execution-actions"><label className="checkbox-label">
       <input type="checkbox" checked={config.enabled} disabled={busy || !config.model_ready && !config.enabled}
         onChange={e => void save({ enabled: e.target.checked })} />协调新发生的系统故障</label>
-      <span className="diagnosis-meta">诊断请求上限 {config.max_requests} 次 / 根任务</span></div>
+      <span className="diagnosis-meta">{config.max_requests === null ? '诊断请求不限额，保留累计用量' : `诊断请求上限 ${config.max_requests} 次 / 根任务`}</span></div>
       <details><summary>备用路由与授权</summary><div className="execution-config">
         <label>协调备用模型<select aria-label="协调备用模型" disabled={busy}
           value={config.fallback ? JSON.stringify([config.fallback.provider_id, config.fallback.model]) : ''}

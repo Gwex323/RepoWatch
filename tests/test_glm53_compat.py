@@ -10,6 +10,7 @@ from agents import AgentOutputSchema, ModelSettings
 from agents.models.interface import ModelTracing
 from openai import AsyncOpenAI
 from test_execution import service  # noqa: F401
+from test_repository_analysis import force_fixture_closing
 
 from repowatch.analysis_model import (
     AnalysisModel,
@@ -19,7 +20,7 @@ from repowatch.analysis_model import (
     separate_review_schema_from_tools,
 )
 from repowatch.diagnosis import Advice
-from repowatch.repository_analysis import ROLES, STAGE_LIMITS, AnalysisFailure
+from repowatch.repository_analysis import ROLES, AnalysisFailure
 
 ARK = "https://ark.cn-beijing.volces.com/api/coding/v3"
 
@@ -62,15 +63,21 @@ def test_saved_glm_config_preserves_reads_handoffs_and_report_validation(
         before = dict(db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone())
     assert engine.status()["output_protocol"] == "json_object"
     assert engine.status()["finalization_mode"] == "provider_default"
-    for index, role in enumerate(ROLES):
-        _, reads, chars = STAGE_LIMITS[role]
-        turns = 2 if index == 0 else int(index == 3 and not closing)
-        monkeypatch.setitem(STAGE_LIMITS, role, (turns, reads, chars))
+    force_fixture_closing(monkeypatch, reviewer=closing)
 
     requests, events = [], []
     expected_tools = ["read_execution_records", "read_source_file", *[
         f"transfer_to_{role}" for role in ROLES[1:]
     ]]
+
+    def record(kind, value):
+        events.append((kind, value))
+        if kind == "format_retry" and sum(k == kind for k, _ in events) >= 3:
+            raise AnalysisFailure("analysis_report_invalid")  # Caller stops the fixture.
+        if kind == "handoff_validation" and not json.loads(value).get("accepted"):
+            rejected = [v for k, v in events if k == kind and not json.loads(v).get("accepted")]
+            if len(rejected) >= 3:
+                raise AnalysisFailure("analysis_handoff_not_followed")
 
     async def transport(request):
         payload = json.loads(request.content)
@@ -128,16 +135,19 @@ def test_saved_glm_config_preserves_reads_handoffs_and_report_validation(
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     if report_case in {"invalid_schema", "invalid_json"}:
         code = ("analysis_report_invalid" if report_case == "invalid_schema"
-                else "analysis_json_invalid")
+                else "analysis_report_invalid")
         with pytest.raises(AnalysisFailure, match=code):
-            asyncio.run(engine.analyze(context, lambda *item: events.append(item)))
+            asyncio.run(engine.analyze(context, record))
     else:
-        report = asyncio.run(engine.analyze(context, lambda *item: events.append(item)))
+        report = asyncio.run(engine.analyze(context, record))
         assert len(report["handoffs"]) == 3
         assert report["execution_read"] and report["files_read"] == ["app.py"]
         assert report["reasoning_effort"] == expected_effort
-    assert len(requests) == (6 if report_case == "valid" else 7)
-    assert sum(kind == "format_retry" for kind, _ in events) == int(report_case != "valid")
+    expected_requests, expected_corrections = (
+        (6, 0) if report_case == "valid" else (7, 1) if report_case == "recover_json" else (8, 3)
+    )
+    assert len(requests) == expected_requests
+    assert sum(kind == "format_retry" for kind, _ in events) == expected_corrections
     assert not any(kind == "finalization_thinking" for kind, _ in events)
     with execution.store.connection() as db:
         assert before == dict(db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone())

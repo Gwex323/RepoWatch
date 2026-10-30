@@ -21,7 +21,7 @@ from .store import Conflict, Missing, uid
 from .system_faults import SystemFaults, transition
 
 LOG = logging.getLogger(__name__)
-MAX_REQUESTS = 32
+MAX_REQUESTS = None
 DEADLINE = 1800
 EXCLUDED = {"model_timeout", "external_service", "target_test", "review_rejection"}
 METADATA = {"model", "model_version", "role_models", "reasoning_effort"}
@@ -69,7 +69,7 @@ def settings(db):
         "account": LOGIN,
         "merge": "owner_only",
         "max_requests": MAX_REQUESTS,
-        "max_seconds": DEADLINE,
+        "max_seconds": None,
     }
 
 
@@ -359,11 +359,6 @@ class Maintenance:
             if kind != "usage":
                 occurrence = self._guard(db, task)
                 if kind == "request_started":
-                    count = db.execute(
-                        "SELECT requests FROM maintenance_tasks WHERE id=?", (task["id"],)
-                    ).fetchone()[0]
-                    if count >= MAX_REQUESTS:
-                        raise Conflict("maintenance_budget_exhausted")
                     source_budget(db, occurrence, reserve=True, maintenance=True)
                     db.execute(
                         "UPDATE maintenance_tasks SET requests=requests+1 WHERE id=?", (task["id"],)
@@ -632,8 +627,6 @@ class Maintenance:
                 or not artifacts
                 or not artifacts.get("approved_digest")
                 or task["remote"]
-                or task["publication_retries"] >= 2
-                or time.time() >= task["lease"]
                 or not artifacts.get("review", {}).get("approved")
                 or not artifacts.get("verification", {}).get("passed")
             ):
@@ -645,14 +638,14 @@ class Maintenance:
                 task["publication_retries"] + 2,
                 task["basis"],
                 task["owner"],
-                task["lease"] + 10,
+                time.time() + recovery.LEASE_SECONDS,
             )
             if not action:
                 raise Conflict("maintenance_root_busy")
             db.execute(
                 "UPDATE maintenance_tasks SET state='running',version=version+1,"
-                "publication_retries=publication_retries+1,action_id=? WHERE id=?",
-                (action, task_id),
+                "publication_retries=publication_retries+1,action_id=?,lease=? WHERE id=?",
+                (action, time.time() + recovery.LEASE_SECONDS, task_id),
             )
             task["action_id"] = action
             self._guard(db, task)
@@ -702,8 +695,7 @@ class Maintenance:
                 item["budget"] = recovery.snapshot(db, row["root_id"])["budget"]
                 artifacts = item["artifacts"] or {}
                 item["can_retry_publication"] = bool(
-                    row["state"] == "blocked" and row["lease"] > time.time()
-                    and row["publication_retries"] < 2 and row["issue"] and not row["remote"]
+                    row["state"] == "blocked" and row["issue"] and not row["remote"]
                     and artifacts.get("approved_digest") and config["enabled"]
                     and config["version"] == row["configuration_version"])
                 item["can_reconcile"] = bool(row["remote"] or db.execute(

@@ -17,16 +17,17 @@ from .repository_source import MAX_FILES, MAX_SOURCE, ExecutionError
 from .source_safety import source_problem
 from .store import Conflict
 
-SOURCE_TYPES = {".py", ".go", ".ts", ".tsx", ".js", ".jsx"}
 BLOCKED_PARTS = {
-    ".git", ".github", ".venv", "venv", "node_modules", "dist", "build", "data", "__pycache__",
+    ".git", ".venv", "venv", "node_modules", "dist", "build", "data", "__pycache__",
 }
-MAX_FILE_BYTES = 32000
+BUILD_DOTFILES = {
+    ".github", ".gitignore", ".gitattributes", ".editorconfig", ".dockerignore",
+    ".eslintrc", ".eslintrc.json", ".eslintrc.js", ".eslintrc.cjs",
+    ".prettierrc", ".prettierrc.json", ".prettierrc.js", ".prettierignore",
+    ".pre-commit-config.yaml", ".flake8", ".babelrc", ".browserslistrc",
+}
+MAX_FILE_BYTES = None
 SOURCE_READ_POLICY = "recoverable_source_reads_v1"
-MAX_SOURCE_READS = 24
-MAX_SOURCE_READ_CHARS = 100000
-MAX_VERIFICATION_REVISIONS = 3
-MAX_REVIEW_CORRECTIONS = 2
 
 
 class RepairPathRejected(Conflict):
@@ -52,14 +53,14 @@ class FileEdit(BaseModel):
     model_config = ConfigDict(extra="forbid")
     path: str = Field(min_length=1, max_length=180)
     original_sha256: str = Field(pattern=r"^(?:[0-9a-f]{64})?$")
-    content: str = Field(min_length=1, max_length=32000)
+    content: str = Field()
 
 
 class Patch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     summary: str = Field(min_length=1, max_length=1500)
-    edits: list[FileEdit] = Field(min_length=2, max_length=10)
-    regression_paths: list[str] = Field(min_length=1, max_length=5)
+    edits: list[FileEdit] = Field(min_length=2)
+    regression_paths: list[str] = Field(min_length=1)
     regression_command: str = Field(min_length=1, max_length=4000)
 
 
@@ -67,12 +68,12 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def safe_path(root, name):
+def safe_relative_name(name):
     parts = name.split("/")
     if (
         len(name) > 180 or "\\" in name or ":" in name or name.startswith("/")
         or any(not part or part in (".", "..") or part.endswith((" ", "."))
-               or part.startswith(".")
+               or (part.startswith(".") and part not in BUILD_DOTFILES)
                or re.search(r"[\x00-\x1f\x7f]", part)
                or re.fullmatch(r"(?i)(con|prn|aux|nul|com[0-9]|lpt[0-9])(\..*)?", part)
                for part in parts)
@@ -80,12 +81,13 @@ def safe_path(root, name):
         raise RepairPathRejected("invalid_path")
     if any(part.casefold() in BLOCKED_PARTS for part in parts):
         raise RepairPathRejected("protected_directory")
-    if Path(name).suffix.lower() not in SOURCE_TYPES:
-        raise RepairPathRejected("unsupported_file_type")
-    if parts[-1].casefold() in ("setup.py", "conftest.py"):
-        raise RepairPathRejected("protected_file")
     if any(word in name.casefold() for word in ("secret", "credential", "token", "password")):
         raise RepairPathRejected("sensitive_name")
+    return parts
+
+
+def safe_path(root, name):
+    parts = safe_relative_name(name)
     path = root.joinpath(*parts)
     if any(parent.is_symlink() for parent in (path, *path.parents) if parent != root.parent):
         raise RepairPathRejected("symlink")
@@ -157,6 +159,7 @@ class RepairWorkspace:
         self.reads = {}
         self.read_count = 0
         self.read_chars = 0
+        self.additional_profiles = []
         self.patch = None
         self.diff = ""
         self.verification = None
@@ -167,6 +170,7 @@ class RepairWorkspace:
         self.prior_rejected_patches = []
         self.candidate = self.root / "candidate"
         self.baseline = self.root / "baseline"
+        self.compatibility = self.root / "compatibility"
 
     @property
     def ready_for_review(self):
@@ -178,6 +182,27 @@ class RepairWorkspace:
         self.check()
         if not self.ready_for_review:
             raise Conflict("repair_review_evidence_required")
+        if (review.get("approved")
+                and self.verification.get("original_suite_after", {}).get("exit_code") != 0
+                and not str(review.get("original_suite_rationale", "")).strip()):
+            raise Conflict("repair_review_evidence_required")
+        if (review.get("approved") and any(
+            self.verification.get(profile["name"] + "_original", {}).get("exit_code") != 0
+            for profile in self.additional_profiles
+        ) and not str(review.get("baseline_rationale", "")).strip()):
+            raise Conflict("repair_review_evidence_required")
+        changed_tests = {
+            edit.path for edit in self.patch.edits
+            if edit.path in self.files
+            and (test_path(edit.path) or Path(edit.path).name == "conftest.py")
+            and digest(edit.content.encode()) != self.files[edit.path]
+        }
+        if review.get("approved") and changed_tests:
+            explained = review.get("test_changes", [])
+            if (len(explained) != len(changed_tests)
+                    or {item.get("path") for item in explained} != changed_tests
+                    or any(not str(item.get("rationale", "")).strip() for item in explained)):
+                raise Conflict("repair_review_evidence_required")
         self.review = copy.deepcopy(review)
         self.review_history.append({
             "revision": self.revision,
@@ -190,7 +215,7 @@ class RepairWorkspace:
         for name in sorted(self.files):
             try:
                 path = safe_path(self.original, name)
-                if path.stat().st_size <= MAX_FILE_BYTES:
+                if path.is_file():
                     eligible.append(name)
             except (Conflict, OSError):
                 continue
@@ -198,14 +223,11 @@ class RepairWorkspace:
 
     @property
     def source_read_budget_low(self):
-        """Reserve submission before another maximum-size file can exhaust reads."""
-        return (self.read_count >= MAX_SOURCE_READS - 1
-                or self.read_chars + MAX_FILE_BYTES > MAX_SOURCE_READ_CHARS)
+        """Compatibility property: source reads no longer exhaust a task quota."""
+        return False
 
     def read(self, name, *, candidate=False):
         self.check()
-        if self.read_count >= MAX_SOURCE_READS:
-            raise Conflict("repair_read_budget")
         self.read_count += 1
         root = self.candidate if candidate else self.original
         path = safe_path(root, name)
@@ -216,20 +238,13 @@ class RepairWorkspace:
         try:
             if not path.is_file():
                 raise SourceReadUnavailable(name, candidate, "not_found")
-            if path.stat().st_size > MAX_FILE_BYTES:
-                raise SourceReadUnavailable(name, candidate, "too_large")
-            with path.open("rb") as stream:
-                raw = stream.read(MAX_FILE_BYTES + 1)
-            if len(raw) > MAX_FILE_BYTES:
-                raise SourceReadUnavailable(name, candidate, "too_large")
+            raw = path.read_bytes()
         except OSError:
             raise SourceReadUnavailable(name, candidate, "read_error") from None
         try:
             text = raw.decode("utf-8")
         except UnicodeError:
             raise SourceReadUnavailable(name, candidate, "invalid_utf8") from None
-        if self.read_chars + len(text) > MAX_SOURCE_READ_CHARS:
-            raise Conflict("repair_read_budget")
         self.read_chars += len(text)
         problem = source_problem(text, name)
         if problem:
@@ -242,15 +257,9 @@ class RepairWorkspace:
         self.check()
         if self.patch is not None:
             rejected = bool(self.review and self.review.get("approved") is False)
-            rejected_rounds = sum(item["review"]["approved"] is False
-                                  for item in self.review_history)
-            limit = MAX_VERIFICATION_REVISIONS + min(rejected_rounds, MAX_REVIEW_CORRECTIONS)
             if (not revise or not self.verification
-                    or (self.verification.get("passed") is not False and not rejected)
-                    or self.revision >= limit):
+                    or (self.verification.get("passed") is not False and not rejected)):
                 raise Conflict("repair_patch_already_submitted")
-        if len(patch.model_dump_json().encode()) > 160000:
-            raise Conflict("repair_patch_limit")
         names = [edit.path for edit in patch.edits]
         if len({name.casefold() for name in names}) != len(names):
             raise RepairPathRejected("duplicate_path")
@@ -270,8 +279,6 @@ class RepairWorkspace:
                 )
                 raise
             raw = edit.content.encode()
-            if len(raw) > MAX_FILE_BYTES:
-                raise Conflict("repair_patch_limit")
             problem = source_problem(edit.content, edit.path)
             if problem:
                 raise SourceContentBlocked(edit.path, "patch", problem)
@@ -280,12 +287,17 @@ class RepairWorkspace:
                         or path.name == "__init__.py"):
                     raise Conflict("repair_regression_required")
             else:
-                if test_path(edit.path) or not path.is_file():
-                    raise Conflict("repair_existing_tests_protected")
-                actual = digest(path.read_bytes())
-                if self.reads.get(edit.path) != actual or edit.original_sha256 != actual:
+                if edit.path in self.files:
+                    if not path.is_file():
+                        raise Conflict("repair_source_changed")
+                    actual = digest(path.read_bytes())
+                    if self.reads.get(edit.path) != actual or edit.original_sha256 != actual:
+                        raise Conflict("repair_source_changed")
+                    if digest(raw) != actual:
+                        source_changes += 1
+                elif edit.original_sha256 or path.exists():
                     raise Conflict("repair_source_changed")
-                if digest(raw) != actual:
+                else:
                     source_changes += 1
             # Reject new names that alias an existing file on Windows.
             if any(name.casefold() == edit.path.casefold() and name != edit.path
@@ -316,6 +328,7 @@ class RepairWorkspace:
             self.revision = next_revision
             self.baseline = revision_root / "baseline"
             self.candidate = revision_root / "candidate"
+            self.compatibility = revision_root / "compatibility"
             self.id = self.id.split("-r", 1)[0] + f"-r{self.revision}"
         self.patch = patch
         self.diff = ""
@@ -338,8 +351,16 @@ class RepairWorkspace:
                 tofile="b/" + edit.path,
             ))
         self.diff = "".join(fragments)
-        if len(self.diff) > 120000:
-            raise Conflict("repair_patch_limit")
+        shutil.copytree(self.candidate, self.compatibility)
+        # Untouched tests are already present in the copied candidate. Restore
+        # only validated edits, so unrelated protected filenames remain intact.
+        for edit in patch.edits:
+            name = edit.path
+            if name in self.files and (test_path(name) or Path(name).name == "conftest.py"):
+                target = safe_path(self.compatibility, name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(safe_path(self.original, name), target)
+
 
     def verify(self, event):
         runtime = self.execution.runtime
@@ -351,6 +372,9 @@ class RepairWorkspace:
         trials = [
             ("original_suite", self.original, [("original_suite", self.env["config"]["test"])]),
             ("baseline", self.baseline, [("regression_before", self.patch.regression_command)]),
+            ("compatibility", self.compatibility, [
+                ("original_suite_after", self.env["config"]["test"]),
+            ]),
             ("candidate", self.candidate, [
                 ("regression_after", self.patch.regression_command),
                 ("full_suite_after", self.env["config"]["test"]),
@@ -382,10 +406,45 @@ class RepairWorkspace:
                     event("cleanup_failed", label)
                     if not failing:
                         raise
+        # These profiles are supplied by the trusted maintenance adapter, not the
+        # repair model. Each language uses its own isolated runtime and installs
+        # dependencies from the exact original/candidate manifests being checked.
+        for profile in self.additional_profiles:
+            for variant, source in (("original", self.original), ("candidate", self.candidate)):
+                key = profile["name"] + "_" + variant
+                env = {**self.env, "id": self.id + "-" + key,
+                       "image_id": runtime.image(profile["config"]["language"], self.check),
+                       "state": "ready", "config": dict(profile["config"])}
+                event("testing", key)
+                try:
+                    runtime.cleanup(env)
+                    runtime.seed(env, source, self.check)
+                    code, log = runtime.run(env, "setup", self.check)
+                    results[key + "_setup"] = {"exit_code": code, "log": redact(log)[-16000:]}
+                    if code:
+                        results[key] = {"exit_code": code, "executed": False,
+                                        "log": "Setup failed; verification command was not run.",
+                                        "command": env["config"]["test"]}
+                    else:
+                        code, log = runtime.run(env, "test", self.check)
+                        results[key] = {"exit_code": code, "executed": True,
+                                        "log": redact(log)[-16000:],
+                                        "command": env["config"]["test"]}
+                finally:
+                    self.verification = results
+                    failing = sys.exc_info()[0] is not None
+                    try:
+                        runtime.cleanup(env)
+                    except Exception:
+                        event("cleanup_failed", key)
+                        if not failing:
+                            raise
         results["passed"] = (
             results["regression_before"]["exit_code"] not in (0, 5, 126, 127, 137, 143)
             and results["regression_after"]["exit_code"] == 0
             and results["full_suite_after"]["exit_code"] == 0
+            and all(results[p["name"] + "_candidate"]["exit_code"] == 0
+                    for p in self.additional_profiles)
             and not any(re.search(
                 r"(?i)ran 0 tests|no tests ran|no tests collected|collected 0 items"
                 r"|\[no test files\]|# tests 0(?:\D|$)",

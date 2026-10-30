@@ -35,8 +35,8 @@ type Analysis = {
   task_scope?: TaskScope;
   report_recovery?: { available: boolean };
   automatic_recovery?: {
-    state: string; requests: number; max_requests: number; resumptions: number; max_resumptions: number;
-    retry_after: number; deadline: number; remaining_seconds: number; last_error: string | null;
+    state: string; requests: number; max_requests: number | null; resumptions: number; max_resumptions: number | null;
+    retry_after: number; deadline: number | null; remaining_seconds: number | null; last_error: string | null;
     stop_reason: string | null; retry_budget: Record<string, number>;
   } | null;
   report: { summary: string; limitations: string[]; files_read: string[]; model?: string;
@@ -111,7 +111,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_finalization_not_followed: '已要求提交报告，但模型仍尝试调用工具。请检查模型服务的工具选择支持。',
   analysis_model_output_invalid: '模型返回了无效的工具调用或输出格式，本次未保存问题。',
   analysis_tool_call_protocol_invalid: '模型工具调用的协议字段不符合要求，无法安全兼容，本批调用未执行。请查看协议兼容检查记录。',
-  analysis_output_truncated: '模型输出达到生成上限，扩容空间或重试额度已用完，本次未保存问题。',
+  analysis_output_truncated: '模型输出达到单次生成上限，无法继续扩容，本次未保存问题。',
   analysis_provider_empty_response: '模型服务没有返回可用的结果，请检查服务兼容性和状态。',
   analysis_tool_arguments_invalid: '模型工具参数未通过 JSON 或字段校验，本次未执行该调用。',
   analysis_tool_arguments_exhausted: '工具调用的自动纠正次数已用完，本批调用未执行。请查看最后一次参数校验的具体原因。',
@@ -136,7 +136,7 @@ const names: Record<string, string> = {
 };
 type ToolArgumentDetail = {
   role?: string; tool?: string; reason?: string; fields?: string[];
-  recoverable?: boolean; corrections_remaining?: number;
+  recoverable?: boolean; corrections_remaining?: number | null;
   issues?: { field: string; code: string }[]; line?: number; column?: number;
   suspected_output_limit?: boolean;
 };
@@ -224,37 +224,38 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'report_recovery_scheduled') {
     try {
       const detail = JSON.parse(item.agent) as { attempt: number; delay_seconds: number };
-      return `已安排第 ${detail.attempt} 次审查续办，等待 ${detail.delay_seconds} 秒，沿用已有证据与累计额度`;
+      return `已安排第 ${detail.attempt} 次审查续办，等待 ${detail.delay_seconds} 秒，沿用已有证据与累计用量`;
     } catch { return '已安排自动恢复最终审查'; }
   }
   if (item.kind === 'report_recovery_stopped') return `自动恢复已停止：${recoveryStopReasons[item.agent] ?? '请查看失败记录'}`;
-  if (item.kind === 'report_recovery_new_scope') return '用户发起新范围审查，上一条恢复链额度已归档；新范围按新任务计额';
+  if (item.kind === 'report_recovery_new_scope') return '用户发起新范围审查，上一条恢复链记录已归档；新范围按新任务记录用量';
   if (item.kind === 'report_budget') {
     try {
       const budget = JSON.parse(item.agent) as { max_tokens: number; reserve_seconds: number; review_items: number };
       return `报告预算：${budget.review_items} 项复核 · 输出上限 ${budget.max_tokens} tokens · 预留 ${budget.reserve_seconds} 秒`;
     } catch { return '已分配最终报告预算'; }
   }
-  if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补一次真实交接`;
-  if (item.kind === 'handoff_retry') return `${name} · 指定交接未通过，使用同一轮证据重试一次`;
+  if (item.kind === 'handoff_recovery') return `${name} · 提前结束，保留本轮证据并补充真实交接`;
+  if (item.kind === 'handoff_retry') return `${name} · 指定交接未通过，使用同一轮证据继续重试`;
   if (item.kind === 'handoff_recovered') return `${name} · 交接纠正已通过校验，等待实际交接`;
   if (item.kind === 'handoff_recovery_stopped') return '交接纠正已停止：阶段时限已到，本批未执行';
   if (item.kind === 'handoff_validation') {
     try {
       const detail = JSON.parse(item.agent) as {
         expected?: string; calls?: number; matching?: number; accepted?: boolean;
-        reason?: string; recovery?: string; corrections_remaining?: number;
+        reason?: string; recovery?: string; corrections_remaining?: number | null;
       };
       const target = names[(detail.expected ?? '').replace(/^transfer_to_/, '')] ?? '指定角色';
       const reasons: Record<string, string> = { missing_call: '没有返回交接调用', wrong_tool: '调用不符合指定交接',
         too_many_calls: '返回了多条调用', refusal: '模型明确拒绝' };
-      const recovery: Record<string, string> = { retry: '准备有限纠正', retry_exhausted: '本阶段交接纠正机会已用完',
+      const recovery: Record<string, string> = { retry: '准备继续纠正', retry_exhausted: '本阶段交接纠正机会已用完',
         shared_budget_exhausted: '共享工具纠正额度已用完', stage_deadline: '阶段时限已到',
         argument_correction_active: '不能改变原参数纠正批次', refusal: '已停止，不重试拒绝' };
       return `交接调用检查：交给${target} · 匹配 ${detail.matching ?? 0}/${detail.calls ?? 0} · ${
         detail.accepted ? '通过' : reasons[detail.reason ?? ''] ?? '未通过'}${
           recovery[detail.recovery ?? ''] ? ` · ${recovery[detail.recovery ?? '']}` : ''}${
-          detail.corrections_remaining !== undefined ? ` · 共享纠正剩余 ${detail.corrections_remaining} 次` : ''}`;
+          detail.corrections_remaining === null ? ' · 纠正不限次数' :
+            detail.corrections_remaining !== undefined ? ` · 共享纠正剩余 ${detail.corrections_remaining} 次` : ''}`;
     } catch { return '交接调用检查已记录'; }
   }
   if (item.kind === 'model_call') return `${name} · 请求模型`;
@@ -264,7 +265,7 @@ function eventLabel(item: Analysis['events'][number]) {
   if (item.kind === 'format_retry') return `${name} · 报告格式不合格，正在纠正一次`;
   if (item.kind === 'tool_arguments_retry') return `${name} · 保留已有证据，正在纠正原工具批次`;
   if (item.kind === 'tool_arguments_repaired') return `${name} · 参数纠正通过校验，等待工具实际执行`;
-  if (item.kind === 'required_read_retry') return '必读工具调用缺失，正在有限纠正；此前没有执行读取';
+  if (item.kind === 'required_read_retry') return '必读工具调用缺失，正在纠正；此前没有执行读取';
   if (item.kind === 'required_read_recovered') return '必读调用已通过检查，等待工具实际执行';
   if (item.kind === 'tool_arguments_preserved') {
     try {
@@ -292,7 +293,8 @@ function eventLabel(item: Analysis['events'][number]) {
       const detail = JSON.parse(item.agent) as ToolArgumentDetail;
       return `${names[detail.role ?? ''] ?? '当前角色'} · ${toolNames[detail.tool ?? ''] ?? '工具调用'}：${toolArgumentReason(detail)}${
         detail.suspected_output_limit ? ' · 疑似达到输出额度' : ''}；本批调用未执行，${
-        detail.recoverable ? `准备自动纠正，此后剩余 ${detail.corrections_remaining ?? 0} 次` : '本次自动纠正已停止'}`;
+        detail.recoverable ? (detail.corrections_remaining == null ? '准备自动纠正，不限次数' :
+          `准备自动纠正，此后剩余 ${detail.corrections_remaining} 次`) : '本次自动纠正已停止'}`;
     } catch { return '工具参数校验未通过，本批调用未执行'; }
   }
   if (item.kind === 'evidence_retry') return `${name} · 源码证据不匹配，正在纠正一次`;
@@ -323,7 +325,7 @@ function eventLabel(item: Analysis['events'][number]) {
     try {
       const detail = JSON.parse(item.agent) as { role?: string; phase?: string; max_tokens?: number; reasoning_tokens?: number; payload_tokens?: number; can_expand?: boolean };
       const phase = ({ evidence_correction: '局部证据纠正', scope_mapping_correction: '范围关联纠正', tool_arguments: '工具参数纠正', report: '最终报告', exploration: '分析探索' } as Record<string, string>)[detail.phase ?? ''] ?? '模型请求';
-      return `${names[detail.role ?? ''] ?? '当前角色'} · ${phase}达到 ${detail.max_tokens ?? 0} tokens 上限${detail.reasoning_tokens !== undefined ? ` · 推理 ${detail.reasoning_tokens}` : ''}${detail.payload_tokens !== undefined ? ` · 非推理输出 ${detail.payload_tokens}` : ''} · ${detail.can_expand ? '按剩余额度扩容' : '扩容空间或重试额度已用完'}`;
+      return `${names[detail.role ?? ''] ?? '当前角色'} · ${phase}达到 ${detail.max_tokens ?? 0} tokens 上限${detail.reasoning_tokens !== undefined ? ` · 推理 ${detail.reasoning_tokens}` : ''}${detail.payload_tokens !== undefined ? ` · 非推理输出 ${detail.payload_tokens}` : ''} · ${detail.can_expand ? '提高单次输出上限后重试' : '已达到单次输出上限，无法继续扩容'}`;
     } catch { return '模型输出达到本次生成上限'; }
   }
   if (item.kind === 'evidence_normalized') return `源码引用已去除显示行号：${item.agent} 处`;
@@ -440,7 +442,7 @@ function eventLabel(item: Analysis['events'][number]) {
       const reason = ({ missing_call: '没有返回必读工具调用', wrong_tool: '返回了其他工具或交接',
         too_many_calls: '调用数量超过允许上限', refusal: '模型明确拒绝',
       } as Record<string, string>)[check.reason ?? ''];
-      const recovery = ({ retry: '准备有限纠正', request_mismatch: '调用不匹配，已停止',
+      const recovery = ({ retry: '准备继续纠正', request_mismatch: '调用不匹配，已停止',
         retry_exhausted: '必读调用纠正机会已用完', shared_budget_exhausted: '共享工具纠正额度已用完',
         stage_deadline: '阶段时限已到', argument_correction_active: '原参数纠正不能跳过绑定批次',
         refusal: '已停止，不自动重试拒绝',
@@ -598,8 +600,8 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
   };
   const active = analyses.some(item => ['queued', 'running', 'waiting_model'].includes(item.status));
   const recovery = analysis?.automatic_recovery;
-  const recoveryExhausted = !!recovery && (recovery.requests >= recovery.max_requests
-    || recovery.resumptions >= recovery.max_resumptions || recovery.remaining_seconds <= 0);
+  const recoveryExhausted = !!recovery && ((recovery.max_requests !== null && recovery.requests >= recovery.max_requests)
+    || (recovery.max_resumptions !== null && recovery.resumptions >= recovery.max_resumptions) || (recovery.remaining_seconds !== null && recovery.remaining_seconds <= 0));
   const stage = analysis?.progress?.stage ??
     analysis?.events.filter(event => event.kind === 'agent').at(-1)?.agent;
   return <section id="repository-analysis" className="repository-analysis" aria-label={view === 'analysis' ? '仓库自动分析' : '项目分析发现'}>
@@ -616,11 +618,11 @@ export function AnalysisPanel({ envId, version, api, pipelineActive = false, foc
     <div hidden={view !== 'analysis'}>
     {!analysis && <p className="action-hint">尚无分析记录，可分析当前版本或从 Issue 页选择问题。</p>}
     {recovery && <div className="diagnosis-meta" role="status">
-      <p>累计模型请求 {recovery.requests} / {recovery.max_requests} 次 · 续办 {recovery.resumptions} / {recovery.max_resumptions} 次
-        {recovery.state !== 'completed' && ` · 总时限剩余 ${Math.ceil(recovery.remaining_seconds / 60)} 分钟`}</p>
+      <p>累计模型请求 {recovery.requests}{recovery.max_requests === null ? '（不限额）' : ` / ${recovery.max_requests}`} 次 · 续办 {recovery.resumptions}{recovery.max_resumptions === null ? '（不限额）' : ` / ${recovery.max_resumptions}`} 次
+        {recovery.remaining_seconds === null ? ' · 无任务总时限' : recovery.state !== 'completed' && ` · 总时限剩余 ${Math.ceil(recovery.remaining_seconds / 60)} 分钟`}</p>
       {recovery.state === 'waiting' && <p>已安排自动恢复审查，无需点击重试。
-        {recovery.remaining_seconds > 0 && ` 预计 ${new Date(recovery.retry_after * 1000).toLocaleTimeString('zh-CN')} 后继续；模型工作流需保持启用。`}
-        已读取证据与累计额度保留。</p>}
+        {(recovery.remaining_seconds === null || recovery.remaining_seconds > 0) && ` 预计 ${new Date(recovery.retry_after * 1000).toLocaleTimeString('zh-CN')} 后继续；模型工作流需保持启用。`}
+        已读取证据与累计用量保留。</p>}
       {recovery.state === 'stopped' && <p>自动恢复停止：{recoveryStopReasons[recovery.stop_reason ?? ''] ?? '请查看失败记录'}。
         已有证据及历史记录保留，尚未生成完整报告。</p>}
     </div>}

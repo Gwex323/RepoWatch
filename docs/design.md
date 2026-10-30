@@ -2,7 +2,7 @@
 
 Status: local execution, real Issue intake, daily checks and controlled repair/publication
 implemented; central coordination is in staged development
-Updated: 2026-10-29
+Updated: 2026-10-30
 
 ## Goal
 
@@ -11,12 +11,29 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
 
+Issue #101 is implemented on `feature/unlimited-workflows-101`, based on
+`d22226a`: workflow request/token/correction/resumption/duration quotas are
+removed, public limits are null, and patch policy permits new production files,
+existing tests, dependency/build manifests and CI without a 32KB file ceiling.
+Usage, finite renewable leases, single-request timeouts, cancellation, evidence,
+review and publication authority remain enforced. See [current policy](unlimited-workflows-101.md)
+and [review](tasks/0101/review.md). Static checks and frontend build are recorded;
+no test cases or live-model/Docker acceptance were run for this increment.
+Delivery PR #102 is open; it is not merged or deployed. Earlier quota and patch-allowlist descriptions
+below document the preceding policy and are superseded by this increment.
+The coordinator still cannot independently invent a new analysis-retry action;
+removing quotas alone does not establish a fix for invalid source quotations.
+
 Issue #99 is implemented on `feature/unified-issues-99` (base `7b79e8e`): the
 repository flow has five pages, and Issue combines GitHub issues with local
 analysis findings, source filters, evidence and disposition. Reports remain in
 analysis; patches, tests and independent review remain in repair. The legacy
 `reproduction` section maps to Issue. Validation and delivery status are recorded
-in [unified Issue](unified-issues-99.md); this increment is not merged or deployed.
+in [unified Issue](unified-issues-99.md). PR #100 was merged as `d22226a` on
+2026-10-29 and started at local port 8765 using the original database after a
+consistent backup. Startup and served asset bytes were checked; no test suite
+or live-model acceptance was run during restart, and managed release supervision
+was not enabled.
 
 The local single-user workbench supports fixed-revision Docker execution, model-based
 analysis, GitHub Issue synchronization and Issue-based analysis, daily repository

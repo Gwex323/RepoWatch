@@ -372,12 +372,8 @@ class Releases:
             raise Conflict("release_source_basis_changed")
         source_budget(db, occurrence, capacity=True, maintenance=True)
         root = db.execute("SELECT * FROM recovery_roots WHERE id=?", (task["root_id"],)).fetchone()
-        if (not root or root["action_id"] or root["stop_reason"]
-                or root["requests"] >= recovery.MAX_REQUESTS
-                or root["tokens"] >= recovery.MAX_TOKENS
-                or root["seconds"] >= recovery.MAX_SECONDS
-                or root["resumptions"] >= recovery.MAX_RESUMPTIONS):
-            raise Conflict("release_original_budget_exhausted")
+        if not root or root["action_id"]:
+            raise Conflict("recovery_ownership_changed")
         if not db.execute(
                 "UPDATE release_resumptions SET state='verifying_original' WHERE release_id=? "
                 "AND state='dispatching'", (manifest.id,)).rowcount:
@@ -448,11 +444,8 @@ class Releases:
                     raise Conflict("release_source_pr_mismatch")
                 root = db.execute("SELECT * FROM recovery_roots WHERE id=?",
                                   (task["root_id"],)).fetchone()
-                if (not root or root["action_id"] or root["requests"] >= recovery.MAX_REQUESTS
-                        or root["tokens"] >= recovery.MAX_TOKENS
-                        or root["seconds"] >= recovery.MAX_SECONDS or root["stop_reason"]
-                        or root["resumptions"] >= recovery.MAX_RESUMPTIONS):
-                    raise Conflict("release_original_budget_exhausted")
+                if not root or root["action_id"]:
+                    raise Conflict("recovery_ownership_changed")
                 source_budget(db, occurrence, capacity=True, maintenance=True)
             except Conflict as exc:
                 reason = str(exc)
@@ -514,17 +507,8 @@ class Releases:
         root = db.execute(
             "SELECT r.*,a.started FROM recovery_roots r LEFT JOIN recovery_actions a "
             "ON a.id=r.action_id WHERE r.id=?", (row["root_id"],)).fetchone()
-        elapsed = (max(0, time.time() - root["started"])
-                   if root and root["started"] is not None else 0)
-        if (not root or root["stop_reason"]
-                or root["seconds"] + elapsed >= recovery.MAX_SECONDS
-                or state not in {"running", "completed", "pr_created"} and (
-                    root["requests"] >= recovery.MAX_REQUESTS
-                    or root["tokens"] >= recovery.MAX_TOKENS
-                    or root["resumptions"] >= recovery.MAX_RESUMPTIONS)):
-            return "release_original_budget_exhausted"
-        if time.time() >= row["created"] + recovery.MAX_SECONDS:
-            return "release_source_verification_timeout"
+        if not root:
+            return "recovery_ownership_changed"
         return None
 
     def reconcile_resumptions(self):

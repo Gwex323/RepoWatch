@@ -4,7 +4,7 @@ import { agentModelEvent } from './agent-models';
 import { AutomaticAcceptance, type AcceptanceProgress } from './task-scope';
 
 type Api = <T>(path: string, body?: unknown) => Promise<T>;
-type Settings = { enabled: boolean; model_enabled: boolean; version: number; max_attempts: number };
+type Settings = { enabled: boolean; model_enabled: boolean; version: number; max_attempts: number | null };
 type Verification = Record<string, { command?: string; exit_code: number; log: string } | boolean>;
 type Repair = {
   id: string; finding_id: string; version: number; status: string; stage: string | null;
@@ -139,7 +139,7 @@ const errors: Record<string, string> = {
   repair_remote_scan_limit: '远程记录超过核对范围，未重复发布。',
   repair_publication_uncertain: '上次发布结果尚不能确认，未重复提交；稍后重试将再次核对。',
   github_active_account_required: '请先连接并选择可用的 GitHub 账号。',
-  repair_publication_retry_limit: '仅重试发布的三次机会已用完，请检查权限和发布记录。',
+  repair_publication_retry_limit: '发布重试条件不满足，请检查权限和发布记录。',
   github_permission_denied: 'GitHub 令牌权限不足。请检查目标仓库授权及 Contents、Issues、Pull requests 写入权限。',
   github_forbidden: 'GitHub 拒绝访问。请检查令牌权限、组织授权及仓库策略；这不一定是限流。',
   github_rate_limited: 'GitHub 请求已被限流，请按执行记录中的等待时间稍后重试。',
@@ -229,7 +229,8 @@ const verificationEvent = (kind: string, value: string) => {
     const item = JSON.parse(value);
     if (!Number.isInteger(item.revision)) return '修复验证记录';
     if (kind === 'verification_round') return `第 ${item.revision} 版验证${item.passed === true ? '通过' : '未通过'}`;
-    return `根据第 ${item.revision} 版失败日志分析并纠正 · 还可生成 ${item.corrections_remaining} 版补丁`;
+    return `根据第 ${item.revision} 版失败日志分析并纠正 · ${item.corrections_remaining == null
+      ? '补丁纠正不限次数' : `还可生成 ${item.corrections_remaining} 版补丁`}`;
   } catch { return '修复验证记录'; }
 };
 const reviewEvent = (kind: string, value: string) => {
@@ -237,7 +238,8 @@ const reviewEvent = (kind: string, value: string) => {
     const item = JSON.parse(value);
     if (!Number.isInteger(item.revision)) return '独立审查记录';
     if (kind === 'review_round') return `第 ${item.revision} 版审查${item.approved ? '批准' : '未批准'}`;
-    return `根据第 ${item.revision} 版审查结论自动修改补丁 · 还可返工 ${item.corrections_remaining} 轮`;
+    return `根据第 ${item.revision} 版审查结论自动修改补丁 · ${item.corrections_remaining == null
+      ? '审查返工不限次数' : `还可返工 ${item.corrections_remaining} 轮`}`;
   } catch { return '独立审查记录'; }
 };
 const protocolEvent = (value: string) => {
@@ -324,7 +326,7 @@ export function RepairSettings({ api, modelEnabled }: { api: Api; modelEnabled?:
         <p className="diagnosis-meta">开启后，有效分析发现会自动进入修复、测试与独立审查，无需逐项确认复现。已有 Issue 关联原编号；新发现先查找相似 Issue，再按现有权限提交修复 PR。</p>
       <dl className="repair-facts">
         <div><dt>模型</dt><dd>{(modelEnabled ?? settings.model_enabled) ? '代码修复与独立审查模型已就绪' : '等待修复角色模型配置或启用'}</dd></div>
-        <div><dt>每个问题</dt><dd>最多 {settings.max_attempts} 次尝试</dd></div>
+        <div><dt>每个问题</dt><dd>{settings.max_attempts === null ? '不设尝试次数额度' : `最多 ${settings.max_attempts} 次尝试`}</dd></div>
         <div><dt>最终合并</dt><dd>仓库拥有者审核并操作</dd></div>
       </dl>
     </form>}
