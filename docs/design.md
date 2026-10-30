@@ -19,7 +19,7 @@ Usage, finite renewable leases, single-request timeouts, cancellation, evidence,
 review and publication authority remain enforced. See [current policy](unlimited-workflows-101.md)
 and [review](tasks/0101/review.md). Static checks and frontend build are recorded;
 no test cases or live-model/Docker acceptance were run for this increment.
-It is not merged or deployed. Earlier quota and patch-allowlist descriptions
+Delivery PR #102 is open; it is not merged or deployed. Earlier quota and patch-allowlist descriptions
 below document the preceding policy and are superseded by this increment.
 The coordinator still cannot independently invent a new analysis-retry action;
 removing quotas alone does not establish a fix for invalid source quotations.

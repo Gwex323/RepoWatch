@@ -10,7 +10,7 @@ Status updated: 2026-10-30
   usage, renewable ownership, cancellation, single-request timeouts and evidence/
   review gates retained. Static checks and build are recorded in
   [review](tasks/0101/review.md); no test cases, paid model or Docker acceptance
-  were run. This increment is not merged or deployed. See
+  were run. Delivery PR #102 is open; this increment is not merged or deployed. See
   [policy and limitations](unlimited-workflows-101.md), which supersedes earlier
   finite-quota and Python-only patch descriptions in this plan.
 
