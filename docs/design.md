@@ -11,6 +11,13 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
 
+Issue #108 is implemented on `feature/model-escalation-108` (base `5c25840`):
+the default-off model escalation policy, provider-referenced delete/edit
+protection, durable repair-phase snapshots and failure-safe escalation audit
+passed the current review. Real target-repository acceptance is still pending;
+the branch is not merged and not deployed. See
+[Issue #108 review](tasks/0108/review.md).
+
 Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
 the correction-state INSERT explicitly binds six columns to six parameters;
 SQLite database failures have a fixed analysis error code and numeric-only

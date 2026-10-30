@@ -5,6 +5,14 @@ Status updated: 2026-10-30
 
 ## Current Delivery Status
 
+- Issue #108 is implemented on `feature/model-escalation-108` (base `5c25840`):
+  default-off flash-monitor / v4pro-repair routing, immutable repair-phase
+  snapshots, provider reference protection and escalation failure audit passed
+  the current review. The real target-repository acceptance is still pending;
+  the branch is not merged and not deployed. Remaining offline acceptance items
+  are not checked as passed. See
+  [review](tasks/0108/review.md).
+
 - Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
   fix correction-state INSERT arity and classify SQLite database failures with
   numeric-only diagnostics. See [delivery and review](correction-storage-105.md).

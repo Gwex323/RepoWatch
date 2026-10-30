@@ -286,6 +286,46 @@ def test_real_analysis_source_preserves_double_call_failure_without_duplicate_wr
     assert record["diagnostic"]["reason"] == "too_many_calls"
 
 
+def test_model_binding_exposes_escalation_route_and_version(ledger):
+    store, faults, (_, _, task) = ledger
+    attempt(store, task)
+    source_event(
+        store,
+        task,
+        "model_configuration",
+        {
+            "role": "repository_analyst",
+            "model": "bound-model",
+            "model_version": 9,
+            "configuration_version": 11,
+            "provider_id": "provider_1",
+            "provider_version": 4,
+            "request_timeout_seconds": 120,
+            "escalation_version": 7,
+            "escalation_route": "monitor",
+        },
+    )
+    source_event(
+        store,
+        task,
+        "required_read_validation",
+        {
+            "required": "scope",
+            "calls": 2,
+            "matching": 2,
+            "other": 0,
+            "allowed": 1,
+            "accepted": False,
+            "reason": "too_many_calls",
+        },
+    )
+    source_event(store, task, "failure", {"code": "analysis_scope_read_not_followed"})
+    faults.tick()
+    record = faults.detail(faults.list()["items"][0]["id"])["items"][0]
+    assert record["model_binding"]["escalation_version"] == 7
+    assert record["model_binding"]["escalation_route"] == "monitor"
+
+
 def test_timeout_records_request_and_attempt_timing_and_bound_model(ledger):
     store, faults, (_, _, task) = ledger
     attempt(store, task)
