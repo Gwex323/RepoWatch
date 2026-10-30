@@ -52,7 +52,8 @@ def save(db, analysis_id, checkpoint, value, now):
     if len(payload.encode()) > MAX_CORRECTION_BYTES:
         raise ValueError("analysis_correction_checkpoint_invalid")
     db.execute(
-        "INSERT INTO analysis_review_corrections VALUES(?,?,?,?,?,?,?) "
+        "INSERT INTO analysis_review_corrections(analysis_id,binding,checkpoint_digest,"
+        "payload,payload_digest,created) VALUES(?,?,?,?,?,?) "
         "ON CONFLICT(analysis_id) DO UPDATE SET binding=excluded.binding,"
         "checkpoint_digest=excluded.checkpoint_digest,payload=excluded.payload,"
         "payload_digest=excluded.payload_digest,created=excluded.created",

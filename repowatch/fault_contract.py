@@ -49,6 +49,7 @@ NUMBERS = frozenset(
         "wire_content_chars",
         "wire_content_parts",
         "http_status",
+        "sqlite_errorcode",
         "request_timeout_seconds",
         "request_elapsed_seconds",
         "attempt_elapsed_seconds",

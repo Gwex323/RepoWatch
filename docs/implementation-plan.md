@@ -5,12 +5,23 @@ Status updated: 2026-10-30
 
 ## Current Delivery Status
 
+- Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
+  fix correction-state INSERT arity and classify SQLite database failures with
+  numeric-only diagnostics. See [delivery and review](correction-storage-105.md).
+  PR #106 was open when feature commit `6db43a7` was deployed to the local
+  workbench on 2026-10-30. Database backup, startup, session API, served assets
+  and preserved record counts were checked. Historical failure state remains;
+  actual correction/recovery acceptance has not been performed.
+
 - Issue #103 is implemented on `feature/evidence-recovery-103`, based on
   `d22226a`: persist unaccepted evidence/scope correction candidates and resume
   the same correction with fresh validation and safe quote diagnostics.
-  Static checks and frontend build passed; test cases and runtime acceptance
-  were not run. PR #104 integrates main `fd42113` (PR #102); it is not merged
-  or deployed. See [delivery](evidence-recovery-103.md).
+  Static checks and frontend build passed before delivery. PR #104 was merged
+  as `96f5105` on 2026-10-30 and started at port 8765 with the original database
+  after backup. Startup, session API, served assets and record counts were checked;
+  no test cases or end-to-end recovery acceptance were run during restart.
+  A subsequent real analysis failed saving its correction candidate; #105 tracks
+  that implementation defect. See [delivery](evidence-recovery-103.md).
 
 - Issue #101 is implemented on `feature/unlimited-workflows-101` (base `d22226a`):
   remove cumulative workflow quotas and broaden patch permissions, with actual
@@ -18,7 +29,8 @@ Status updated: 2026-10-30
   review gates retained. Static checks and build are recorded in
   [review](tasks/0101/review.md); no test cases, paid model or Docker acceptance
   were run. Delivery PR #102 was merged as `fd42113` on 2026-10-30;
-  deployment is unverified. See
+  its code was included in the `96f5105` workbench startup, with full workflow
+  acceptance still outstanding. See
   [policy and limitations](unlimited-workflows-101.md), which supersedes earlier
   finite-quota and Python-only patch descriptions in this plan.
 

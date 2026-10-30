@@ -79,6 +79,7 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   finding_changed: '该问题已经提交过反馈，请刷新。',
   manual_confirmation_retired: '人工复现确认已停用，请刷新页面；历史问题请重新分析当前版本。',
   analysis_failed: '分析遇到未分类错误。请查看失败阶段和服务日志；旧记录可能没有详细原因。',
+  analysis_storage_failed: '分析数据读写失败，本次分析未完成。请先处理服务日志中的数据库错误，再重试分析。',
   analysis_timeout_or_stopped: '分析已超时或停止，可以重新尝试。',
   analysis_interrupted: '上次分析因服务中断而停止，可以重新尝试。',
   analysis_authentication_failed: '模型服务拒绝了密钥，请在「设置 → 模型与供应商」中更新。',
