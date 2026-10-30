@@ -1,6 +1,7 @@
 # 独立审查证据纠正的持久化与续办
 
 - 关联：Issue #103。
+- 交付：[PR #104](https://github.com/Gwex323/RepoWatch/pull/104)，已创建，尚未合并。
 - 基线：远程默认分支 `codex/initial-upload`，提交 `d22226a`。
 - 实现分支：`feature/evidence-recovery-103`。
 - 状态：2026-10-30 已实现，静态检查和构建通过；代码 review 记录见
