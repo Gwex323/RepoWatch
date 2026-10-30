@@ -2,6 +2,7 @@
 
 - 关联：Issue #105；前置交付：Issue #103 / PR #104。
 - 分支：`feature/correction-storage-105`，基线为最新远程主干 `96f5105`。
+- 交付：[PR #106](https://github.com/Gwex323/RepoWatch/pull/106)，已创建，尚未合并。
 - 状态：已实现，尚未合并或部署；静态验证及 review 记录见
   [审查记录](tasks/0105/review.md)。
 

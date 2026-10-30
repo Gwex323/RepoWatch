@@ -8,7 +8,8 @@ Status updated: 2026-10-30
 - Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
   fix correction-state INSERT arity and classify SQLite database failures with
   numeric-only diagnostics. See [delivery and review](correction-storage-105.md).
-  Not merged or deployed; runtime acceptance has not been performed.
+  Delivery PR #106 is open. Not merged or deployed; runtime acceptance has not
+  been performed.
 
 - Issue #103 is implemented on `feature/evidence-recovery-103`, based on
   `d22226a`: persist unaccepted evidence/scope correction candidates and resume
