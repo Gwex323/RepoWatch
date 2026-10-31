@@ -853,6 +853,29 @@ def test_failure_fingerprint_uses_only_safe_structural_material(monkeypatch):
     assert "private-" not in encoded and "candidate" not in encoded
 
 
+def test_failure_fingerprint_uses_only_report_type_for_non_dict_candidate(monkeypatch):
+    material = []
+
+    def capture(value):
+        material.append(value)
+        return "safe-fingerprint"
+
+    monkeypatch.setattr("repowatch.repository_analysis.digest", capture)
+    fingerprint = report_failure_fingerprint(
+        "scope_review_incomplete",
+        "same-checkpoint",
+        "private-candidate-text",
+        {},
+    )
+    assert fingerprint == "safe-fingerprint"
+    assert material == [{
+        "code": "scope_review_incomplete",
+        "report_type": "str",
+        "checkpoint": "same-checkpoint",
+    }]
+    assert "private-candidate-text" not in json.dumps(material)
+
+
 def test_report_progress_material_uses_a_fixed_label_for_invalid_scope_review():
     context = {"task_scope": {
         "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
@@ -1408,6 +1431,63 @@ def test_scope_contract_mismatch_emits_value_free_diagnostic():
         "exclusion_counts": {"registered": 0, "provided": 0},
     }
     assert "Private candidate" not in json.dumps(diagnostics)
+
+
+def test_scope_review_incomplete_without_scope_context_fails_closed():
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Coverage is incomplete.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [],
+        },
+    }
+
+    class NoScopeContextModel(Model):
+        async def get_response(self, system_instructions, input, **kwargs):
+            return ModelResponse(output=[ResponseOutputMessage(
+                id="no_scope_context",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(review),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    stage = StageModel(
+        NoScopeContextModel(),
+        ROLES[-1],
+        StageBudget(),
+        lambda *_: None,
+        review_contract=lambda _review: "scope_review_incomplete",
+        update_private_correction_checkpoint=lambda _value: None,
+    )
+    with pytest.raises(AnalysisFailure, match="analysis_scope_context_missing"):
+        asyncio.run(stage.get_response(
+            "Trusted final-review instructions",
+            json.dumps({"files": {"app.py": "print('ok')"}}),
+            tools=[],
+            handoffs=[],
+            output_schema=AgentOutputSchema(Review),
+            model_settings=ModelSettings(max_tokens=6000),
+        ))
 
 
 def test_generic_review_correction_clears_stale_private_mapping_checkpoint():

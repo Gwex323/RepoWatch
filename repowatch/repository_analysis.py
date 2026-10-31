@@ -796,10 +796,9 @@ class StageModel(Model):
                             }))
                             continue
                         if issue == "scope_review_incomplete":
-                            signature_context = (
-                                self.scope_context()
-                                if self.scope_context is not None else {}
-                            )
+                            if self.scope_context is None:
+                                raise AnalysisFailure("analysis_scope_context_missing")
+                            signature_context = self.scope_context()
                             signature = report_failure_fingerprint(
                                 issue,
                                 self.checkpoint_digest() if self.checkpoint_digest else None,
@@ -1352,7 +1351,7 @@ def report_failure_fingerprint(code, checkpoint, report, context):
     """Hash only safe structural labels, never report text or source quotes."""
     material = report_progress_material(code, report, context)
     if material is None:
-        return None
+        material = {"code": code, "report_type": type(report).__name__}
     material["checkpoint"] = checkpoint
     return digest(material)
 
