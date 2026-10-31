@@ -18,10 +18,11 @@ and scope-review retry signatures include the current checkpoint, and repeated
 unchanged failures stop with a text-free fingerprint. Public diagnostics remain
 bounded, expose only registered scope keys or hashes, and preserve the recovery
 identity fields. Targeted validation passed 74 backend cases; Ruff, Python
-compilation and diff checks also passed. The branch has not yet received final
-independent approval, so no PR has been created. It is not merged or deployed,
-the production workbench on port 8765 has not been restarted, and the original
-real analysis has not yet been rerun against this branch.
+compilation and diff checks also passed. Final independent review passed with
+no blocking findings, including a real save-conflict recovery regression; the
+branch is now in the PR publication stage. It is not merged or deployed, the
+production workbench on port 8765 has not been restarted, and the original real
+analysis has not yet been rerun against this branch.
 
 Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
 the correction-state INSERT explicitly binds six columns to six parameters;
