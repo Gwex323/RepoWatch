@@ -4,7 +4,7 @@
 - Issue：[Gwex323/RepoWatch#112](https://github.com/Gwex323/RepoWatch/issues/112)。
 - 分支：`feature/scope-review-recovery-112`。
 - 基线：`origin/codex/initial-upload` 的 `5c25840`。
-- 状态：三轮独立 flash 审查发现均已核验并补强，等待 flash 第四轮复审；PR 尚未创建。
+- 状态：四轮独立 flash 审查发现均已核验并补强，等待 flash 第五轮复审；PR 尚未创建。
 
 ## 根因
 
@@ -70,6 +70,15 @@
   `scope_report_issue()` 和 `save_scope_review()` 都返回 `scope_review_incomplete`，
   证明两个阶段复用同一 fail-closed 语义。
 
+第四轮 flash 审查后补强：
+
+- `bounded_scope_issues()` 输出前按当前 `task_scope` 白名单检查排除项键和目标项键；
+  已注册键保留可操作性，候选自行提交的未注册键改为固定 SHA-256 标识，不再把任意候选
+  文本回灌给模型或写入 `scope_review_validation`。
+- 提取 `report_progress_material()`，让进程内 `scope_review_attempts` 与跨重启
+  `report_failure_fingerprint()` 共享同一范围语义材料构造；两处仅在持久化侧追加
+  checkpoint 摘要，避免判定材料继续漂移。
+
 ## 模型路由记录
 
 真实 `deepseek-v4-pro` 仅用于方案分析，未让其直接提交未经审查的代码：
@@ -131,14 +140,31 @@ v4pro 判定 5 项发现均不成立，主要依据是检查点摘要覆盖真�
 变化、最坏长度和审查/保存交叉测试，并把排序键改为 JSON 规范化形式，以可执行回归覆盖
 审查所指风险，而不是仅以模型结论关闭发现。
 
+第四轮 flash 复审结果：仍为 `approved=false`，6 项发现，其中 P1 包括未注册范围键可能被
+反馈回显，以及进程内与持久化去重材料不一致。审查文件为
+`.codex-backups/flash-review-scope-112-r4.json`，用量 prompt 18211、completion 1503、
+total 19714。
+
+第四轮 v4pro 核验记录：
+
+- 脚本：`.codex-backups/v4pro_fix_scope_112.py`
+- 结果：`.codex-backups/v4pro-fix-scope-112-r4.json`
+- 原始响应：`.codex-backups/v4pro-fix-scope-112-r4-raw.json`
+- 用量：prompt 38503、completion 3391、total 41894
+
+v4pro 接受“候选键必须白名单脱敏”和“内存/持久化签名材料需统一”两项，拒绝其余四项：
+通用纠正分支已清理旧检查点；真实落库失败路径的候选先经过 Pydantic；畸形报告只形成确定性
+无效结构；budget 不参与恢复判定。主路径采用两项结构性修正，并将 v4pro 的哈希后键方案
+改为默认 fail-closed 白名单：没有 context 时也不原样输出候选键。
+
 ## 已通过验证
 
-- `tests/test_analysis_tool_arguments.py`：44 passed。
+- `tests/test_analysis_tool_arguments.py`：45 passed。
 - `tests/test_analysis_auto_recovery.py`：9 passed。
 - `tests/test_analysis_report_recovery.py`：29 passed、1 failed；失败项为
   `test_resume_still_rejects_fabricated_evidence_and_persists_no_findings`，实际 4 次请求、
   预期 3 次。该失败已在未修改的 `5c25840` 基线复核。
-- 三个定向测试文件分别运行，共 82 passed、1 failed；唯一失败即上述已在基线复现的
+- 三个定向测试文件分别运行，共 83 passed、1 failed；唯一失败即上述已在基线复现的
   既有断言。
 - 新增 GUI 排除项测试确认缺少 `client` 证据的映射在审查阶段被拒绝，具备 `client`
   证据的映射通过。
@@ -152,6 +178,8 @@ v4pro 判定 5 项发现均不成立，主要依据是检查点摘要覆盖真�
 - 新增测试确认检查点摘要变化会改变无进展指纹，真实读取进展不会被误判为无进展。
 - 新增测试确认所有失败事件文本字段极端超长时仍输出有界、可解析且保留指纹的 JSON。
 - 新增交叉测试确认审查阶段与保存阶段对同一 GUI/Windows 映射都失败关闭。
+- 新增测试确认已注册范围键原样保留，未注册候选键只输出固定 SHA-256 标识，反馈和事件
+  都不包含候选私有字符串。
 - 检查点清理测试确认新的通用纠正会清除旧私有映射检查点。
 - `ruff check repowatch tests`：通过。
 - 修改模块 `py_compile`：通过。
@@ -169,5 +197,5 @@ v4pro 判定 5 项发现均不成立，主要依据是检查点摘要覆盖真�
 
 ## 审查结论
 
-前三轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
+前四轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
 让 `deepseek-flash` 对修正后的提交重新执行独立审查；复审结果将在本节追加。

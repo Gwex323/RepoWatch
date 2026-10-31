@@ -691,6 +691,34 @@ def test_scope_feedback_is_bounded_and_explicitly_reports_truncation():
     assert '"total":12' in prompt and '"truncated":true' in prompt
 
 
+def test_scope_feedback_hashes_unregistered_candidate_keys():
+    context = {"task_scope": {
+        "items": [{"key": "registered_item", "required_evidence": ["client"]}],
+        "execution_limits": [{"key": "registered_exclusion", "reasons": ["gui"]}],
+    }}
+    issues = [{
+        "exclusion_key": "registered_exclusion",
+        "target_key": "registered_item",
+        "required_evidence": "client",
+        "available_evidence": [],
+        "reason": "missing_evidence_kind",
+    }, {
+        "exclusion_key": "candidate_private_exclusion",
+        "target_key": "candidate_private_target",
+        "required_evidence": "client",
+        "available_evidence": [],
+        "reason": "missing_evidence_kind",
+    }]
+    feedback = bounded_scope_issues(issues, context)
+    assert feedback["issues"][0]["exclusion_key"] == "registered_exclusion"
+    assert feedback["issues"][0]["target_key"] == "registered_item"
+    assert feedback["issues"][1]["exclusion_key"].startswith("sha256:")
+    assert feedback["issues"][1]["target_key"].startswith("sha256:")
+    encoded = json.dumps(feedback)
+    assert "candidate_private" not in encoded
+    assert "candidate_private" not in report_scope_feedback(issues, context)
+
+
 def test_failure_fingerprint_uses_only_safe_structural_material(monkeypatch):
     context = {"task_scope": {
         "version": 1,

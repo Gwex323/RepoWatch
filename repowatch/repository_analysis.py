@@ -782,20 +782,18 @@ class StageModel(Model):
                             }))
                             continue
                         if issue == "scope_review_incomplete":
-                            scope_review = (
-                                scope_review_progress(review.scope_review.model_dump())
-                                if review.scope_review is not None and not scope_issues else None
+                            signature_context = (
+                                self.scope_context()
+                                if self.scope_context is not None else {}
                             )
-                            signature = digest({
-                                "issue": issue,
-                                "scope_issues": scope_issues or None,
-                                "scope_review": scope_review,
-                            })
+                            signature = digest(report_progress_material(
+                                issue, review.model_dump(), signature_context,
+                            ))
                             if signature in scope_review_attempts:
                                 raise AnalysisFailure("analysis_report_no_progress")
                             scope_review_attempts.add(signature)
                             if scope_issues:
-                                feedback = bounded_scope_issues(scope_issues)
+                                feedback = bounded_scope_issues(scope_issues, context)
                                 self.event("scope_review_validation", json.dumps({
                                     "role": self.role, **feedback,
                                 }, ensure_ascii=False))
@@ -832,7 +830,7 @@ class StageModel(Model):
                             "key, and a classification for EVERY execution_limits key. Use "
                             "blocked/investigating or unknown for insufficient evidence; do not "
                             "omit items, invent evidence, or treat acceptance as a verified fix."
-                        ) + (report_scope_feedback(scope_issues) if scope_issues
+                        ) + (report_scope_feedback(scope_issues, context) if scope_issues
                              else report_feedback(diagnostics))
                         continue
                     parts = [part for item in response.output if item.type == "message"
@@ -1182,19 +1180,43 @@ def report_scope_issues(review, context):
 SCOPE_FEEDBACK_ISSUE_LIMIT = 6
 
 
-def bounded_scope_issues(issues):
+def _safe_scope_key(key, registered):
+    """Echo only trusted scope keys; replace candidate-controlled values."""
+    if not isinstance(key, str):
+        return f"type:{type(key).__name__}"
+    if key in registered:
+        return key
+    return "sha256:" + hashlib.sha256(key.encode()).hexdigest()
+
+
+def bounded_scope_issues(issues, context=None):
     limited = issues[:SCOPE_FEEDBACK_ISSUE_LIMIT]
+    scope = (context or {}).get("task_scope") or {}
+    registered_exclusions = {item["key"] for item in scope.get("execution_limits", [])}
+    registered_items = {item["key"] for item in scope.get("items", [])}
+    sanitized = []
+    for issue in limited:
+        detail = dict(issue)
+        if detail.get("exclusion_key") is not None:
+            detail["exclusion_key"] = _safe_scope_key(
+                detail["exclusion_key"], registered_exclusions,
+            )
+        if detail.get("target_key") is not None:
+            detail["target_key"] = _safe_scope_key(
+                detail["target_key"], registered_items,
+            )
+        sanitized.append(detail)
     return {
-        "issues": limited,
+        "issues": sanitized,
         "total": len(issues),
         "truncated": len(limited) < len(issues),
     }
 
 
-def report_scope_feedback(issues):
+def report_scope_feedback(issues, context=None):
     if not issues:
         return ""
-    feedback = bounded_scope_issues(issues)
+    feedback = bounded_scope_issues(issues, context)
     return (
         "\n范围排除项校验失败，必须修正以下固定标签描述的问题："
         + json.dumps(feedback, ensure_ascii=False, separators=(",", ":"))
@@ -1225,11 +1247,11 @@ def report_progress_shape(report):
     }
 
 
-def report_failure_fingerprint(code, checkpoint, report, context):
-    """Hash only safe structural labels, never report text or source quotes."""
+def report_progress_material(code, report, context):
+    """Build the shared text-free material used by in-memory and durable checks."""
     if not isinstance(report, dict):
         return None
-    material = {"code": code, "checkpoint": checkpoint}
+    material = {"code": code}
     scope = (context or {}).get("task_scope") or {}
     scope_review = report.get("scope_review")
     if isinstance(scope_review, dict):
@@ -1247,6 +1269,15 @@ def report_failure_fingerprint(code, checkpoint, report, context):
             material["scope_review"] = scope_review_progress(scope_review)
     else:
         material["report"] = report_progress_shape(report)
+    return material
+
+
+def report_failure_fingerprint(code, checkpoint, report, context):
+    """Hash only safe structural labels, never report text or source quotes."""
+    material = report_progress_material(code, report, context)
+    if material is None:
+        return None
+    material["checkpoint"] = checkpoint
     return digest(material)
 
 
