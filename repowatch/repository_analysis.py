@@ -1305,13 +1305,13 @@ def report_progress_material(code, report, context):
                 scope.get("items", []),
                 scope.get("execution_limits", []),
             )
-        except (KeyError, TypeError, ValueError):
+        except (KeyError, TypeError, ValueError) as exc:
             issues = [{
                 "exclusion_key": None,
                 "target_key": None,
                 "required_evidence": None,
                 "available_evidence": [],
-                "reason": "invalid_scope_review_structure",
+                "reason": f"invalid_scope_review_structure:{type(exc).__name__}",
             }]
         if issues:
             material["scope_issues"] = issues
@@ -1351,7 +1351,9 @@ def failure_event_payload(details):
     ):
         value = details.get(key)
         if isinstance(value, str):
-            value = value[:128]
+            value = value[:64 if key in (
+                "checkpoint_digest", "progress_fingerprint",
+            ) else 128]
         elif not isinstance(value, (int, float, bool)):
             continue
         fallback[key] = value
@@ -1361,8 +1363,8 @@ def failure_event_payload(details):
     minimal = {
         "code": str(details.get("code", ""))[:64],
         "stage": str(details.get("stage", ""))[:64],
-        "checkpoint_digest": str(details.get("checkpoint_digest", ""))[:128],
-        "progress_fingerprint": str(details.get("progress_fingerprint", ""))[:128],
+        "checkpoint_digest": str(details.get("checkpoint_digest", ""))[:64],
+        "progress_fingerprint": str(details.get("progress_fingerprint", ""))[:64],
     }
     encoded = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
     if len(encoded) <= FAILURE_EVENT_DETAIL_LIMIT:

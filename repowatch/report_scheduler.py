@@ -103,11 +103,17 @@ def repeated_no_progress(db, analysis_id, code, checkpoint_digest):
         "SELECT id, json_extract(document, '$.code') AS code, "
         "json_extract(document, '$.checkpoint_digest') AS checkpoint_digest, "
         "json_extract(document, '$.progress_fingerprint') AS fingerprint "
-        "FROM documents WHERE json_type(document)='object') "
-        "SELECT fingerprint, COUNT(*) AS occurrences FROM fingerprints "
+        "FROM documents WHERE json_type(document)='object'), "
+        "relevant AS ("
+        "SELECT id, fingerprint FROM fingerprints "
         "WHERE code=? AND checkpoint_digest=? "
-        "AND fingerprint IS NOT NULL AND fingerprint <> '' "
-        "GROUP BY fingerprint ORDER BY MAX(id) DESC LIMIT 1",
+        "AND fingerprint IS NOT NULL AND fingerprint <> '') "
+        "SELECT COUNT(*) AS occurrences FROM relevant "
+        "WHERE fingerprint=(SELECT fingerprint FROM relevant ORDER BY id DESC LIMIT 1) "
+        "AND id > COALESCE(("
+        "SELECT MAX(id) FROM relevant WHERE fingerprint<>("
+        "SELECT fingerprint FROM relevant ORDER BY id DESC LIMIT 1"
+        ")), -1)",
         (analysis_id, code, checkpoint_digest),
     ).fetchone()
     return row is not None and row["occurrences"] >= NO_PROGRESS_LIMIT

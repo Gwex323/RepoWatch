@@ -460,7 +460,8 @@ def test_failure_payload_has_a_hard_bound_for_every_optional_text_field():
     details = {
         key: "界" * 4000
         for key in (
-            "code", "stage", "exception_type", "progress_fingerprint",
+            "code", "stage", "exception_type", "checkpoint_digest",
+            "progress_fingerprint",
             "sqlite_errorcode", "http_status",
         )
     }
@@ -470,7 +471,8 @@ def test_failure_payload_has_a_hard_bound_for_every_optional_text_field():
     assert len(encoded) <= 1000
     assert len(saved["code"]) <= 128
     assert len(saved["stage"]) <= 128
-    assert len(saved["progress_fingerprint"]) <= 128
+    assert len(saved["checkpoint_digest"]) <= 64
+    assert len(saved["progress_fingerprint"]) <= 64
     assert "elapsed_seconds" not in saved
 
 
@@ -842,7 +844,7 @@ def test_report_progress_material_uses_a_fixed_label_for_invalid_scope_review():
             "target_key": None,
             "required_evidence": None,
             "available_evidence": [],
-            "reason": "invalid_scope_review_structure",
+            "reason": "invalid_scope_review_structure:TypeError",
         }],
     }
 
