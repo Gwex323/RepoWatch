@@ -72,7 +72,13 @@ from .report_recovery import (
 )
 from .report_scope_correction import MAPPING_CORRECTION_ERRORS, ReportScopeCorrection
 from .roles import FLOW_ROLES, model_for_role, reasoning_for_role
-from .scope_models import ScopeRequirement, ScopeReview, scope_mapping_issues
+from .scope_models import (
+    ScopeRequirement,
+    ScopeReview,
+    scope_mapping_issues,
+    scope_review_issues,
+    scope_review_progress,
+)
 from .store import Conflict, Missing, uid
 from .task_scopes import (
     current_scope_findings,
@@ -266,7 +272,8 @@ class StageModel(Model):
                  prepare_review=None, finalization_reserve=FINALIZATION_RESERVE_SECONDS,
                  tool_parameter_models=None, review_contract=None, evidence_sources=None,
                  scope_context=None, scope_batch=None, resume_correction=None,
-                 save_correction=None, redact_candidate=redact_values):
+                 checkpoint_digest=None, update_private_correction_checkpoint=None,
+                 redact_candidate=redact_values):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
@@ -284,12 +291,15 @@ class StageModel(Model):
         self.scope_context = scope_context
         self.scope_batch = scope_batch
         self.resume_correction = resume_correction
-        self.save_correction = save_correction
+        self.checkpoint_digest = checkpoint_digest
+        self.update_private_correction_checkpoint = (
+            update_private_correction_checkpoint
+        )
         self.redact_candidate = redact_candidate
 
     def checkpoint_correction(self, correction, settings):
-        if self.save_correction is not None:
-            self.save_correction({
+        if self.update_private_correction_checkpoint is not None:
+            self.update_private_correction_checkpoint({
                 "protocol": report_correction_recovery.PROTOCOL, "accepted": False,
                 "kind": correction.kind, "candidate": correction.original.model_dump(),
                 "feedback": correction.feedback, "max_tokens": settings.max_tokens,
@@ -477,6 +487,10 @@ class StageModel(Model):
         budget.turns += 1
         self.event("model_call", self.role)
         handoff_retried = required_retried = False
+        scope_mapping_attempts = set()
+        # Scope-review signatures include the saved checkpoint digest, so any
+        # repeat here is under unchanged evidence rather than real progress.
+        scope_review_attempts = set()
         correction = ""
         tool_correction = ""
         tool_repair = None
@@ -750,9 +764,28 @@ class StageModel(Model):
                             review = redact_review(review, self.redact_candidate)
                             issue = self.review_contract(review)
                     if issue:
-                        if issue == "scope_mapping_invalid" and self.scope_context is not None:
+                        scope_correction = ""
+                        scope_issues = []
+                        if (issue in {"scope_mapping_invalid", "scope_review_incomplete"}
+                                and self.scope_context is not None):
                             context = self.scope_context()
+                            scope_issues = report_scope_issues(review, context)
+                        if scope_issues:
+                            issue = "scope_review_incomplete"
+                        if (issue == "scope_mapping_invalid"
+                                and self.scope_context is not None):
                             mapping = report_mapping_issues(review, context)
+                            signature = digest({
+                                "issue": issue,
+                                "mapping": mapping,
+                                "checkpoint": (
+                                    self.checkpoint_digest()
+                                    if self.checkpoint_digest else None
+                                ),
+                            })
+                            if signature in scope_mapping_attempts:
+                                raise AnalysisFailure("analysis_report_no_progress")
+                            scope_mapping_attempts.add(signature)
                             for detail in mapping:
                                 self.event("scope_mapping_validation", json.dumps(detail))
                             report_correction = ReportScopeCorrection(review, context, mapping)
@@ -762,6 +795,40 @@ class StageModel(Model):
                                 "role": self.role, "items": len(mapping),
                             }))
                             continue
+                        if issue == "scope_review_incomplete":
+                            if self.scope_context is None:
+                                raise AnalysisFailure("analysis_scope_context_missing")
+                            signature_context = self.scope_context()
+                            signature = report_failure_fingerprint(
+                                issue,
+                                self.checkpoint_digest() if self.checkpoint_digest else None,
+                                review.model_dump(),
+                                signature_context,
+                            )
+                            if signature in scope_review_attempts:
+                                raise AnalysisFailure("analysis_report_no_progress")
+                            scope_review_attempts.add(signature)
+                            if scope_issues:
+                                feedback = bounded_scope_issues(scope_issues, context)
+                                scope_correction = report_scope_feedback(scope_issues, context)
+                            else:
+                                feedback = {
+                                    "issues": [scope_contract_diagnostic(
+                                        review, signature_context,
+                                    )],
+                                    "total": 1,
+                                    "truncated": False,
+                                }
+                                scope_correction = (
+                                    "\n范围审查契约不匹配，固定诊断："
+                                    + json.dumps(feedback, ensure_ascii=False,
+                                                 separators=(",", ":"))
+                                    + "。按当前版本补齐每个已注册范围项和每个执行限制的固定分类；"
+                                    "不要删除已注册项、伪造证据或复用旧版本。"
+                                )
+                            self.event("scope_review_validation", json.dumps({
+                                "role": self.role, **feedback,
+                            }, ensure_ascii=False))
                         self.event("report_validation", issue)
                         diagnostics = report_diagnostics(response)
                         self.event("report_diagnostics", diagnostics)
@@ -780,6 +847,11 @@ class StageModel(Model):
                                 else final_report_input(input)
                             )
                             self.event("report_finalization", self.role)
+                        if self.update_private_correction_checkpoint is not None:
+                            # Persist the clear before discarding in-memory correction.
+                            # Any storage failure aborts this retry without continuing.
+                            self.update_private_correction_checkpoint(None)
+                        report_correction = None
                         correction = (
                             "\nThe previous final response failed local validation "
                             f"({issue}). Correct the final report now using only the evidence "
@@ -792,7 +864,7 @@ class StageModel(Model):
                             "key, and a classification for EVERY execution_limits key. Use "
                             "blocked/investigating or unknown for insufficient evidence; do not "
                             "omit items, invent evidence, or treat acceptance as a verified fix."
-                        ) + report_feedback(diagnostics)
+                        ) + (scope_correction or report_feedback(diagnostics))
                         continue
                     parts = [part for item in response.output if item.type == "message"
                              for part in item.content]
@@ -1126,6 +1198,227 @@ def report_mapping_issues(review, context):
     )
 
 
+def report_scope_issues(review, context):
+    """Apply the same exclusion semantics before review and before persistence."""
+    scope = context.get("task_scope") or {}
+    if review.scope_review is None or not scope.get("items"):
+        return []
+    return scope_review_issues(
+        review.scope_review.model_dump(),
+        scope.get("items", []),
+        scope.get("execution_limits", []),
+    )
+
+
+SCOPE_FEEDBACK_ISSUE_LIMIT = 6
+SCOPE_EVIDENCE_KINDS = frozenset(("client", "integration", "regression"))
+
+
+def _safe_scope_key(key, registered):
+    """Echo only trusted scope keys; replace candidate-controlled values."""
+    if not isinstance(key, str):
+        return f"type:{type(key).__name__}"
+    if key in registered:
+        return key
+    return "sha256:" + hashlib.sha256(key.encode()).hexdigest()
+
+
+def _safe_evidence_kind(value):
+    return value if isinstance(value, str) and value in SCOPE_EVIDENCE_KINDS else "type:invalid"
+
+
+def _safe_available_evidence(value):
+    if not isinstance(value, (list, tuple)):
+        return ["type:invalid"]
+    return [_safe_evidence_kind(item) for item in value[:3]]
+
+
+def bounded_scope_issues(issues, context=None):
+    limited = issues[:SCOPE_FEEDBACK_ISSUE_LIMIT]
+    scope = (context or {}).get("task_scope") or {}
+    registered_exclusions = {item["key"] for item in scope.get("execution_limits", [])}
+    registered_items = {item["key"] for item in scope.get("items", [])}
+    sanitized = []
+    for issue in limited:
+        detail = dict(issue)
+        if detail.get("exclusion_key") is not None:
+            detail["exclusion_key"] = _safe_scope_key(
+                detail["exclusion_key"], registered_exclusions,
+            )
+        if detail.get("target_key") is not None:
+            detail["target_key"] = _safe_scope_key(
+                detail["target_key"], registered_items,
+            )
+        if detail.get("required_evidence") is not None:
+            detail["required_evidence"] = _safe_evidence_kind(detail["required_evidence"])
+        if "available_evidence" in detail:
+            detail["available_evidence"] = _safe_available_evidence(
+                detail["available_evidence"],
+            )
+        sanitized.append(detail)
+    return {
+        "issues": sanitized,
+        "total": len(issues),
+        "truncated": len(limited) < len(issues),
+    }
+
+
+def report_scope_feedback(issues, context=None):
+    if not issues:
+        return ""
+    feedback = bounded_scope_issues(issues, context)
+    return (
+        "\n范围排除项校验失败，必须修正以下固定标签描述的问题："
+        + json.dumps(feedback, ensure_ascii=False, separators=(",", ":"))
+        + "。每个 required 排除项只能关联 required_evidence 包含 required_evidence "
+        "字段所示证据类型的已注册范围项；没有合适目标时改为 unknown，不得伪造 client、"
+        "integration 或 regression 证据。truncated=true 时先修正列出的项目，再重新提交，"
+        "不得跳过其余未显示的问题或虚构成功。保留已注册范围和所有有效来源证据。"
+    )
+
+
+def scope_contract_diagnostic(review, context):
+    """Describe a scope-contract mismatch using only versions and counts."""
+    scope = (context or {}).get("task_scope") or {}
+    scope_review = review.scope_review
+    return {
+        "reason": "scope_review_contract_mismatch",
+        "registered_version": scope.get("version"),
+        "provided_version": scope_review.version if scope_review is not None else None,
+        "item_counts": {
+            "registered": len(scope.get("items", [])),
+            "provided": len(scope_review.items) if scope_review is not None else 0,
+        },
+        "exclusion_counts": {
+            "registered": len(scope.get("execution_limits", [])),
+            "provided": len(scope_review.exclusions) if scope_review is not None else 0,
+        },
+    }
+
+
+def report_progress_shape(report):
+    """Describe report structure without retaining any candidate-written text."""
+    fields = {
+        "summary": report.get("summary"),
+        "limitations": report.get("limitations"),
+        "findings": report.get("findings"),
+        "scope_review": report.get("scope_review"),
+        "historical_rechecks": report.get("historical_rechecks"),
+        "handoffs": report.get("handoffs"),
+        "files_read": report.get("files_read"),
+        "execution_read": report.get("execution_read"),
+    }
+    return {
+        key: {
+            "type": type(value).__name__,
+            "count": len(value) if isinstance(value, (list, dict)) else None,
+        } for key, value in fields.items()
+    }
+
+
+def report_progress_material(code, report, context):
+    """Build the shared text-free material used by in-memory and durable checks."""
+    if not isinstance(report, dict):
+        return None
+    material = {"code": code}
+    scope = (context or {}).get("task_scope") or {}
+    scope_review = report.get("scope_review")
+    if isinstance(scope_review, dict):
+        try:
+            issues = scope_review_issues(
+                scope_review,
+                scope.get("items", []),
+                scope.get("execution_limits", []),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            issues = [{
+                "exclusion_key": None,
+                "target_key": None,
+                "required_evidence": None,
+                "available_evidence": [],
+                "reason": f"invalid_scope_review_structure:{type(exc).__name__}",
+            }]
+        if issues:
+            material["scope_issues"] = issues
+        else:
+            material["scope_review"] = scope_review_progress(scope_review)
+    else:
+        material["report"] = report_progress_shape(report)
+    return material
+
+
+def report_failure_fingerprint(code, checkpoint, report, context):
+    """Hash only safe structural labels, never report text or source quotes."""
+    material = report_progress_material(code, report, context)
+    if material is None:
+        material = {"code": code, "report_type": type(report).__name__}
+    material["checkpoint"] = checkpoint
+    return digest(material)
+
+
+FAILURE_EVENT_DETAIL_LIMIT = 1000
+
+
+def _truncate_utf8(value, max_bytes):
+    """Return valid text whose UTF-8 representation does not exceed max_bytes."""
+    encoded = str(value).encode("utf-8", errors="replace")[:max_bytes]
+    return encoded.decode("utf-8", errors="ignore")
+
+
+def _bounded_json(details):
+    encoded = json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+    return encoded if len(encoded.encode("utf-8")) <= FAILURE_EVENT_DETAIL_LIMIT else None
+
+
+def _safe_failure_atom(value, max_bytes=64):
+    """Preserve ordinary labels or replace unsafe text with a fixed hex digest."""
+    text = str(value)
+    encoded = text.encode("utf-8", errors="replace")
+    if (
+        len(encoded) <= max_bytes
+        and text.isascii()
+        and all(character.isalnum() or character in "._:-" for character in text)
+    ):
+        return text
+    return hashlib.sha256(encoded).hexdigest()[:64]
+
+
+def failure_event_payload(details):
+    """Serialize bounded diagnostics without ever relying on JSON truncation."""
+    candidates = [details]
+    if "budget" in details:
+        candidates.append({key: value for key, value in details.items() if key != "budget"})
+    for candidate in candidates:
+        encoded = _bounded_json(candidate)
+        if encoded is not None:
+            return encoded
+
+    fallback = {}
+    for key in (
+        "code", "stage", "exception_type", "checkpoint_digest", "progress_fingerprint",
+        "sqlite_errorcode", "http_status", "elapsed_seconds",
+    ):
+        value = details.get(key)
+        if isinstance(value, str):
+            value = _truncate_utf8(
+                value,
+                64 if key in ("checkpoint_digest", "progress_fingerprint") else 128,
+            )
+        elif not isinstance(value, (int, float, bool)):
+            continue
+        fallback[key] = value
+    encoded = _bounded_json(fallback)
+    if encoded is not None:
+        return encoded
+    minimal = {
+        "code": _safe_failure_atom(details.get("code", "")),
+        "stage": _safe_failure_atom(details.get("stage", "")),
+        "checkpoint_digest": _safe_failure_atom(details.get("checkpoint_digest", "")),
+        "progress_fingerprint": _safe_failure_atom(details.get("progress_fingerprint", "")),
+    }
+    return _bounded_json(minimal)
+
+
 def scope_report_issue(review, context):
     scope = context.get("task_scope") or {}
     if not scope.get("items"):
@@ -1133,13 +1426,18 @@ def scope_report_issue(review, context):
                 and report_mapping_issues(review, context) else None)
     if review.scope_review is None:
         return "scope_review_required"
-    result = review.scope_review
+    try:
+        result = ScopeReview.model_validate(review.scope_review.model_dump())
+    except ValidationError:
+        return "scope_review_incomplete"
     keys = [item.key for item in result.items]
     exclusions = [item.key for item in result.exclusions]
     if (result.version != scope["version"] or len(keys) != len(set(keys))
             or set(keys) != {item["key"] for item in scope["items"]}
             or len(exclusions) != len(set(exclusions))
             or set(exclusions) != {item["key"] for item in scope.get("execution_limits", [])}):
+        return "scope_review_incomplete"
+    if report_scope_issues(review, context):
         return "scope_review_incomplete"
     return "scope_mapping_invalid" if report_mapping_issues(review, context) else None
 
@@ -1438,9 +1736,9 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
                 correction.feedback = saved["feedback"]
             return correction, saved["max_tokens"]
         except (KeyError, TypeError, ValueError):
-            save = context.get("_save_review_correction")
-            if save is not None:
-                save(None)
+            update_checkpoint = context.get("_update_private_correction_checkpoint")
+            if update_checkpoint is not None:
+                update_checkpoint(None)
             event("report_correction_invalidated", "candidate_changed")
             return None
 
@@ -1473,7 +1771,13 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             scope_context=(lambda: context) if role == ROLES[-1] else None,
             scope_batch=prepare_scope_batch if scope_required else None,
             resume_correction=restore_review_correction if resume and role == ROLES[-1] else None,
-            save_correction=context.get("_save_review_correction") if role == ROLES[-1] else None,
+            checkpoint_digest=(
+                context.get("_review_checkpoint_digest") if role == ROLES[-1] else None
+            ),
+            update_private_correction_checkpoint=(
+                context.get("_update_private_correction_checkpoint")
+                if role == ROLES[-1] else None
+            ),
             redact_candidate=context.get("_redact_review_candidate", redact_values),
         )
         for role in ROLES
@@ -1579,6 +1883,7 @@ class Analyses:
         with self.store.connection() as db:
             limit = (4096 if kind in {"tool_arguments_invalid", "tool_arguments_preserved",
                                      "output_limit", "scope_mapping_validation",
+                                     "scope_review_validation",
                                      "required_read_validation", "provider_structure",
                                      "handoff_validation", "report_diagnostics",
                                      "model_configuration", "model_request_failed",
@@ -1663,6 +1968,8 @@ class Analyses:
             reason = "basis_changed"
         if not reason and code == "analysis_cancelled":
             reason = "pipeline_stopped"
+        if not reason and code == "analysis_report_no_progress":
+            reason = "no_progress"
         context = json.loads(row["context"] or "{}")
         if not reason and code not in report_scheduler.RECOVERABLE:
             reason = "non_recoverable"
@@ -1672,6 +1979,15 @@ class Analyses:
             reason = "basis_changed"
         if not reason and not self.review_checkpoint(db, row, context, self.model_identity()):
             reason = "checkpoint_invalid"
+        if not reason and code == "scope_review_incomplete":
+            checkpoint = db.execute(
+                "SELECT payload_digest FROM analysis_review_checkpoints "
+                "WHERE analysis_id=?", (row["id"],),
+            ).fetchone()
+            if checkpoint and report_scheduler.repeated_no_progress(
+                db, row["id"], code, checkpoint["payload_digest"],
+            ):
+                reason = "no_progress"
         pipeline_id = context.get("pipeline_id")
         if not reason and pipeline_id and not db.execute(
             "SELECT 1 FROM execution_pipelines p JOIN github_configuration c "
@@ -2113,6 +2429,7 @@ class Analyses:
         model_identity = self.model_identity()
         saved_binding = None
         original_issue = None
+        review_candidate = None
 
         def active():
             with self.store.connection() as db:
@@ -2136,7 +2453,7 @@ class Analyses:
             return (latest and latest["status"] == "running"
                     and latest["version"] == run_version)
 
-        def save_review_correction(value):
+        def update_private_correction_checkpoint(value):
             # A private callback, not an event: candidate prose/quotes must never
             # pass through public event ingestion or the telemetry wrapper.
             if not active():
@@ -2167,6 +2484,14 @@ class Analyses:
                     )
             self.event(row["id"], "report_correction_saved" if value is not None
                        else "report_correction_cleared", value["kind"] if value else "invalidated")
+
+        def review_checkpoint_digest():
+            with self.store.connection() as db:
+                saved = db.execute(
+                    "SELECT payload_digest FROM analysis_review_checkpoints "
+                    "WHERE analysis_id=?", (row["id"],),
+                ).fetchone()
+            return saved["payload_digest"] if saved else None
 
         def record(kind, agent):
             nonlocal stage, saved_binding
@@ -2375,7 +2700,10 @@ class Analyses:
                 "last_failure": recovery["last_error"], "last_report_validation": diagnostics,
             } if recovery["last_error"] else diagnostics)
             context["_review_model_identity"] = model_identity
-            context["_save_review_correction"] = save_review_correction
+            context["_review_checkpoint_digest"] = review_checkpoint_digest
+            context["_update_private_correction_checkpoint"] = (
+                update_private_correction_checkpoint
+            )
             with task_binding(task_id=row["id"], repo_id=row["repo_id"], env_id=row["env_id"],
                               revision=row["revision"], attempt=run_version):
                 task = asyncio.create_task(self.engine.analyze(context, record))
@@ -2389,6 +2717,7 @@ class Analyses:
                         raise AnalysisFailure("analysis_model_disabled")
                     await asyncio.wait({task}, timeout=0.5)
                 report = redact_values(await task)
+                review_candidate = report
                 review = validate_report(report, context)
                 scope = (context.get("test_result") or {}).get("desktop_scope")
                 if scope:
@@ -2480,9 +2809,23 @@ class Analyses:
                 saved_budget = report_scheduler.public_state(
                     report_scheduler.row(db, row["id"]), time.time(),
                 )
+                checkpoint = db.execute(
+                    "SELECT payload_digest FROM analysis_review_checkpoints "
+                    "WHERE analysis_id=?", (row["id"],),
+                ).fetchone()
+            progress_fingerprint = report_failure_fingerprint(
+                code,
+                checkpoint["payload_digest"] if checkpoint else None,
+                review_candidate,
+                context,
+            )
+            if checkpoint and checkpoint["payload_digest"]:
+                details["checkpoint_digest"] = checkpoint["payload_digest"]
+            if progress_fingerprint:
+                details["progress_fingerprint"] = progress_fingerprint
             if saved_budget:
                 details["budget"] = saved_budget
-            record("failure", json.dumps(details))
+            record("failure", failure_event_payload(details))
             logging.getLogger(__name__).warning(
                 "Repository analysis %s failed: %s "
                 "(stage=%s, exception_type=%s, sqlite_errorcode=%s)",

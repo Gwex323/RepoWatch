@@ -4,6 +4,7 @@ import json
 
 MAX_REQUESTS = None
 MAX_SECONDS = None
+NO_PROGRESS_LIMIT = 2
 RECOVERY_DELAYS = (10, 30, 60)
 RETRY_FIELDS = ("used", "output_used", "format_used", "evidence_used",
                 "required_read_used", "tool_arguments_used")
@@ -88,3 +89,31 @@ def public_state(saved, now):
         "last_error": saved["last_error"], "stop_reason": saved["stop_reason"],
         "retry_budget": json.loads(saved["retry_budget"]),
     }
+
+
+def repeated_no_progress(db, analysis_id, code, checkpoint_digest):
+    """Return True when this code/checkpoint fingerprint has already occurred."""
+    if not isinstance(checkpoint_digest, str) or not checkpoint_digest:
+        return False
+    row = db.execute(
+        "WITH documents AS ("
+        "SELECT id, CASE WHEN json_valid(agent) THEN agent ELSE '{}' END AS document "
+        "FROM analysis_events WHERE analysis_id=? AND kind='failure'), "
+        "fingerprints AS ("
+        "SELECT id, json_extract(document, '$.code') AS code, "
+        "json_extract(document, '$.checkpoint_digest') AS checkpoint_digest, "
+        "json_extract(document, '$.progress_fingerprint') AS fingerprint "
+        "FROM documents WHERE json_type(document)='object'), "
+        "relevant AS ("
+        "SELECT id, fingerprint FROM fingerprints "
+        "WHERE code=? AND checkpoint_digest=? "
+        "AND fingerprint IS NOT NULL AND fingerprint <> '') "
+        "SELECT COUNT(*) AS occurrences FROM relevant "
+        "WHERE fingerprint=(SELECT fingerprint FROM relevant ORDER BY id DESC LIMIT 1) "
+        "AND id > COALESCE(("
+        "SELECT MAX(id) FROM relevant WHERE fingerprint<>("
+        "SELECT fingerprint FROM relevant ORDER BY id DESC LIMIT 1"
+        ")), -1)",
+        (analysis_id, code, checkpoint_digest),
+    ).fetchone()
+    return row is not None and row["occurrences"] >= NO_PROGRESS_LIMIT
