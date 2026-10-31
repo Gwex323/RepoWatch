@@ -87,7 +87,7 @@ def source_problem(text, name):
     """Return only a line/rule; never include source, matched values or hashes."""
     if "\0" in text:
         return {"line": 1, "rule": "binary_content"}
-    known = redact_known(text)
+    known = redact_known(text, source_screening=True)
     if known != text:
         return {"line": _first_change(text, known), "rule": "credential_pattern"}
     matches = list(CREDENTIAL_ASSIGNMENT.finditer(text))
