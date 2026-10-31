@@ -17,11 +17,27 @@ provider-referenced delete/edit protection, durable repair-phase snapshots and
 failure-safe escalation audit. Real target-repository acceptance is still
 pending. See [Issue #108 review](tasks/0108/review.md).
 
-Issue #114 is implemented on `feature/source-safety-sk-prefix-114` (base
-`caa53fa`): source screening distinguishes short `sk-` labels and placeholders
-from long key-shaped values while preserving log redaction and credential
-assignment gates. Focused validation and independent review passed; merge,
+Issue #114 was merged into the default branch via PR #115 as merge commit
+`0c4affe` on 2026-10-31. Source screening distinguishes short `sk-` labels and
+placeholders from long key-shaped values while preserving log redaction and
+credential assignment gates. Focused validation and independent review passed;
 deployment and real target-repository acceptance remain outstanding.
+
+Issue #116 is implemented on `feature/analysis-runaway-retry-116` (base
+`0c4affe`): model-request timeouts now have a persistent four-retry budget,
+tool/handoff/required-read corrections share a persistent two-correction
+budget, manual analysis creates a new record after any terminal record instead
+of reusing it, and environment stop/delete cancels orphan analyses together
+with their leases and report recovery. Cancellation and exhausted-budget
+diagnostics are visible in the UI and cannot be restarted indefinitely by
+automatic recovery. Final split regression passed 456 cases, including 43
+system-fault cases. One execution-pipeline timing case initially exceeded its
+three-second wait under parallel load; the complete execution-pipeline file was
+rerun serially and passed 23/23. Ruff, Python compilation, frontend build and
+diff checks passed. Code review found and fixed the timeout auto-recovery loop,
+the tool-detail message override and the missing cancellation audit event. No
+blocking review findings remain. The change is not merged, deployed or loaded
+into the running workbench, and real target-repository acceptance is pending.
 
 Issue #112 was merged into the default branch via PR #113 as merge commit
 `0c771ae` on 2026-10-31. Final-review validation now applies the same

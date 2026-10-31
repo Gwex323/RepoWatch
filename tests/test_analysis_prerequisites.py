@@ -222,7 +222,7 @@ def test_required_source_accepts_bounded_pure_read_batches(count):
                          "other": 0, "allowed": count, "messages": 0, "refusals": 0,
                          "text_chars": 0, "accepted": True, "reason": "accepted",
                          "recoverable": False, "recovery": "not_needed",
-                         "corrections_remaining": 0}
+                         "corrections_remaining": 2}
     assert model.calls == 6
 
 
@@ -249,6 +249,7 @@ def test_required_batch_rejection_is_pre_execution_and_diagnostics_do_not_leak(c
 
     model, events = BadBatch(), []
     code = ("analysis_execution_read_not_followed" if case == "duplicate_execution"
+            else "analysis_tool_arguments_exhausted" if case == "empty"
             else "analysis_source_read_not_followed")
     if case == "too_many":
         report = asyncio.run(run_analysis(model, context(), lambda *args: events.append(args)))
@@ -257,8 +258,6 @@ def test_required_batch_rejection_is_pre_execution_and_diagnostics_do_not_leak(c
         return
     def record(kind, value):
         events.append((kind, value))
-        if case == "empty" and kind == "required_read_retry" and model.calls >= 5:
-            raise AnalysisFailure(code)  # Caller stops the fixture.
     with pytest.raises(AnalysisFailure, match=code):
         asyncio.run(run_analysis(model, context(), record))
     assert not any(kind in ("source", "handoff") for kind, _ in events)
@@ -268,7 +267,7 @@ def test_required_batch_rejection_is_pre_execution_and_diagnostics_do_not_leak(c
         assert checks[-1]["other"] == 1 and checks[-1]["matching"] == 1
     assert "credential-sentinel" not in str(events)
     assert "unknown_sensitive_tool_name" not in str(events)
-    assert model.calls == (1 if case == "duplicate_execution" else 5 if case == "empty" else 2)
+    assert model.calls == (1 if case == "duplicate_execution" else 4 if case == "empty" else 2)
 
 
 def test_scope_wrong_tool_gets_one_sanitized_correction_then_succeeds():

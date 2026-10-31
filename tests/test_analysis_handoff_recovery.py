@@ -46,7 +46,7 @@ class EarlyAnswerModel(ReviewModel):
                 (self.ignore_forced or choice != next_tool)):
             self.emitted.add(next_tool)
             if self.ignore_forced and len(self.recoveries) > 2:
-                raise AnalysisFailure("analysis_handoff_not_followed")
+                raise AnalysisFailure("analysis_tool_arguments_exhausted")
             self.calls += 1
             content = (ResponseOutputRefusal(type="refusal", refusal="Fixture provider refusal.")
                        if self.refuse else ResponseOutputText(
@@ -95,7 +95,7 @@ def test_each_nonfinal_role_can_finish_early_then_perform_one_real_handoff(roles
 
 def test_ignored_recovery_fails_once_without_faking_missing_handoffs():
     model, events = EarlyAnswerModel([ROLES[1]], ignore_forced=True), []
-    with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
+    with pytest.raises(AnalysisFailure, match="analysis_tool_arguments_exhausted"):
         asyncio.run(run_analysis(model, context(), lambda *args: events.append(args)))
     assert [name for kind, name in events if kind == "handoff"] == [f"{ROLES[0]} -> {ROLES[1]}"]
     assert events.count(("handoff_recovery", ROLES[1])) == 1

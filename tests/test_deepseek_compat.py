@@ -104,7 +104,7 @@ def test_saved_deepseek_config_runs_forced_reads_handoffs_and_validated_report(
         if kind == "handoff_validation" and not json.loads(value).get("accepted"):
             rejected = [v for k, v in events if k == kind and not json.loads(v).get("accepted")]
             if len(rejected) >= 3:
-                raise AnalysisFailure("analysis_handoff_not_followed")
+                raise AnalysisFailure("analysis_tool_arguments_exhausted")
 
     async def transport(request):
         nonlocal next_tool, mismatch_emitted
@@ -145,7 +145,7 @@ def test_saved_deepseek_config_runs_forced_reads_handoffs_and_validated_report(
     mock_provider(monkeypatch, transport)
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     if handoff_behavior == "invalid":
-        with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
+        with pytest.raises(AnalysisFailure, match="analysis_tool_arguments_exhausted"):
             asyncio.run(engine.analyze(context, record))
         assert len(requests) == 5
         assert not any(kind == "handoff" for kind, _ in events)
@@ -161,13 +161,16 @@ def test_saved_deepseek_config_runs_forced_reads_handoffs_and_validated_report(
         assert report["files_read"] == ["app.py"]
         assert report["reasoning_effort"] is None
         assert len(requests) == 6 + (handoff_behavior == "recover")
-    assert sum(kind == "handoff_retry" for kind, _ in events) == int(
-        handoff_behavior != "valid",
-    )
+    assert sum(kind == "handoff_retry" for kind, _ in events) == {
+        "valid": 0, "recover": 1, "invalid": 2,
+    }[handoff_behavior]
     validations = [json.loads(value) for kind, value in events if kind == "handoff_validation"]
-    assert sum(not item["accepted"] for item in validations) == (
-        0 if handoff_behavior == "valid" else 2 if handoff_behavior == "invalid" else 1
-    )
+    assert sum(not item["accepted"] for item in validations) == {
+        "valid": 0, "recover": 1, "invalid": 3,
+    }[handoff_behavior]
+    if handoff_behavior == "invalid":
+        assert validations[-1]["recoverable"] is False
+        assert validations[-1]["corrections_remaining"] == 0
     assert all("arguments" not in item and "content" not in item for item in validations)
     assert ("provider_compatibility", "deepseek_chat") in events
     with execution.store.connection() as db:

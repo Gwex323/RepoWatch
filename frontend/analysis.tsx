@@ -59,6 +59,8 @@ const recoveryStopReasons: Record<string, string> = {
   total_deadline: '整条分析的总时限已到', request_limit: '累计模型请求额度已用完',
   resumption_limit: '续办次数已用完', basis_changed: '源码或执行依据已变化',
   checkpoint_invalid: '检查点与当前任务不再匹配', pipeline_stopped: '流程已停止或账号已变化',
+  superseded: '已由新的分析记录替代',
+  retry_exhausted: '本次允许的自动重试已用完',
   review_not_started: '尚未形成可恢复的最终审查', non_recoverable: '该故障不允许自动恢复',
 };
 export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = {
@@ -82,6 +84,8 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   analysis_storage_failed: '分析数据读写失败，本次分析未完成。请先处理服务日志中的数据库错误，再重试分析。',
   analysis_timeout_or_stopped: '分析已超时或停止，可以重新尝试。',
   analysis_interrupted: '上次分析因服务中断而停止，可以重新尝试。',
+  analysis_cancelled: '分析已取消，可以重新开始。',
+  analysis_handoff_not_followed: '指定角色交接未通过，本轮分析停止。请查看交接调用检查中的原因与纠正记录。',
   analysis_authentication_failed: '模型服务拒绝了密钥，请在「设置 → 模型与供应商」中更新。',
   analysis_rate_limited: '模型服务限流或额度不足，请检查账户后重试。',
   analysis_provider_timeout: '模型服务响应超时。请检查模型服务负载或网络；旧失败记录不会因配置更新而自动消失。',
@@ -109,7 +113,6 @@ export const analysisErrorMessages: Readonly<Partial<Record<string, string>>> = 
   resolution_verification_failed: '无法核验修复 PR 的合并状态，请检查 GitHub 账号与网络后重试。',
   analysis_max_turns_exceeded: '分析已达到总调用轮数上限，尚未生成完整报告。',
   analysis_stage_budget_exceeded: '当前阶段已耗尽预算，尚未完成交接或报告。',
-  analysis_handoff_not_followed: '指定角色交接未通过，本轮分析停止。请查看交接调用检查中的原因与纠正记录。',
   analysis_finalization_not_followed: '已要求提交报告，但模型仍尝试调用工具。请检查模型服务的工具选择支持。',
   analysis_model_output_invalid: '模型返回了无效的工具调用或输出格式，本次未保存问题。',
   analysis_tool_call_protocol_invalid: '模型工具调用的协议字段不符合要求，无法安全兼容，本批调用未执行。请查看协议兼容检查记录。',
@@ -186,6 +189,15 @@ function analysisFailureMessage(analysis: Analysis) {
     }
     return message;
   }
+  if (analysis.error === 'analysis_tool_arguments_exhausted') {
+    for (let index = analysis.events.length - 1; index >= 0; index--) {
+      const event = analysis.events[index];
+      if (event.kind === 'attempt') break;
+      if (event.kind === 'handoff_validation' || event.kind === 'required_read_validation') {
+        return `${message} ${eventLabel(event)}。`;
+      }
+    }
+  }
   if (['analysis_evidence_unverified', 'analysis_report_invalid', 'scope_mapping_invalid'].includes(analysis.error ?? '')) {
     const kind = analysis.error === 'scope_mapping_invalid' ? 'scope_mapping_validation'
       : analysis.error === 'analysis_evidence_unverified' ? 'evidence_validation' : 'report_validation';
@@ -235,6 +247,7 @@ function eventLabel(item: Analysis['events'][number]) {
   }
   if (item.kind === 'report_recovery_stopped') return `自动恢复已停止：${recoveryStopReasons[item.agent] ?? '请查看失败记录'}`;
   if (item.kind === 'report_recovery_new_scope') return '用户发起新范围审查，上一条恢复链记录已归档；新范围按新任务记录用量';
+  if (item.kind === 'analysis_cancelled') return '流程已停止，分析已取消';
   if (item.kind === 'report_budget') {
     try {
       const budget = JSON.parse(item.agent) as { max_tokens: number; reserve_seconds: number; review_items: number };

@@ -77,7 +77,7 @@ def test_saved_glm_config_preserves_reads_handoffs_and_report_validation(
         if kind == "handoff_validation" and not json.loads(value).get("accepted"):
             rejected = [v for k, v in events if k == kind and not json.loads(v).get("accepted")]
             if len(rejected) >= 3:
-                raise AnalysisFailure("analysis_handoff_not_followed")
+                raise AnalysisFailure("analysis_tool_arguments_exhausted")
 
     async def transport(request):
         payload = json.loads(request.content)
