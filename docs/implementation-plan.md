@@ -21,7 +21,9 @@ Status updated: 2026-10-31
   acceptance remain outstanding.
 
 - Issue #116 is implemented on `feature/analysis-runaway-retry-116` (base
-  `0c4affe`): request timeouts have a persistent four-retry budget; tool,
+  `0c4affe`) and published as PR #117 (open, targeting
+  `codex/initial-upload`): request timeouts have a persistent four-retry budget;
+  tool,
   handoff and required-read corrections share a persistent two-correction
   budget; terminal manual analyses are superseded by a fresh record; and
   environment stop/delete cancels orphan analyses with their lease, recovery
@@ -30,9 +32,9 @@ Status updated: 2026-10-31
   cases. One execution-pipeline timing case initially exceeded its three-second
   wait under parallel load; the complete execution-pipeline file was rerun
   serially and passed 23/23. Ruff, Python compilation, frontend build and diff
-  checks passed. Code review has no blocking findings. The change is not merged,
-  deployed or restarted in the workbench, and real target-repository acceptance
-  remains pending. See
+  checks passed. Code review has no blocking findings. PR #117 is mergeable but
+  is not merged, deployed or restarted in the workbench, and real
+  target-repository acceptance remains pending. See
   [review](tasks/0116/review.md).
 
 - Issue #112 was merged into the default branch via PR #113 as merge commit
