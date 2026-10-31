@@ -20,21 +20,20 @@ Status updated: 2026-10-31
   documented P3 residual risks; deployment and real target-repository
   acceptance remain outstanding.
 
-- Issue #116 is implemented on `feature/analysis-runaway-retry-116` (base
-  `0c4affe`) and published as PR #117 (open, targeting
-  `codex/initial-upload`): request timeouts have a persistent four-retry budget;
-  tool,
-  handoff and required-read corrections share a persistent two-correction
-  budget; terminal manual analyses are superseded by a fresh record; and
-  environment stop/delete cancels orphan analyses with their lease, recovery
-  state and audit event. Exhausted timeout budgets also stop automatic report
-  recovery. Final split regression passed 456 cases, including 43 system-fault
+- Issue #116 was merged into the default branch via PR #117 as merge commit
+  `608d30c` on 2026-10-31. Request timeouts have a persistent four-retry
+  budget; tool, handoff and required-read corrections share a persistent
+  two-correction budget; terminal manual analyses are superseded by a fresh
+  record; and environment stop/delete cancels orphan analyses with their lease,
+  recovery state and audit event. Exhausted timeout budgets also stop automatic
+  report recovery. Final split regression passed 456 cases, including 43 system-fault
   cases. One execution-pipeline timing case initially exceeded its three-second
   wait under parallel load; the complete execution-pipeline file was rerun
   serially and passed 23/23. Ruff, Python compilation, frontend build and diff
-  checks passed. Code review has no blocking findings. PR #117 is mergeable but
-  is not merged, deployed or restarted in the workbench, and real
-  target-repository acceptance remains pending. See
+  checks passed. Code review has no blocking findings. The local workbench was
+  restarted from this commit at port 8765 on 2026-10-31 after a consistent
+  database backup; startup, session, page and built-asset checks passed. Real
+  target-repository acceptance remains outstanding. See
   [review](tasks/0116/review.md).
 
 - Issue #112 was merged into the default branch via PR #113 as merge commit
