@@ -30,6 +30,7 @@ from .github_issues import GitHubIssues
 from .maintenance import Maintenance
 from .memory import Memory
 from .memory_evaluation import MemoryEvaluations
+from .model_escalation import ModelEscalation
 from .model_providers import ModelProviders
 from .observability import Telemetry
 from .provider_probe import ProviderProbe
@@ -265,6 +266,18 @@ class CoordinationSettingsBody(FaultSettingsBody):
     fallback_authorized: bool = Field(default=False, strict=True)
 
 
+class ModelEscalationRouteBody(StrictBody):
+    provider_id: str = Field(min_length=1, max_length=100)
+    model: str = Field(min_length=1, max_length=200)
+
+
+class ModelEscalationBody(StrictBody):
+    version: int = Field(ge=0, strict=True)
+    enabled: bool = Field(strict=True)
+    monitor_route: ModelEscalationRouteBody | None = None
+    repair_route: ModelEscalationRouteBody | None = None
+
+
 def create_app(
     db_path: Path | None = None, *, start_worker=True, github_client=None, credential_vault=None,
     execution_runtime=None, repository_source=None, execution_diagnoser=None, analysis_engine=None,
@@ -284,6 +297,7 @@ def create_app(
     telemetry = Telemetry.from_environment()
     analysis_model = AnalysisModel(store, github, telemetry=telemetry)
     model_providers = ModelProviders(store, github)
+    model_escalation = ModelEscalation(store)
     provider_probe = ProviderProbe(model_providers, transport=provider_probe_transport)
     execution = Execution(store, github, runtime=execution_runtime, source=repository_source,
                           diagnoser=execution_diagnoser or AnalysisModelDiagnoser(analysis_model))
@@ -377,6 +391,7 @@ def create_app(
     app.state.analyses = analyses
     app.state.analysis_model = analysis_model
     app.state.model_providers = model_providers
+    app.state.model_escalation = model_escalation
     app.state.memory_evaluations = memory_evaluations
     app.state.repairs = repairs
     app.state.acceptance = acceptance
@@ -447,7 +462,7 @@ def create_app(
         if request.url.path.startswith("/api/system/faults"):
             return JSONResponse({"detail": "fault_invalid_input"}, 422)
         if request.url.path.startswith(("/api/analysis-model", "/api/agent-models",
-                                        "/api/model-providers")):
+                                        "/api/model-providers", "/api/model-escalation")):
             return JSONResponse({"detail": "model_invalid_input"}, 422)
         return await request_validation_exception_handler(request, exc)
 
@@ -520,6 +535,7 @@ def create_app(
             "sdk_version": SDK_VERSION,
             "roles": ROLES,
             "agent_models": analysis_model.configuration(),
+            "model_escalation": model_escalation.state(),
             "model_mode": "configured_provider",
             "external_model_calls": (execution.diagnoses.engine.status()["enabled"]
                                      or analyses.engine.status()["enabled"]
@@ -684,6 +700,22 @@ def create_app(
     @app.get("/api/model-providers")
     def provider_catalog():
         return model_providers.state()
+
+    @app.get("/api/model-escalation")
+    def model_escalation_status():
+        return model_escalation.state()
+
+    @app.get("/api/model-escalation/settings")
+    def model_escalation_settings():
+        return model_escalation.state()
+
+    @app.post("/api/model-escalation")
+    def configure_model_escalation(body: ModelEscalationBody):
+        return model_escalation.configure(**body.model_dump())
+
+    @app.post("/api/model-escalation/settings")
+    def configure_model_escalation_settings(body: ModelEscalationBody):
+        return model_escalation.configure(**body.model_dump())
 
     def provider_values(body):
         return {**body.model_dump(exclude={"api_key", "version"}),

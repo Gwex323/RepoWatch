@@ -11,16 +11,21 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
 
-Issue #112 is implemented on `feature/scope-review-recovery-112` (base
-`5c25840`): final-review validation now applies the same exclusion-evidence
-semantics as persistence, malformed correction structures fail closed, mapping
-and scope-review retry signatures include the current checkpoint, and repeated
-unchanged failures stop with a text-free fingerprint. Public diagnostics remain
-bounded, expose only registered scope keys or hashes, and preserve the recovery
-identity fields. Targeted validation passed 74 backend cases; Ruff, Python
-compilation and diff checks also passed. Final independent review passed with
-no blocking findings, including a real save-conflict recovery regression; the
-branch is now in the PR publication stage. It is not merged or deployed, the
+Issue #108 is implemented on `feature/model-escalation-108` (base `5c25840`):
+the default-off model escalation policy, provider-referenced delete/edit
+protection, durable repair-phase snapshots and failure-safe escalation audit
+passed the current review. Real target-repository acceptance is still pending;
+the branch is not merged and not deployed. See
+[Issue #108 review](tasks/0108/review.md).
+
+Issue #112 was merged into the default branch via PR #113 as merge commit
+`0c771ae` on 2026-10-31. Final-review validation now applies the same
+exclusion-evidence semantics as persistence, malformed correction structures
+fail closed, mapping and scope-review retry signatures include the current
+checkpoint, and repeated unchanged failures stop with a text-free fingerprint.
+Targeted validation passed 74 backend cases; Ruff, Python compilation and diff
+checks also passed. Final independent review passed with no blocking findings,
+including a real save-conflict recovery regression. It is not deployed, the
 production workbench on port 8765 has not been restarted, and the original real
 analysis has not yet been rerun against this branch.
 

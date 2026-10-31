@@ -1,5 +1,6 @@
 """Owner-configured analysis provider; credentials never enter repository containers."""
 
+import asyncio
 import json
 from contextlib import AsyncExitStack
 from dataclasses import replace
@@ -13,6 +14,7 @@ from openai import AsyncOpenAI
 from openai.types.chat import ChatCompletionMessageFunctionToolCall
 
 from .diagnosis import redact_values
+from .model_escalation import ModelEscalation
 from .model_providers import ModelProviders, validate_model_config
 from .observability import Telemetry, model_observation, record_event, record_usage
 from .report_recovery import digest
@@ -522,17 +524,33 @@ class AnalysisModel:
         return dict(row) if row else None, roles, direct
 
     @staticmethod
-    def _identity(row, rows):
+    def _identity(row, rows, policy=None):
         # Hash encrypted credentials as well: even a key-only replacement must
         # invalidate recovery. Neither keys nor encrypted values leave this hash.
         return digest({"settings": dict(row) if row else None,
                        "roles": {role: {k: v for k, v in rows[role].items()
                                         if k != "routing_version"} if role in rows else None
-                                 for role in FLOW_ROLES["analysis"]}})
+                                 for role in FLOW_ROLES["analysis"]},
+                       "escalation": ({
+                           "enabled": bool(policy["enabled"]),
+                           "version": policy["version"],
+                           "monitor_route": ModelEscalation.route(
+                               policy["monitor_route"],
+                           ),
+                           "repair_route": ModelEscalation.route(
+                               policy["repair_route"],
+                           ),
+                       } if policy else None)})
 
     def recovery_identity(self):
-        row, rows, _ = self._snapshot()
-        return self._identity(row, rows)
+        with self.store.connection() as db:
+            db.execute("BEGIN")
+            row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
+            policy = ModelEscalation.policy_row(db)
+            rows, _ = ModelEscalation.apply_analysis(
+                db, ModelProviders.role_rows(db), policy,
+            )
+            return self._identity(row, rows, policy)
 
     def configuration(self):
         row, rows, direct = self._snapshot()
@@ -567,6 +585,22 @@ class AnalysisModel:
 
     def for_flow(self, flow):
         return ModelFlow(self, flow)
+
+    @staticmethod
+    def _escalation_reason(exc):
+        """Return a bounded local code, never provider or exception prose."""
+        if isinstance(exc, asyncio.CancelledError):
+            return "workflow_cancelled"
+        if isinstance(exc, Conflict):
+            code = str(exc)
+            if code.startswith(("analysis_", "repair_", "model_")):
+                return code
+        return "workflow_failed"
+
+    @staticmethod
+    def _record_escalation_event(original_event, kind, value):
+        record_event(kind, value)
+        original_event(kind, value)
 
     @staticmethod
     def _encrypted_key(db, credentials, row, config, api_key):
@@ -693,7 +727,9 @@ class AnalysisModel:
     async def classify_maintenance(self, context, event):
         from .maintenance_model import classify_maintenance
 
-        return await self._run(classify_maintenance, context, event, flow="repair")
+        return await self._run(
+            classify_maintenance, context, event, flow="repair", force_monitor=True,
+        )
 
     async def _run(self, runner, context, event, *, flow,
                    request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, **options):
@@ -705,16 +741,42 @@ class AnalysisModel:
 
     async def _run_models(self, runner, context, event, *, flow,
                           request_timeout_seconds=REQUEST_TIMEOUT_SECONDS, route_override=None,
-                          **options):
+                          force_monitor=False, **options):
         required = FLOW_ROLES[flow]
+        original_event = event
+        policy = None
+        identity = None
         with self.store.connection() as db:
             db.execute("BEGIN")
             row = db.execute("SELECT * FROM analysis_model WHERE id=1").fetchone()
             rows = ModelProviders.role_rows(db)
+            policy = ModelEscalation.policy_row(db)
             if flow == "coordination" and route_override is not None:
                 rows[COORDINATOR] = {**rows[COORDINATOR],
                                      **ModelProviders.resolve(db, route_override)}
                 rows[COORDINATOR]["config"] = json.dumps(rows[COORDINATOR]["config"])
+            escalation = None
+            if not route_override or flow != "coordination":
+                try:
+                    if flow == "analysis":
+                        rows, escalation = ModelEscalation.apply_analysis(
+                            db, rows, policy,
+                        )
+                    else:
+                        rows, escalation = ModelEscalation.apply(
+                            db, rows, flow=flow, context=context,
+                            force_monitor=force_monitor, policy=policy,
+                        )
+                except Conflict as exc:
+                    policy = ModelEscalation.policy_row(db)
+                    self._record_escalation_event(
+                        original_event, "model_escalation_unavailable",
+                        json.dumps({
+                            "reason": self._escalation_reason(exc),
+                            "version": policy["version"] if policy else 0,
+                        }),
+                    )
+                    raise
             if (not row or not json.loads(row["config"]).get("enabled")
                     or any(role not in rows or not public_model(role, rows[role])["configured"]
                            for role in required)):
@@ -727,12 +789,14 @@ class AnalysisModel:
                            for role in required}
             except (InvalidToken, UnicodeError):
                 raise Conflict("analysis_model_key_unavailable") from None
+            if flow == "analysis":
+                # Identity always uses the canonical analysis routing, never
+                # context or authorization flags from a repair phase.
+                identity = self._identity(row, rows, policy)
         configs = {role: json.loads(rows[role]["config"]) for role in required}
         if (flow == "analysis" and context.get("_review_model_identity") is not None
-                and context["_review_model_identity"] != self._identity(row, rows)):
+                and context["_review_model_identity"] != identity):
             raise Conflict("analysis_model_changed")
-        original_event = event
-
         if flow == "analysis":
             def redact_review_candidate(value):
                 serialized = json.dumps(value, ensure_ascii=False)
@@ -754,6 +818,14 @@ class AnalysisModel:
                                           "[REDACTED]")
             return original_event(kind, value)
 
+        if escalation:
+            event("model_escalation_policy", json.dumps(escalation))
+            if escalation["repair_model_used"]:
+                event("model_escalation_upgraded", json.dumps({
+                    "reason": "authorized_code_repair",
+                    "repair": escalation["repair"],
+                    "version": escalation["version"],
+                }))
         models, efforts = {}, {}
         first = required[0]
         uniform = all(configs[role] == configs[first] and secrets[role] == secrets[first]
@@ -780,6 +852,8 @@ class AnalysisModel:
                     "provider_version": rows[role]["provider_version"],
                     "reasoning_effort": efforts[role],
                     "finalization_mode": finalization_mode(config),
+                    "escalation_version": rows[role].get("escalation_version"),
+                    "escalation_route": rows[role].get("escalation_route"),
                 }))
                 if uniform and role != first:
                     models[role] = models[first]
@@ -814,11 +888,19 @@ class AnalysisModel:
                                   "provider_id": rows[role]["provider_id"]},
                     separate_schema_from_tools=separate_review_schema_from_tools(config),
                 )
-            result = await runner(
-                models[first] if uniform else models, context, event,
-                reasoning_effort=efforts[first] if uniform else efforts,
-                **options,
-            )
+            try:
+                result = await runner(
+                    models[first] if uniform else models, context, event,
+                    reasoning_effort=efforts[first] if uniform else efforts,
+                    **options,
+                )
+            except BaseException as exc:
+                if escalation:
+                    event("model_escalation_return", json.dumps({
+                        "reason": self._escalation_reason(exc),
+                        "version": escalation["version"],
+                    }))
+                raise
         # The key is not part of the prompt, but never persist a provider-echoed credential.
         serialized = json.dumps(result, ensure_ascii=False)
         for secret in sorted(set(secrets.values()), key=len, reverse=True):
@@ -839,4 +921,17 @@ class AnalysisModel:
                    "provider_version": rows[role]["provider_version"]}
             for role in required
         }
+        if escalation:
+            event("model_escalation_return", json.dumps({
+                "reason": "repair_finished" if escalation["repair_model_used"] else "monitor_only",
+                "version": escalation["version"],
+            }))
+            result["model_escalation"] = {
+                "enabled": True,
+                "version": escalation["version"],
+                "flow": escalation["flow"],
+                "repair_model_used": escalation["repair_model_used"],
+                "monitor": escalation["monitor"],
+                "repair": escalation["repair"],
+            }
         return result

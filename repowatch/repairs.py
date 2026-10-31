@@ -1036,8 +1036,32 @@ class Repairs(EnvironmentRecovery):
         try:
             check()
             context = json.loads(row["context"])
+            context.pop("_model_escalation_authorized", None)
             with self.store.connection() as db:
+                from .model_escalation import ModelEscalation
+                from .model_providers import ModelProviders
+
                 context.update(repair_origin(db, row))
+                context.update(
+                    _repair_task_id=row["id"],
+                    _analysis_id=row["analysis_id"],
+                    _finding_id=row["finding_id"],
+                    _model_escalation_authorized=True,
+                )
+                try:
+                    provider_rows = ModelProviders.role_rows(db)
+                    applied, escalation = ModelEscalation.apply(
+                        db, provider_rows, flow="repair", context=context,
+                        force_monitor=False,
+                    )
+                    if escalation:
+                        context = ModelEscalation.record_repair_snapshot(
+                            db, row["id"], applied, escalation, context=context,
+                        )
+                except Conflict:
+                    # The actual repair call records the same unavailable policy and
+                    # preserves the original failure semantics.
+                    pass
             def event(kind, value=""):
                 with self.store.connection() as db:
                     db.execute("BEGIN IMMEDIATE")
@@ -1079,8 +1103,9 @@ class Repairs(EnvironmentRecovery):
                 raise Conflict("repair_account_changed")
             context.update(account_id=account["id"], account_version=account["version"])
             with self.store.connection() as db:
+                persisted = ModelEscalation.persistable_context(context)
                 db.execute("UPDATE repair_tasks SET context=? WHERE id=?",
-                           (json.dumps(context, ensure_ascii=False), row["id"]))
+                           (json.dumps(persisted, ensure_ascii=False), row["id"]))
             workspace = await asyncio.to_thread(
                 RepairWorkspace, self.execution, row["id"], env, check, attempt=row["attempt"],
             )

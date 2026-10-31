@@ -209,6 +209,7 @@ class ModelProviders:
             raise Conflict("analysis_model_new_key_required")
         routes = json.loads(self.settings(db)["routes"])
         routes.update(self.coordination_routes(db))
+        routes.update(self.escalation_routes(db))
         names = {m["model"] for m in value["models"]}
         if provider_id and any(r and r.get("provider_id") == provider_id
                                and r.get("model") not in names for r in routes.values()):
@@ -253,6 +254,7 @@ class ModelProviders:
             db.execute("BEGIN IMMEDIATE")
             settings = self.check_version(db, version)
             routes = {**json.loads(settings["routes"]), **self.coordination_routes(db)}
+            routes.update(self.escalation_routes(db))
             if any(r and r.get("provider_id") == provider_id for r in routes.values()):
                 raise Conflict("model_provider_in_use")
             if not db.execute("DELETE FROM model_providers WHERE id=?", (provider_id,)).rowcount:
@@ -267,6 +269,28 @@ class ModelProviders:
             return {}
         row = db.execute("SELECT fallback FROM coordination_configuration WHERE id=1").fetchone()
         return {"coordination_fallback": json.loads(row[0])} if row and row[0] else {}
+
+    @staticmethod
+    def escalation_routes(db):
+        """Include model_escalation_policy references without importing that module."""
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='model_escalation_policy'").fetchone():
+            return {}
+        row = db.execute(
+            "SELECT monitor_route,repair_route FROM model_escalation_policy WHERE id=1"
+        ).fetchone()
+        routes = {}
+        for key in ("monitor", "repair"):
+            value = row[f"{key}_route"] if row else None
+            if not value:
+                continue
+            try:
+                route = json.loads(value)
+            except (TypeError, ValueError):
+                continue
+            if (isinstance(route, dict) and route.get("provider_id") and route.get("model")):
+                routes[f"escalation_{key}"] = route
+        return routes
 
     def configure(self, *, version, enabled, routes):
         if set(routes) - {"default", *AGENT_ROLES}:

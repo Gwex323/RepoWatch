@@ -55,6 +55,8 @@ const fields: Record<string, string> = {
   timing_scope: '耗时口径', stop_reason: '停止原因', requests: '累计请求', max_requests: '请求上限',
   resumptions: '累计续办', max_resumptions: '续办上限', model: '实际模型', model_version: '模型版本',
   provider_id: '供应商引用', provider_version: '供应商版本', configuration_version: '配置版本',
+  escalation_version: '升级策略版本', escalation_route: '升级阶段路由', repair_model_used: '是否使用修复模型',
+  monitor: '监控模型', repair: '修复模型',
   path: '字段路径', type: '违反约束', expected: '预期', actual_type: '实际类型',
   expected_type: '预期类型', truncated: '诊断已截断', exception_type: '异常类型',
   fields: '出错字段', issues: '字段约束',

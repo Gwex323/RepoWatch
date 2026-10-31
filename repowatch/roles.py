@@ -8,6 +8,7 @@ BUSINESS_ROLES = (
     "independent_reviewer",
 )
 COORDINATOR = "system_coordinator"
+REPAIR_ROLE = "repair_agent"
 ROLES = (*BUSINESS_ROLES, COORDINATOR)
 
 FLOW_ROLES = {

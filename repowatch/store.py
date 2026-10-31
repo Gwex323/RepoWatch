@@ -80,6 +80,9 @@ class Store:
             from .model_providers import initialize as initialize_providers
 
             initialize_providers(db)
+            from .model_escalation import initialize as initialize_model_escalation
+
+            initialize_model_escalation(db)
             from .memory_evaluation import initialize as initialize_memory_evaluation
 
             initialize_memory_evaluation(db)

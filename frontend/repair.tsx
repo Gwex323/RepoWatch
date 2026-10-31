@@ -66,6 +66,10 @@ const labels: Record<string, string> = {
   output_retry: '重新生成完整输出', format_retry: '纠正审查格式',
   output_truncated: '模型输出达到上限，已丢弃未完成内容',
   output_recovery: '已使用新版输出策略恢复机会',
+  model_escalation_policy: '模型升级策略快照已记录',
+  model_escalation_upgraded: '已按授权切换到修复模型',
+  model_escalation_return: '已返回监控模型路径',
+  model_escalation_unavailable: '模型升级策略当前不可用',
   protocol_recovery: '已使用新版补丁参数与交接策略恢复机会',
   verification_recovery: '已使用新版失败反馈与纠正策略恢复机会',
   patch_unchanged: '补丁未发生实质变化，未重复运行测试',
@@ -223,6 +227,20 @@ const requestEvent = (kind: string, value: string) => {
     if (!Number.isFinite(item.elapsed_seconds)) return '模型请求';
     return `${role} · ${kind === 'request_timeout' ? '请求超时' : '响应完成'} · 耗时 ${item.elapsed_seconds} 秒`;
   } catch { return '模型请求'; }
+};
+const escalationEvent = (kind: string, value: string) => {
+  try {
+    const item = JSON.parse(value);
+    if (kind === 'model_escalation_policy') {
+      const monitor = item.monitor?.model ?? '未记录';
+      const repair = item.repair?.model ?? '未记录';
+      return `监控 ${monitor} · 修复 ${repair} · 策略 v${item.version ?? '未知'}`;
+    }
+    if (kind === 'model_escalation_upgraded') return `进入修复模型 · ${item.repair?.model ?? '未记录'}`;
+    if (kind === 'model_escalation_return') return `返回监控模型 · ${item.reason ?? '已记录'}`;
+    if (kind === 'model_escalation_unavailable') return `升级策略不可用 · ${item.reason ?? '未记录'}`;
+  } catch { return '模型升级记录'; }
+  return '模型升级记录';
 };
 const verificationEvent = (kind: string, value: string) => {
   try {
@@ -504,6 +522,7 @@ export function RepairPanel({ envId, api, focusTaskId = '', view = 'repair', onN
             event.kind === 'provider_response' ? providerEvent(event.value) :
             event.kind === 'provider_tool_call_compatibility' ? protocolEvent(event.value) :
             event.kind === 'model_configuration' ? agentModelEvent(event.value) :
+            event.kind.startsWith('model_escalation_') ? escalationEvent(event.kind, event.value) :
             event.kind === 'source_blocked' ? sourceBlock(event.value) :
             event.kind === 'source_unavailable' ? unavailableSource(event.value) :
             event.kind === 'path_rejected' ? rejectedPath(event.value) :

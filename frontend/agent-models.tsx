@@ -22,6 +22,15 @@ export type AgentModels = {
   enabled: boolean; version: number; roles: AgentModel[];
   flows: Record<string, { ready: boolean; missing_roles: string[] }>;
 };
+type EscalationRoute = { provider_id: string; model: string } | null;
+type EscalationModel = {
+  route: EscalationRoute; provider_id: string; provider_name: string; model: string;
+  has_key: boolean;
+} | null;
+type EscalationStatus = {
+  enabled: boolean; version: number; monitor_route: EscalationRoute; repair_route: EscalationRoute;
+  monitor: EscalationModel; repair: EscalationModel; ready: boolean; missing: string[];
+};
 
 const icons: Record<string, typeof FolderGit2> = {
   repository_analyst: FolderGit2, problem_investigator: Search,
@@ -35,6 +44,10 @@ const errors: Record<string, string> = {
   analysis_model_key_required: '请为此角色填写 API Key。',
   analysis_model_new_key_required: '更换服务地址时，请重新填写此角色的 API Key。',
   analysis_model_role_invalid: '角色不存在，请刷新页面。',
+  model_escalation_changed: '模型升级策略已被更新，请刷新后重试。',
+  model_escalation_route_required: '请选择监控模型和修复模型。',
+  model_provider_missing: '供应商已不存在，请刷新配置。',
+  model_provider_model_missing: '模型已不存在，请重新选择。',
   secure_storage_unavailable: '本机系统凭据库不可用，密钥尚未保存。',
 };
 
@@ -87,6 +100,69 @@ function DefaultModelForm({ catalog, disabled, onSelect }: {
     <button className="button secondary" disabled={disabled}><Save size={15} />保存默认选择</button>
     <p className="diagnosis-meta">未单独选择供应商的角色使用默认模型；选择“使用此角色独立配置”可保留手工配置。</p>
   </form>;
+}
+
+const escalationValue = (route: EscalationRoute) => route
+  ? JSON.stringify([route.provider_id, route.model]) : '';
+
+function ModelEscalationSettings({ api, catalog, disabled, onChange }: {
+  api: Api; catalog: ProviderCatalog | null; disabled: boolean; onChange: () => void;
+}) {
+  const [policy, setPolicy] = useState<EscalationStatus | null>(null);
+  const [monitor, setMonitor] = useState('');
+  const [repair, setRepair] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState('');
+  useEffect(() => {
+    let active = true;
+    void api<EscalationStatus>('/model-escalation').then(value => {
+      if (!active) return;
+      setPolicy(value);
+      setMonitor(escalationValue(value.monitor_route));
+      setRepair(escalationValue(value.repair_route));
+    }).catch(() => { if (active) setNotice('无法读取模型升级策略，请重试。'); });
+    return () => { active = false; };
+  }, [api]);
+  if (!catalog) return <p className="diagnosis-meta">请先保存供应商，再配置模型升级策略。</p>;
+  const options = <>{catalog.providers.map(provider => <optgroup key={provider.id} label={provider.name}>
+    {provider.models.map(model => <option key={model.model} disabled={!provider.has_key}
+      value={JSON.stringify([provider.id, model.model])}>
+      {provider.name} / {model.model}{provider.has_key ? '' : '（未保存密钥）'}
+    </option>)}</optgroup>)}</>;
+  const save = () => {
+    if (!policy) return;
+    setBusy(true); setNotice('');
+    void api<EscalationStatus>('/model-escalation', {
+      version: policy.version, enabled: policy.enabled,
+      monitor_route: monitor ? JSON.parse(monitor) : null,
+      repair_route: repair ? JSON.parse(repair) : null,
+    }).then(value => {
+      setPolicy(value); setNotice('模型升级策略已保存；运行中的阶段继续使用原快照。'); onChange();
+    }).catch(e => setNotice(errors[(e as Error).message] ?? '模型升级策略保存失败，请刷新后重试。'))
+      .finally(() => setBusy(false));
+  };
+  return <section className="analysis-model-section model-escalation" aria-label="模型升级编排">
+    <div className="section-heading"><h3><ShieldCheck size={17} />flash 监控 + v4pro 修复</h3>
+      <span className={`tag ${policy?.ready && policy.enabled ? 'green' : 'neutral'}`}>
+        {policy?.enabled ? (policy.ready ? '已启用' : '配置缺失') : '默认关闭'}
+      </span></div>
+    <p className="diagnosis-meta">策略启用后，协调、分析、调查、复现和独立审查使用监控模型；只有服务端确认需要修改代码时才使用修复模型，并在修复结束后回到监控模型。该策略不授予合并或部署权限。</p>
+    {policy && <>
+      <label className="checkbox-label"><input type="checkbox" checked={policy.enabled} disabled={busy || disabled}
+        onChange={e => setPolicy({ ...policy, enabled: e.target.checked })} />启用模型升级策略</label>
+      <div className="execution-config-row">
+        <label>监控模型<select disabled={busy || disabled} value={monitor} onChange={e => setMonitor(e.target.value)}>
+          <option value="">请选择 flash 监控模型</option>{options}</select></label>
+        <label>修复模型<select disabled={busy || disabled} value={repair} onChange={e => setRepair(e.target.value)}>
+          <option value="">请选择 v4pro 修复模型</option>{options}</select></label>
+      </div>
+      <div className="agent-model-readiness">{policy.monitor && <span className="tag neutral">监控：{policy.monitor.provider_name} / {policy.monitor.model}</span>}
+        {policy.repair && <span className="tag neutral">修复：{policy.repair.provider_name} / {policy.repair.model}</span>}
+        {policy.missing.map(item => <span className="tag neutral" key={item}>{errors[item] ?? item}</span>)}</div>
+      <button className="button secondary" disabled={busy || disabled} onClick={save}><Save size={15} />保存升级策略</button>
+    </>}
+    {notice && <p role="status" className="diagnosis-meta">{notice}</p>}
+  </section>;
 }
 
 function AgentModelForm({ value, catalog, disabled, onSave, onSelect }: {
@@ -227,6 +303,7 @@ export function AgentModelSettings({ api, onChange }: { api: Api; onChange: () =
       </button>
     </div>
     {catalog && <DefaultModelForm key={catalog.version} catalog={catalog} disabled={busy} onSelect={select} />}
+    <ModelEscalationSettings api={api} catalog={catalog} disabled={busy} onChange={onChange} />
     {config && <>
       <div className="agent-model-switch"><label className="checkbox-label">
         <input type="checkbox" checked={config.enabled} disabled={busy} onChange={e => {

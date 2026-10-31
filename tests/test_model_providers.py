@@ -22,6 +22,7 @@ from repowatch.app import create_app
 from repowatch.diagnosis import run_agents
 from repowatch.github_accounts import GitHubAccounts
 from repowatch.memory_evaluation import _model_consistent, model_identity
+from repowatch.model_escalation import ModelEscalation
 from repowatch.model_providers import ModelProviders
 from repowatch.repair_model import run_repair
 from repowatch.repair_workspace import RepairWorkspace
@@ -417,3 +418,36 @@ def test_provider_api_requires_owner_csrf_and_never_echoes_secret(tmp_path):
         assert app.state.analysis_model.status()["enabled"]
         assert client.post(f"/api/model-providers/{choice(saved)['provider_id']}/delete",
             headers=headers, json={"version": saved["version"]+1}).status_code == 409
+
+
+def test_escalation_policy_references_block_provider_edit_and_delete(catalog):
+    providers, _ = catalog
+    saved = create(providers)
+    provider_id = saved["providers"][0]["id"]
+    monitor = choice(saved, "general-model")
+    repair = choice(saved, "specialized-model")
+    escalation = ModelEscalation(providers.store)
+    escalation.configure(
+        version=escalation.state()["version"],
+        enabled=True,
+        monitor_route=monitor,
+        repair_route=repair,
+    )
+
+    with pytest.raises(Conflict, match="model_provider_in_use"):
+        providers.save(
+            version=providers.state()["version"],
+            provider_id=provider_id,
+            **{**provider(), "models": [{"model": "general-model"}]},
+        )
+    with pytest.raises(Conflict, match="model_provider_in_use"):
+        providers.delete(provider_id, providers.state()["version"])
+
+    # Disabling the escalation policy clears its route references and allows deletion.
+    escalation.configure(
+        version=escalation.state()["version"],
+        enabled=False,
+        monitor_route=None,
+        repair_route=None,
+    )
+    assert providers.delete(provider_id, providers.state()["version"])["providers"] == []
