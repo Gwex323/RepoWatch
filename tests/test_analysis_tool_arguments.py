@@ -36,6 +36,7 @@ from repowatch.repository_analysis import (
     bounded_scope_issues,
     failure_event_payload,
     report_failure_fingerprint,
+    report_progress_material,
     report_scope_feedback,
     report_scope_issues,
     run_analysis,
@@ -463,13 +464,14 @@ def test_failure_payload_has_a_hard_bound_for_every_optional_text_field():
             "sqlite_errorcode", "http_status",
         )
     }
-    details["elapsed_seconds"] = 1.5
+    details["elapsed_seconds"] = 10 ** 2000
     encoded = failure_event_payload(details)
     saved = json.loads(encoded)
     assert len(encoded) <= 1000
     assert len(saved["code"]) <= 128
     assert len(saved["stage"]) <= 128
     assert len(saved["progress_fingerprint"]) <= 128
+    assert "elapsed_seconds" not in saved
 
 
 @pytest.mark.parametrize("mutation,expected", [
@@ -495,6 +497,21 @@ def test_report_requires_current_scope_keys_and_execution_classifications(mutati
         review["exclusions"] = []
     report = Review(summary="Review", limitations=["Unavailable"], findings=[], scope_review=review)
     assert scope_report_issue(report, context) == expected
+
+
+def test_scope_report_issue_rejects_missing_scope_review():
+    context = {"task_scope": {
+        "version": 1,
+        "items": [{"key": "behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [],
+    }}
+    review = Review(
+        summary="Review",
+        limitations=["Limited"],
+        findings=[],
+        scope_review=None,
+    )
+    assert scope_report_issue(review, context) == "scope_review_required"
 
 
 def test_gui_exclusion_requires_client_evidence_before_final_review_acceptance():
@@ -719,6 +736,40 @@ def test_scope_feedback_hashes_unregistered_candidate_keys():
     assert "candidate_private" not in report_scope_feedback(issues, context)
 
 
+def test_scope_review_issues_deduplicates_required_keys():
+    context = {"task_scope": {
+        "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [{"key": "excluded:app.py", "reasons": ["gui"]}],
+    }}
+    review = Review.model_validate({
+        "summary": "Review",
+        "limitations": ["Limited"],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Coverage is incomplete.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Client evidence is missing.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [{
+                "key": "excluded:app.py",
+                "outcome": "required",
+                "required_keys": ["fixture_behavior", "fixture_behavior"],
+                "rationale": "This needs client evidence.",
+                "evidence": [],
+            }],
+        },
+    })
+    issues = report_scope_issues(review, context)
+    assert len(issues) == 1
+    assert issues[0]["reason"] == "missing_evidence_kind"
+
+
 def test_failure_fingerprint_uses_only_safe_structural_material(monkeypatch):
     context = {"task_scope": {
         "version": 1,
@@ -751,6 +802,27 @@ def test_failure_fingerprint_uses_only_safe_structural_material(monkeypatch):
     assert material[0] == material[1]
     encoded = json.dumps(material, sort_keys=True)
     assert "private-" not in encoded and "candidate" not in encoded
+
+
+def test_report_progress_material_uses_a_fixed_label_for_invalid_scope_review():
+    context = {"task_scope": {
+        "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [],
+    }}
+    report = {"scope_review": {"exclusions": "private-invalid-structure"}}
+    material = report_progress_material(
+        "scope_review_incomplete", report, context,
+    )
+    assert material == {
+        "code": "scope_review_incomplete",
+        "scope_issues": [{
+            "exclusion_key": None,
+            "target_key": None,
+            "required_evidence": None,
+            "available_evidence": [],
+            "reason": "invalid_scope_review_structure",
+        }],
+    }
 
 
 def test_failure_fingerprint_ignores_scope_review_order_without_semantic_issues(

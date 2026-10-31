@@ -92,16 +92,15 @@ def public_state(saved, now):
 
 
 def repeated_no_progress(db, analysis_id):
-    """Compare the latest safe fingerprints, ignoring unrelated failure events."""
-    rows = db.execute(
-        "SELECT json_extract(CASE WHEN json_valid(agent) THEN agent ELSE '{}' END, "
+    """Return True when the latest safe fingerprint has already occurred."""
+    row = db.execute(
+        "WITH fingerprints AS ("
+        "SELECT id, json_extract(CASE WHEN json_valid(agent) THEN agent ELSE '{}' END, "
         "'$.progress_fingerprint') AS fingerprint FROM analysis_events "
-        "WHERE analysis_id=? AND kind='failure' "
-        "AND json_extract(CASE WHEN json_valid(agent) THEN agent ELSE '{}' END, "
-        "'$.progress_fingerprint') IS NOT NULL "
-        "AND json_extract(CASE WHEN json_valid(agent) THEN agent ELSE '{}' END, "
-        "'$.progress_fingerprint') <> '' ORDER BY id DESC LIMIT ?",
-        (analysis_id, NO_PROGRESS_LIMIT),
-    ).fetchall()
-    fingerprints = [row["fingerprint"] for row in rows]
-    return len(fingerprints) == NO_PROGRESS_LIMIT and len(set(fingerprints)) == 1
+        "WHERE analysis_id=? AND kind='failure') "
+        "SELECT fingerprint, COUNT(*) AS occurrences FROM fingerprints "
+        "WHERE fingerprint IS NOT NULL AND fingerprint <> '' "
+        "GROUP BY fingerprint ORDER BY MAX(id) DESC LIMIT 1",
+        (analysis_id,),
+    ).fetchone()
+    return row is not None and row["occurrences"] >= NO_PROGRESS_LIMIT

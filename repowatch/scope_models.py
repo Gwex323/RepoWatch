@@ -91,7 +91,7 @@ def scope_review_issues(review, requirements, limits):
         required_kind = "client" if set(limits.get(key, {}).get("reasons", [])) & {
             "windows_native", "gui",
         } else "integration"
-        targets = exclusion["required_keys"]
+        targets = sorted(set(exclusion["required_keys"]))
         if not targets:
             issues.append({
                 "exclusion_key": key, "target_key": None,
@@ -99,7 +99,7 @@ def scope_review_issues(review, requirements, limits):
                 "reason": "missing_required_keys",
             })
             continue
-        for target_key in sorted(targets):
+        for target_key in targets:
             target = requirements.get(target_key)
             available = sorted(target.get("required_evidence", [])) if target else []
             if target is None:

@@ -1262,7 +1262,13 @@ def report_progress_material(code, report, context):
                 scope.get("execution_limits", []),
             )
         except (KeyError, TypeError, ValueError):
-            issues = None
+            issues = [{
+                "exclusion_key": None,
+                "target_key": None,
+                "required_evidence": None,
+                "available_evidence": [],
+                "reason": "invalid_scope_review_structure",
+            }]
         if issues:
             material["scope_issues"] = issues
         else:
@@ -1313,7 +1319,12 @@ def failure_event_payload(details):
         "stage": str(details.get("stage", ""))[:64],
         "progress_fingerprint": str(details.get("progress_fingerprint", ""))[:128],
     }
-    return json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+    encoded = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) <= FAILURE_EVENT_DETAIL_LIMIT:
+        return encoded
+    return json.dumps({
+        "progress_fingerprint": minimal["progress_fingerprint"],
+    }, ensure_ascii=False, separators=(",", ":"))
 
 
 def scope_report_issue(review, context):

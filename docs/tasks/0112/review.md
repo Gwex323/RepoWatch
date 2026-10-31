@@ -4,7 +4,7 @@
 - Issue：[Gwex323/RepoWatch#112](https://github.com/Gwex323/RepoWatch/issues/112)。
 - 分支：`feature/scope-review-recovery-112`。
 - 基线：`origin/codex/initial-upload` 的 `5c25840`。
-- 状态：四轮独立 flash 审查发现均已核验并补强，等待 flash 第五轮复审；PR 尚未创建。
+- 状态：五轮独立 flash 审查发现均已核验并补强，等待 flash 第六轮复审；PR 尚未创建。
 
 ## 根因
 
@@ -78,6 +78,16 @@
 - 提取 `report_progress_material()`，让进程内 `scope_review_attempts` 与跨重启
   `report_failure_fingerprint()` 共享同一范围语义材料构造；两处仅在持久化侧追加
   checkpoint 摘要，避免判定材料继续漂移。
+
+第五轮 flash 审查后补强：
+
+- 范围语义解析异常时，无进展材料只使用固定
+  `invalid_scope_review_structure` 标签，不再回退到畸形候选的部分结构摘要。
+- `failure_event_payload()` 在最小结构仍超限时只保留有界进度指纹，确保失败事件最终序列化
+  不超过 1000 字符，且不依赖 `analysis_events.agent` 的截断。
+- `repeated_no_progress()` 改为按最新安全指纹统计其全部历史出现次数，不再使用固定事件
+  窗口；A-B-A 中即使 B 是另一个安全失败，只要最新 A 已重复即可停止。
+- `scope_review_issues()` 对 `required_keys` 先去重再排序，避免重复目标占用 6 条反馈预算。
 
 ## 模型路由记录
 
@@ -157,14 +167,31 @@ v4pro 接受“候选键必须白名单脱敏”和“内存/持久化签名材�
 无效结构；budget 不参与恢复判定。主路径采用两项结构性修正，并将 v4pro 的哈希后键方案
 改为默认 fail-closed 白名单：没有 context 时也不原样输出候选键。
 
+第五轮 flash 复审结果：仍为 `approved=false`，6 项发现，其中 P1 包括空范围审查旁路和
+异常结构指纹材料；P2 包括失败事件最终长度与 A-B-A 重复检测。审查文件为
+`.codex-backups/flash-review-scope-112-r5.json`，用量 prompt 19357、completion 1319、
+total 20676。
+
+第五轮 v4pro 核验记录：
+
+- 脚本：`.codex-backups/v4pro_fix_scope_112.py`
+- 结果：`.codex-backups/v4pro-fix-scope-112-r5.json`
+- 原始响应：`.codex-backups/v4pro-fix-scope-112-r5-raw.json`
+- 用量：prompt 40200、completion 3870、total 44070
+
+v4pro 接受固定异常标签、最终长度硬上限、A-B-A 重复检测和重复目标键去重；拒绝
+“空 `scope_review` 会旁路”和旧纠正清理，因为前者已由 `scope_review_required` 显式拦截，
+后者由通用纠正分支持续清理。主路径采用四项，但未采用 v4pro 的 100 条固定窗口，改为对
+最新指纹统计全部历史出现次数，避免把窗口盲区重新引入。
+
 ## 已通过验证
 
-- `tests/test_analysis_tool_arguments.py`：45 passed。
-- `tests/test_analysis_auto_recovery.py`：9 passed。
+- `tests/test_analysis_tool_arguments.py`：48 passed。
+- `tests/test_analysis_auto_recovery.py`：10 passed。
 - `tests/test_analysis_report_recovery.py`：29 passed、1 failed；失败项为
   `test_resume_still_rejects_fabricated_evidence_and_persists_no_findings`，实际 4 次请求、
   预期 3 次。该失败已在未修改的 `5c25840` 基线复核。
-- 三个定向测试文件分别运行，共 83 passed、1 failed；唯一失败即上述已在基线复现的
+- 三个定向测试文件分别运行，共 87 passed、1 failed；唯一失败即上述已在基线复现的
   既有断言。
 - 新增 GUI 排除项测试确认缺少 `client` 证据的映射在审查阶段被拒绝，具备 `client`
   证据的映射通过。
@@ -180,6 +207,9 @@ v4pro 接受“候选键必须白名单脱敏”和“内存/持久化签名材�
 - 新增交叉测试确认审查阶段与保存阶段对同一 GUI/Windows 映射都失败关闭。
 - 新增测试确认已注册范围键原样保留，未注册候选键只输出固定 SHA-256 标识，反馈和事件
   都不包含候选私有字符串。
+- 新增测试确认缺失 `scope_review` 明确返回 `scope_review_required`，不会被审查契约放过。
+- 新增测试确认异常范围结构只产生固定无值标签，不读取畸形候选内容。
+- 新增测试确认 A-B-A 安全失败序列能识别同一指纹重复，且重复目标键只生成一条反馈。
 - 检查点清理测试确认新的通用纠正会清除旧私有映射检查点。
 - `ruff check repowatch tests`：通过。
 - 修改模块 `py_compile`：通过。
@@ -197,5 +227,5 @@ v4pro 接受“候选键必须白名单脱敏”和“内存/持久化签名材�
 
 ## 审查结论
 
-前四轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
+前五轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
 让 `deepseek-flash` 对修正后的提交重新执行独立审查；复审结果将在本节追加。

@@ -128,6 +128,22 @@ def test_no_progress_fingerprint_ignores_unrelated_failures_between_repeats(serv
         assert not report_scheduler.repeated_no_progress(db, analysis_id)
 
 
+def test_repeated_no_progress_finds_a_b_a_with_interleaved_safe_failure(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analysis_id = Analyses(execution, RecoveryEngine()).enqueue(env["id"])
+    with execution.store.connection() as db:
+        for fingerprint in ("same-safe-hash", "different-safe-hash", "same-safe-hash"):
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (analysis_id, "failure", json.dumps({
+                    "code": "scope_review_incomplete",
+                    "progress_fingerprint": fingerprint,
+                }), time.time()),
+            )
+        assert report_scheduler.repeated_no_progress(db, analysis_id)
+
+
 def test_in_attempt_no_progress_failure_stops_automatic_recovery(service):  # noqa: F811
     analyses, _, queued = failed_review(service)
     with analyses.store.connection() as db:
