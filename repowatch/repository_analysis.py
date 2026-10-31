@@ -272,7 +272,8 @@ class StageModel(Model):
                  prepare_review=None, finalization_reserve=FINALIZATION_RESERVE_SECONDS,
                  tool_parameter_models=None, review_contract=None, evidence_sources=None,
                  scope_context=None, scope_batch=None, resume_correction=None,
-                 save_correction=None, redact_candidate=redact_values):
+                 update_private_correction_checkpoint=None,
+                 redact_candidate=redact_values):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
@@ -290,12 +291,14 @@ class StageModel(Model):
         self.scope_context = scope_context
         self.scope_batch = scope_batch
         self.resume_correction = resume_correction
-        self.save_correction = save_correction
+        self.update_private_correction_checkpoint = (
+            update_private_correction_checkpoint
+        )
         self.redact_candidate = redact_candidate
 
     def checkpoint_correction(self, correction, settings):
-        if self.save_correction is not None:
-            self.save_correction({
+        if self.update_private_correction_checkpoint is not None:
+            self.update_private_correction_checkpoint({
                 "protocol": report_correction_recovery.PROTOCOL, "accepted": False,
                 "kind": correction.kind, "candidate": correction.original.model_dump(),
                 "feedback": correction.feedback, "max_tokens": settings.max_tokens,
@@ -758,6 +761,7 @@ class StageModel(Model):
                             review = redact_review(review, self.redact_candidate)
                             issue = self.review_contract(review)
                     if issue:
+                        scope_correction = ""
                         scope_issues = []
                         if (issue in {"scope_mapping_invalid", "scope_review_incomplete"}
                                 and self.scope_context is not None):
@@ -794,9 +798,25 @@ class StageModel(Model):
                             scope_review_attempts.add(signature)
                             if scope_issues:
                                 feedback = bounded_scope_issues(scope_issues, context)
-                                self.event("scope_review_validation", json.dumps({
-                                    "role": self.role, **feedback,
-                                }, ensure_ascii=False))
+                                scope_correction = report_scope_feedback(scope_issues, context)
+                            else:
+                                feedback = {
+                                    "issues": [scope_contract_diagnostic(
+                                        review, signature_context,
+                                    )],
+                                    "total": 1,
+                                    "truncated": False,
+                                }
+                                scope_correction = (
+                                    "\n范围审查契约不匹配，固定诊断："
+                                    + json.dumps(feedback, ensure_ascii=False,
+                                                 separators=(",", ":"))
+                                    + "。按当前版本补齐每个已注册范围项和每个执行限制的固定分类；"
+                                    "不要删除已注册项、伪造证据或复用旧版本。"
+                                )
+                            self.event("scope_review_validation", json.dumps({
+                                "role": self.role, **feedback,
+                            }, ensure_ascii=False))
                         self.event("report_validation", issue)
                         diagnostics = report_diagnostics(response)
                         self.event("report_diagnostics", diagnostics)
@@ -815,8 +835,8 @@ class StageModel(Model):
                                 else final_report_input(input)
                             )
                             self.event("report_finalization", self.role)
-                        if self.save_correction is not None:
-                            self.save_correction(None)
+                        if self.update_private_correction_checkpoint is not None:
+                            self.update_private_correction_checkpoint(None)
                         report_correction = None
                         correction = (
                             "\nThe previous final response failed local validation "
@@ -830,8 +850,7 @@ class StageModel(Model):
                             "key, and a classification for EVERY execution_limits key. Use "
                             "blocked/investigating or unknown for insufficient evidence; do not "
                             "omit items, invent evidence, or treat acceptance as a verified fix."
-                        ) + (report_scope_feedback(scope_issues, context) if scope_issues
-                             else report_feedback(diagnostics))
+                        ) + (scope_correction or report_feedback(diagnostics))
                         continue
                     parts = [part for item in response.output if item.type == "message"
                              for part in item.content]
@@ -1225,6 +1244,25 @@ def report_scope_feedback(issues, context=None):
         "integration 或 regression 证据。truncated=true 时先修正列出的项目，再重新提交，"
         "不得跳过其余未显示的问题或虚构成功。保留已注册范围和所有有效来源证据。"
     )
+
+
+def scope_contract_diagnostic(review, context):
+    """Describe a scope-contract mismatch using only versions and counts."""
+    scope = (context or {}).get("task_scope") or {}
+    scope_review = review.scope_review
+    return {
+        "reason": "scope_review_contract_mismatch",
+        "registered_version": scope.get("version"),
+        "provided_version": scope_review.version if scope_review is not None else None,
+        "item_counts": {
+            "registered": len(scope.get("items", [])),
+            "provided": len(scope_review.items) if scope_review is not None else 0,
+        },
+        "exclusion_counts": {
+            "registered": len(scope.get("execution_limits", [])),
+            "provided": len(scope_review.exclusions) if scope_review is not None else 0,
+        },
+    }
 
 
 def report_progress_shape(report):
@@ -1641,9 +1679,9 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
                 correction.feedback = saved["feedback"]
             return correction, saved["max_tokens"]
         except (KeyError, TypeError, ValueError):
-            save = context.get("_save_review_correction")
-            if save is not None:
-                save(None)
+            update_checkpoint = context.get("_update_private_correction_checkpoint")
+            if update_checkpoint is not None:
+                update_checkpoint(None)
             event("report_correction_invalidated", "candidate_changed")
             return None
 
@@ -1676,7 +1714,10 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             scope_context=(lambda: context) if role == ROLES[-1] else None,
             scope_batch=prepare_scope_batch if scope_required else None,
             resume_correction=restore_review_correction if resume and role == ROLES[-1] else None,
-            save_correction=context.get("_save_review_correction") if role == ROLES[-1] else None,
+            update_private_correction_checkpoint=(
+                context.get("_update_private_correction_checkpoint")
+                if role == ROLES[-1] else None
+            ),
             redact_candidate=context.get("_redact_review_candidate", redact_values),
         )
         for role in ROLES
@@ -2345,7 +2386,7 @@ class Analyses:
             return (latest and latest["status"] == "running"
                     and latest["version"] == run_version)
 
-        def save_review_correction(value):
+        def update_private_correction_checkpoint(value):
             # A private callback, not an event: candidate prose/quotes must never
             # pass through public event ingestion or the telemetry wrapper.
             if not active():
@@ -2584,7 +2625,9 @@ class Analyses:
                 "last_failure": recovery["last_error"], "last_report_validation": diagnostics,
             } if recovery["last_error"] else diagnostics)
             context["_review_model_identity"] = model_identity
-            context["_save_review_correction"] = save_review_correction
+            context["_update_private_correction_checkpoint"] = (
+                update_private_correction_checkpoint
+            )
             with task_binding(task_id=row["id"], repo_id=row["repo_id"], env_id=row["env_id"],
                               revision=row["revision"], attempt=run_version):
                 task = asyncio.create_task(self.engine.analyze(context, record))

@@ -4,7 +4,7 @@
 - Issue：[Gwex323/RepoWatch#112](https://github.com/Gwex323/RepoWatch/issues/112)。
 - 分支：`feature/scope-review-recovery-112`。
 - 基线：`origin/codex/initial-upload` 的 `5c25840`。
-- 状态：五轮独立 flash 审查发现均已核验并补强，等待 flash 第六轮复审；PR 尚未创建。
+- 状态：六轮独立 flash 审查发现均已核验并补强，等待 flash 第七轮复审；PR 尚未创建。
 
 ## 根因
 
@@ -88,6 +88,17 @@
 - `repeated_no_progress()` 改为按最新安全指纹统计其全部历史出现次数，不再使用固定事件
   窗口；A-B-A 中即使 B 是另一个安全失败，只要最新 A 已重复即可停止。
 - `scope_review_issues()` 对 `required_keys` 先去重再排序，避免重复目标占用 6 条反馈预算。
+
+第六轮 flash 审查后补强：
+
+- `repeated_no_progress()` 先用 CTE 将非法 JSON 转为安全空对象，再仅对对象类型执行
+  `json_extract`；合法标量、数组、对象和损坏 JSON 混合存在时不会中断恢复判定。
+- 失败事件增加从 `failure_event_payload()` 到 `Analyses.event()`、再读回数据库的端到端
+  测试，确认最终持久化字符串未被 1024 字符上限再次截断，进度指纹保持一致。
+- `StageModel` 的私有回调改名为 `update_private_correction_checkpoint`，明确该回调既保存
+  新纠正，也用 `None` 清理陈旧纠正，避免被误解为只处理 mapping 私有检查点。
+- 当 `scope_review_incomplete` 没有具体排除语义问题时，输出只含注册/提供版本和计数的
+  `scope_review_contract_mismatch` 固定诊断，既不回显候选文本，也不再只依赖通用提示。
 
 ## 模型路由记录
 
@@ -184,14 +195,30 @@ v4pro 接受固定异常标签、最终长度硬上限、A-B-A 重复检测和�
 后者由通用纠正分支持续清理。主路径采用四项，但未采用 v4pro 的 100 条固定窗口，改为对
 最新指纹统计全部历史出现次数，避免把窗口盲区重新引入。
 
+第六轮 flash 复审结果：仍为 `approved=false`，4 项发现，其中 P1 为合法标量/数组 JSON
+可能破坏恢复查询。审查文件为 `.codex-backups/flash-review-scope-112-r6.json`，用量
+prompt 20870、completion 1090、total 21960。
+
+第六轮 v4pro 核验记录：
+
+- 脚本：`.codex-backups/v4pro_fix_scope_112.py`
+- 结果：`.codex-backups/v4pro-fix-scope-112-r6.json`
+- 原始响应：`.codex-backups/v4pro-fix-scope-112-r6-raw.json`
+- 用量：prompt 42478、completion 5252、total 47730
+
+v4pro 接受 4 项并要求修正 SQL 类型过滤、补端到端持久化测试、明确私有纠正回调语义、
+为空范围语义问题提供固定诊断。主路径采用全部方向，但 SQL 使用“先规范化 JSON 文档、再按
+对象类型提取”的 CTE，覆盖非法 JSON、标量、数组和对象混合场景；固定诊断只含版本与计数，
+不采用 v4pro 草案中会回显候选范围键的列表。
+
 ## 已通过验证
 
-- `tests/test_analysis_tool_arguments.py`：48 passed。
-- `tests/test_analysis_auto_recovery.py`：10 passed。
+- `tests/test_analysis_tool_arguments.py`：50 passed。
+- `tests/test_analysis_auto_recovery.py`：11 passed。
 - `tests/test_analysis_report_recovery.py`：29 passed、1 failed；失败项为
   `test_resume_still_rejects_fabricated_evidence_and_persists_no_findings`，实际 4 次请求、
   预期 3 次。该失败已在未修改的 `5c25840` 基线复核。
-- 三个定向测试文件分别运行，共 87 passed、1 failed；唯一失败即上述已在基线复现的
+- 三个定向测试文件分别运行，共 90 passed、1 failed；唯一失败即上述已在基线复现的
   既有断言。
 - 新增 GUI 排除项测试确认缺少 `client` 证据的映射在审查阶段被拒绝，具备 `client`
   证据的映射通过。
@@ -210,6 +237,9 @@ v4pro 接受固定异常标签、最终长度硬上限、A-B-A 重复检测和�
 - 新增测试确认缺失 `scope_review` 明确返回 `scope_review_required`，不会被审查契约放过。
 - 新增测试确认异常范围结构只产生固定无值标签，不读取畸形候选内容。
 - 新增测试确认 A-B-A 安全失败序列能识别同一指纹重复，且重复目标键只生成一条反馈。
+- 新增测试确认合法标量、数组、对象和损坏 JSON 混合时恢复查询仍可完成。
+- 新增测试确认失败事件经真实事件表写入/读取后仍保持完整 JSON 与进度指纹。
+- 新增测试确认版本不一致且无排除语义问题时输出无候选文本的固定计数诊断。
 - 检查点清理测试确认新的通用纠正会清除旧私有映射检查点。
 - `ruff check repowatch tests`：通过。
 - 修改模块 `py_compile`：通过。
@@ -227,5 +257,5 @@ v4pro 接受固定异常标签、最终长度硬上限、A-B-A 重复检测和�
 
 ## 审查结论
 
-前五轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
+前六轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
 让 `deepseek-flash` 对修正后的提交重新执行独立审查；复审结果将在本节追加。

@@ -474,6 +474,28 @@ def test_failure_payload_has_a_hard_bound_for_every_optional_text_field():
     assert "elapsed_seconds" not in saved
 
 
+def test_failure_payload_survives_event_storage_without_truncation(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analyses = Analyses(execution, Engine())
+    analysis_id = analyses.enqueue(env["id"])
+    fingerprints = "d" * 64
+    payload = failure_event_payload({
+        "code": "scope_review_incomplete",
+        "stage": ROLES[-1],
+        "progress_fingerprint": fingerprints,
+        "budget": {"diagnostic": "x" * 4000},
+    })
+    analyses.event(analysis_id, "failure", payload)
+    saved = next(
+        event["agent"] for event in analyses.get(analysis_id)["events"]
+        if event["kind"] == "failure"
+    )
+    assert saved == payload
+    assert len(saved) <= 1024
+    assert json.loads(saved)["progress_fingerprint"] == fingerprints
+
+
 @pytest.mark.parametrize("mutation,expected", [
     ("missing", "scope_review_required"), ("version", "scope_review_incomplete"),
     ("key", "scope_review_incomplete"), ("exclusion", "scope_review_incomplete"),
@@ -1003,7 +1025,7 @@ def test_scope_semantics_take_precedence_even_if_contract_reports_mapping_invali
         lambda kind, value: events.append((kind, value)),
         review_contract=lambda _review: "scope_mapping_invalid",
         scope_context=lambda: context,
-        save_correction=lambda _value: None,
+        update_private_correction_checkpoint=lambda _value: None,
     )
     with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
         asyncio.run(stage.get_response(
@@ -1077,7 +1099,7 @@ def test_first_generic_review_correction_clears_any_stale_private_checkpoint():
         lambda *_: None,
         review_contract=lambda _review: next(contracts),
         scope_context=lambda: context,
-        save_correction=saved.append,
+        update_private_correction_checkpoint=saved.append,
     )
     result = asyncio.run(stage.get_response(
         "Trusted final-review instructions",
@@ -1089,6 +1111,87 @@ def test_first_generic_review_correction_clears_any_stale_private_checkpoint():
     ))
     assert result.output
     assert saved == [None]
+
+
+def test_scope_contract_mismatch_emits_value_free_diagnostic():
+    context = {
+        "task_scope": {
+            "version": 2,
+            "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+            "execution_limits": [],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Private candidate summary.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Private candidate rationale.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [],
+        },
+    }
+
+    class VersionMismatchModel(Model):
+        async def get_response(self, system_instructions, input, **kwargs):
+            return ModelResponse(output=[ResponseOutputMessage(
+                id="version_mismatch",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(review),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    events = []
+    stage = StageModel(
+        VersionMismatchModel(),
+        ROLES[-1],
+        StageBudget(),
+        lambda kind, value: events.append((kind, value)),
+        review_contract=lambda _review: "scope_review_incomplete",
+        scope_context=lambda: context,
+        update_private_correction_checkpoint=lambda _value: None,
+    )
+    with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
+        asyncio.run(stage.get_response(
+            "Trusted final-review instructions",
+            json.dumps({"files": {"app.py": "print('ok')"}}),
+            tools=[],
+            handoffs=[],
+            output_schema=AgentOutputSchema(Review),
+            model_settings=ModelSettings(max_tokens=6000),
+        ))
+    diagnostics = [
+        json.loads(value) for kind, value in events
+        if kind == "scope_review_validation"
+    ]
+    assert len(diagnostics) == 1
+    detail = diagnostics[0]["issues"][0]
+    assert detail == {
+        "reason": "scope_review_contract_mismatch",
+        "registered_version": 2,
+        "provided_version": 1,
+        "item_counts": {"registered": 1, "provided": 1},
+        "exclusion_counts": {"registered": 0, "provided": 0},
+    }
+    assert "Private candidate" not in json.dumps(diagnostics)
 
 
 def test_generic_review_correction_clears_stale_private_mapping_checkpoint():
@@ -1164,7 +1267,7 @@ def test_generic_review_correction_clears_stale_private_mapping_checkpoint():
         lambda *_: None,
         review_contract=lambda _review: next(contracts),
         scope_context=lambda: context,
-        save_correction=saved.append,
+        update_private_correction_checkpoint=saved.append,
     )
     result = asyncio.run(stage.get_response(
         "Trusted final-review instructions",

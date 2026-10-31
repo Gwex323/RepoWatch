@@ -144,6 +144,26 @@ def test_repeated_no_progress_finds_a_b_a_with_interleaved_safe_failure(service)
         assert report_scheduler.repeated_no_progress(db, analysis_id)
 
 
+def test_repeated_no_progress_ignores_non_object_json_events(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analysis_id = Analyses(execution, RecoveryEngine()).enqueue(env["id"])
+    with execution.store.connection() as db:
+        events = [
+            '"scalar"',
+            "[1, 2, 3]",
+            json.dumps({"progress_fingerprint": "same-safe-hash"}),
+            "not-json",
+            json.dumps({"progress_fingerprint": "same-safe-hash"}),
+        ]
+        for detail in events:
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (analysis_id, "failure", detail, time.time()),
+            )
+        assert report_scheduler.repeated_no_progress(db, analysis_id)
+
+
 def test_in_attempt_no_progress_failure_stops_automatic_recovery(service):  # noqa: F811
     analyses, _, queued = failed_review(service)
     with analyses.store.connection() as db:

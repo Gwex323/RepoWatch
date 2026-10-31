@@ -94,10 +94,12 @@ def public_state(saved, now):
 def repeated_no_progress(db, analysis_id):
     """Return True when the latest safe fingerprint has already occurred."""
     row = db.execute(
-        "WITH fingerprints AS ("
-        "SELECT id, json_extract(CASE WHEN json_valid(agent) THEN agent ELSE '{}' END, "
-        "'$.progress_fingerprint') AS fingerprint FROM analysis_events "
-        "WHERE analysis_id=? AND kind='failure') "
+        "WITH documents AS ("
+        "SELECT id, CASE WHEN json_valid(agent) THEN agent ELSE '{}' END AS document "
+        "FROM analysis_events WHERE analysis_id=? AND kind='failure'), "
+        "fingerprints AS ("
+        "SELECT id, json_extract(document, '$.progress_fingerprint') AS fingerprint "
+        "FROM documents WHERE json_type(document)='object') "
         "SELECT fingerprint, COUNT(*) AS occurrences FROM fingerprints "
         "WHERE fingerprint IS NOT NULL AND fingerprint <> '' "
         "GROUP BY fingerprint ORDER BY MAX(id) DESC LIMIT 1",
