@@ -1,9 +1,18 @@
 # Implementation Plan
 
 Date: 2026-10-09
-Status updated: 2026-10-30
+Status updated: 2026-10-31
 
 ## Current Delivery Status
+
+- Issue #112 is implemented on `feature/scope-review-recovery-112` (base
+  `5c25840`): align final-review and save-time scope exclusion validation, make
+  malformed scope structures fail closed, bind retry signatures to the current
+  checkpoint, and stop deterministic no-progress recovery with bounded,
+  text-free failure events. Targeted validation passed 74 backend cases; Ruff,
+  Python compilation and diff checks passed. Final independent review and the
+  Chinese PR remain outstanding. The branch is not merged or deployed, port
+  8765 has not been restarted, and the real analysis replay remains pending.
 
 - Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
   fix correction-state INSERT arity and classify SQLite database failures with

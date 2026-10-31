@@ -2,7 +2,7 @@
 
 Status: local execution, real Issue intake, daily checks and controlled repair/publication
 implemented; central coordination is in staged development
-Updated: 2026-10-30
+Updated: 2026-10-31
 
 ## Goal
 
@@ -10,6 +10,18 @@ Design a multi-agent system that analyzes GitHub repositories, identifies
 project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
+
+Issue #112 is implemented on `feature/scope-review-recovery-112` (base
+`5c25840`): final-review validation now applies the same exclusion-evidence
+semantics as persistence, malformed correction structures fail closed, mapping
+and scope-review retry signatures include the current checkpoint, and repeated
+unchanged failures stop with a text-free fingerprint. Public diagnostics remain
+bounded, expose only registered scope keys or hashes, and preserve the recovery
+identity fields. Targeted validation passed 74 backend cases; Ruff, Python
+compilation and diff checks also passed. The branch has not yet received final
+independent approval, so no PR has been created. It is not merged or deployed,
+the production workbench on port 8765 has not been restarted, and the original
+real analysis has not yet been rerun against this branch.
 
 Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
 the correction-state INSERT explicitly binds six columns to six parameters;

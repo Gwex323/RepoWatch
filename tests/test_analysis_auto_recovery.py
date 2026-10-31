@@ -15,6 +15,7 @@ from repowatch.repository_analysis import (
     report_diagnostics,
     report_failure_fingerprint,
 )
+from repowatch.store import Conflict
 
 CHECKPOINT_DIGEST = "checkpoint-safe-hash"
 
@@ -292,6 +293,48 @@ def test_in_attempt_no_progress_failure_stops_automatic_recovery(service):  # no
         assert not analyses.schedule_report_recovery(
             db, failed, "analysis_report_no_progress", time.time(),
         )
+        recovery = db.execute(
+            "SELECT state,stop_reason FROM analysis_report_recovery WHERE analysis_id=?",
+            (queued["id"],),
+        ).fetchone()
+    assert dict(recovery) == {"state": "stopped", "stop_reason": "no_progress"}
+
+
+def test_save_scope_conflict_records_fingerprint_and_stops_retry(
+        service, monkeypatch):  # noqa: F811
+    analyses, engine, queued = failed_review(service)
+    engine.fail = False
+
+    def reject_save(*_args, **_kwargs):
+        raise Conflict("scope_review_incomplete")
+
+    monkeypatch.setattr(
+        "repowatch.repository_analysis.save_scope_review", reject_save,
+    )
+    for _ in range(2):
+        with analyses.store.connection() as db:
+            db.execute(
+                "UPDATE analysis_report_recovery SET retry_after=0 WHERE analysis_id=?",
+                (queued["id"],),
+            )
+        asyncio.run(analyses.tick())
+
+    result = analyses.get(queued["id"])
+    failures = [
+        json.loads(event["agent"]) for event in result["events"]
+        if event["kind"] == "failure"
+        and json.loads(event["agent"]).get("code") == "scope_review_incomplete"
+    ]
+    assert len(failures) == 2
+    assert failures[0]["checkpoint_digest"]
+    assert failures[0]["progress_fingerprint"]
+    assert {event["checkpoint_digest"] for event in failures} == {
+        failures[0]["checkpoint_digest"],
+    }
+    assert {event["progress_fingerprint"] for event in failures} == {
+        failures[0]["progress_fingerprint"],
+    }
+    with analyses.store.connection() as db:
         recovery = db.execute(
             "SELECT state,stop_reason FROM analysis_report_recovery WHERE analysis_id=?",
             (queued["id"],),
