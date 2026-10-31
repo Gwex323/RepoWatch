@@ -36,6 +36,16 @@ CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?i)((?:api[_-]?key|access[_-]?token|token|password|authorization)"
     r"""['"]?\s*[:=]\s*['"]?)(?:Bearer\s+)?[^\s,'";&]+"""
 )
+KNOWN_SECRET = r"(?:github_pat_|gh[pousr]_|sk-)[A-Za-z0-9_-]+"
+# GitHub token prefixes are distinctive, so source and log screening keep the
+# same pattern. The sk- prefix is common in labels, so source screening also
+# requires a left delimiter and at least 20 key-shaped characters. Credential
+# assignments and exact configured secrets remain separate blocking paths.
+SOURCE_SK_MIN_LENGTH = 20
+SOURCE_KNOWN_SECRET = (
+    r"(?:github_pat_|gh[pousr]_)[A-Za-z0-9_-]+"
+    rf"|(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{{{SOURCE_SK_MIN_LENGTH},}}"
+)
 
 
 def fingerprint(config, revision):
@@ -68,12 +78,16 @@ def evidence_matches(snapshot, config, revision, action):
     return all(previous.get(key) == config.get(key) for key in keys)
 
 
-def redact_known(text):
+def redact_known(text, *, source_screening=False):
     text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", str(text))
     secret = os.getenv("REPOWATCH_DIAGNOSIS_API_KEY", "")
     if secret:
         text = text.replace(secret, "[REDACTED]")
-    text = re.sub(r"(?:github_pat_|gh[pousr]_|sk-)[A-Za-z0-9_-]+", "[REDACTED]", text)
+    # Source labels and short test placeholders can legitimately contain "sk-".
+    # Keep log redaction conservative while source screening uses the stricter
+    # key shape above.
+    pattern = SOURCE_KNOWN_SECRET if source_screening else KNOWN_SECRET
+    text = re.sub(pattern, "[REDACTED]", text)
     text = re.sub(r"(?i)(https?://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text)
     return text
 

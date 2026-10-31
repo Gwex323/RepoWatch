@@ -381,6 +381,31 @@ and that sensitive patches cannot trigger tests or publication. Existing
 failed live attempts and owner confirmations are preserved. No live retry or
 GitHub write was initiated by the validation.
 
+## Short `sk-` Source Label Follow-Up (2026-10-31)
+
+Issue #114 covers a later false positive found during the Issue #108 isolated
+acceptance. A repair task could not read `tests/test_trae_adapter.py` because
+the model label `volcengine-plan//sk-only` matched the generic log redactor.
+The same file also contains the short placeholder `sk-fallback-key`.
+
+Source screening now uses a separate `sk-` shape: the candidate must have a
+non-identifier left delimiter and at least 20 key-shaped characters. Log and
+event redaction keep their previous conservative behavior. GitHub token
+patterns, exact configured secrets, credential assignments and URL userinfo
+remain blocking paths. Tests cover the 19/20/21-character boundary, comments,
+Markdown/JSON sources, identifier and Unicode delimiters, real RepairWorkspace
+read and patch preparation, and rejection of synthetic long `sk-` and GitHub
+tokens.
+
+The target test file now passes source screening, and 51 focused safety/repair
+tests pass. The diagnosis and repair suites report 213 passed and two
+deterministic failures; both failures reproduce unchanged from a clean archive
+of HEAD and are outside this change. The 20-character floor deliberately
+accepts a residual risk for a hypothetical shorter `sk-` value that is not
+also caught as a credential assignment. It is not a universal credential
+classifier. Issue #114 independent review passed with this risk documented;
+merge, deployment and a real target-repository PR remain outstanding.
+
 ## Automatic Repair Follow-Up (2026-10-14)
 
 Issue #3 is implemented on `feature/automatic-repair`. A confirmed finding

@@ -5,13 +5,20 @@ Status updated: 2026-10-31
 
 ## Current Delivery Status
 
-- Issue #108 is implemented on `feature/model-escalation-108` (base `5c25840`):
-  default-off flash-monitor / v4pro-repair routing, immutable repair-phase
-  snapshots, provider reference protection and escalation failure audit passed
-  the current review. The real target-repository acceptance is still pending;
-  the branch is not merged and not deployed. Remaining offline acceptance items
-  are not checked as passed. See
+- Issue #108 was merged into the default branch via PR #109 as merge commit
+  `caa53fa` on 2026-10-31. Default-off flash-monitor / v4pro-repair routing,
+  immutable repair-phase snapshots, provider reference protection and
+  escalation failure audit are in the default branch. The real
+  target-repository acceptance is still pending. See
   [review](tasks/0108/review.md).
+
+- Issue #114 is implemented on `feature/source-safety-sk-prefix-114` (base
+  `caa53fa`): source screening no longer treats short `sk-` labels or
+  placeholders as credentials, while log redaction, configured secrets,
+  credential assignments, URL userinfo and realistic `sk-` keys remain
+  blocked. Focused validation and independent review passed with only
+  documented P3 residual risks; merge, deployment and real target-repository
+  acceptance remain outstanding.
 
 - Issue #112 was merged into the default branch via PR #113 as merge commit
   `0c771ae` on 2026-10-31. It aligns final-review and save-time scope exclusion

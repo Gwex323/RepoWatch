@@ -11,12 +11,17 @@ project problems, opens issues, fixes bugs, and submits pull requests.
 
 ## Current Status
 
-Issue #108 is implemented on `feature/model-escalation-108` (base `5c25840`):
-the default-off model escalation policy, provider-referenced delete/edit
-protection, durable repair-phase snapshots and failure-safe escalation audit
-passed the current review. Real target-repository acceptance is still pending;
-the branch is not merged and not deployed. See
-[Issue #108 review](tasks/0108/review.md).
+Issue #108 was merged into the default branch via PR #109 as merge commit
+`caa53fa` on 2026-10-31. It adds the default-off model escalation policy,
+provider-referenced delete/edit protection, durable repair-phase snapshots and
+failure-safe escalation audit. Real target-repository acceptance is still
+pending. See [Issue #108 review](tasks/0108/review.md).
+
+Issue #114 is implemented on `feature/source-safety-sk-prefix-114` (base
+`caa53fa`): source screening distinguishes short `sk-` labels and placeholders
+from long key-shaped values while preserving log redaction and credential
+assignment gates. Focused validation and independent review passed; merge,
+deployment and real target-repository acceptance remain outstanding.
 
 Issue #112 was merged into the default branch via PR #113 as merge commit
 `0c771ae` on 2026-10-31. Final-review validation now applies the same

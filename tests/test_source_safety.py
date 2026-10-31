@@ -2,7 +2,7 @@
 
 import pytest
 
-from repowatch.diagnosis import redact
+from repowatch.diagnosis import redact, redact_known
 from repowatch.source_safety import source_problem
 
 
@@ -68,6 +68,52 @@ def test_configured_secret_is_blocked_even_when_it_looks_like_a_reference(monkey
     assert source_problem("api_key = private_configured_value\n", "app.py")
 
 
+def test_source_screening_distinguishes_short_sk_labels_from_real_keys():
+    for text in (
+        "model = 'volcengine-plan//sk-only'\n",
+        "sk = 'sk-fallback-key'\n",
+        "label = 'task-only'\n",
+    ):
+        assert source_problem(text, "app.py") is None
+
+    synthetic_key = "sk-" + "A1b2" * 8
+    problem = source_problem(f"value = '{synthetic_key}'\n", "app.py")
+    assert problem == {"line": 1, "rule": "credential_pattern"}
+
+
+@pytest.mark.parametrize("length,blocked", [(19, False), (20, True), (21, True)])
+def test_source_sk_key_shape_has_an_explicit_length_boundary(length, blocked):
+    body = ("A1b2" * ((length + 3) // 4))[:length]
+    problem = source_problem(f"value = 'sk-{body}'\n", "app.py")
+    assert bool(problem) is blocked
+    assert problem is None or problem["rule"] == "credential_pattern"
+
+
+def test_short_sk_labels_are_allowed_in_comments_and_non_python_sources():
+    for name, text in (
+        ("app.py", "# placeholder: sk-fallback-key\n"),
+        ("model.json", '{"name": "volcengine-plan//sk-only"}\n'),
+        ("README.md", "Model: volcengine-plan//sk-only\n"),
+    ):
+        assert source_problem(text, name) is None
+
+
+def test_sk_key_shape_requires_a_left_boundary_and_still_blocks_non_python_literals():
+    body = "A1b2" * 8
+    assert source_problem(f"label = 'prefixsk-{body}'\n", "app.py") is None
+    assert source_problem(f'{{"value": "sk-{body}"}}', "model.json") == {
+        "line": 1,
+        "rule": "credential_pattern",
+    }
+
+
+@pytest.mark.parametrize("prefix", ["/", "=", "'", " ", "标签", "\u200b"])
+def test_source_sk_key_shape_accepts_non_identifier_left_delimiters(prefix):
+    body = "A1b2" * 8
+    assert source_problem(f"value = '{prefix}sk-{body}'\n", "app.py")
+
+
 def test_log_redaction_remains_conservative():
     assert "private-literal-value" not in redact("password=private-literal-value")
     assert "[REDACTED]" in redact("api_key=settings.api_key")
+    assert redact_known("value='sk-fallback-key'") == "value='[REDACTED]'"

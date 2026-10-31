@@ -1637,6 +1637,57 @@ def test_python_declarations_read_exact_source_and_patch_without_log_redaction(p
     assert "api_key: str" in (workspace.candidate / "app.py").read_text()
 
 
+def test_short_sk_labels_read_and_patch_without_sensitive_block(pending):
+    repairs, _, report, _, _ = pending
+    source = repairs.execution.directory(report["env_id"]) / "source"
+    text = (
+        "models = [\n"
+        "    {'name': 'volcengine-plan//sk-only'},\n"
+        "    {'sk': 'sk-fallback-key'},\n"
+        "]\n"
+    )
+    (source / "app.py").write_bytes(text.encode())
+    workspace = RepairWorkspace(
+        repairs.execution, "repair_" + "3" * 16, repairs.execution.get(report["env_id"]),
+        lambda: None,
+    )
+
+    observed = workspace.read("app.py")
+    assert observed["text"] == text
+    patch = fixture_patch()
+    patch["edits"][0].update(
+        original_sha256=observed["sha256"], content=text + "# regression\n",
+    )
+    workspace.prepare(Patch.model_validate(patch))
+    assert (workspace.candidate / "app.py").read_bytes().decode() == text + "# regression\n"
+
+
+def test_repair_prepare_still_rejects_credential_literals_and_known_tokens(pending):
+    repairs, _, report, _, _ = pending
+    source = repairs.execution.directory(report["env_id"]) / "source"
+    synthetic_key = "sk-" + "A1b2" * 8
+    cases = {
+        "a": "api_key = 'sk-fallback-key'\n",
+        "b": f"value = '{synthetic_key}'\n",
+        "c": "value = 'ghp_private_literal_value'\n",
+    }
+    for suffix, content in cases.items():
+        (source / "app.py").write_text("print('ok')", encoding="utf-8")
+        workspace = RepairWorkspace(
+            repairs.execution, "repair_" + suffix * 16,
+            repairs.execution.get(report["env_id"]), lambda: None,
+        )
+        observed = workspace.read("app.py")
+        patch = fixture_patch()
+        patch["edits"][0].update(
+            original_sha256=observed["sha256"], content=content,
+        )
+        with pytest.raises(SourceContentBlocked) as caught:
+            workspace.prepare(Patch.model_validate(patch))
+        assert caught.value.details["phase"] == "patch"
+        assert content.strip() not in str(caught.value.details)
+
+
 def test_denied_source_reads_still_consume_bounded_read_budget(pending):
     repairs, _, report, _, _ = pending
     source = repairs.execution.directory(report["env_id"]) / "source"
