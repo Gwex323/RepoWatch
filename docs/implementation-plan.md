@@ -30,8 +30,10 @@ Status updated: 2026-10-31
   cases. One execution-pipeline timing case initially exceeded its three-second
   wait under parallel load; the complete execution-pipeline file was rerun
   serially and passed 23/23. Ruff, Python compilation, frontend build and diff
-  checks passed. Code review has no blocking findings. Deployment, workbench
-  restart and real target-repository acceptance remain outstanding. See
+  checks passed. Code review has no blocking findings. The local workbench was
+  restarted from this commit at port 8765 on 2026-10-31 after a consistent
+  database backup; startup, session, page and built-asset checks passed. Real
+  target-repository acceptance remains outstanding. See
   [review](tasks/0116/review.md).
 
 - Issue #112 was merged into the default branch via PR #113 as merge commit

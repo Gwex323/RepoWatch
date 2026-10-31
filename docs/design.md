@@ -37,8 +37,10 @@ three-second wait under parallel load; the complete execution-pipeline file was
 rerun serially and passed 23/23. Ruff, Python compilation, frontend build and
 diff checks passed. Code review found and fixed the timeout auto-recovery loop,
 the tool-detail message override and the missing cancellation audit event. No
-blocking review findings remain. Deployment and real target-repository
-acceptance remain outstanding.
+blocking review findings remain. The local workbench was deployed from this
+commit at port 8765 on 2026-10-31 after a consistent database backup; startup,
+session, page and built-asset checks passed. Real target-repository acceptance
+remains outstanding.
 
 Issue #112 was merged into the default branch via PR #113 as merge commit
 `0c771ae` on 2026-10-31. Final-review validation now applies the same
