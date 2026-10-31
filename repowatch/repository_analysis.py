@@ -1370,6 +1370,19 @@ def _bounded_json(details):
     return encoded if len(encoded.encode("utf-8")) <= FAILURE_EVENT_DETAIL_LIMIT else None
 
 
+def _safe_failure_atom(value, max_bytes=64):
+    """Preserve ordinary labels or replace unsafe text with a fixed hex digest."""
+    text = str(value)
+    encoded = text.encode("utf-8", errors="replace")
+    if (
+        len(encoded) <= max_bytes
+        and text.isascii()
+        and all(character.isalnum() or character in "._:-" for character in text)
+    ):
+        return text
+    return hashlib.sha256(encoded).hexdigest()[:64]
+
+
 def failure_event_payload(details):
     """Serialize bounded diagnostics without ever relying on JSON truncation."""
     candidates = [details]
@@ -1398,12 +1411,10 @@ def failure_event_payload(details):
     if encoded is not None:
         return encoded
     minimal = {
-        "code": _truncate_utf8(details.get("code", ""), 64),
-        "stage": _truncate_utf8(details.get("stage", ""), 64),
-        "checkpoint_digest": _truncate_utf8(details.get("checkpoint_digest", ""), 64),
-        "progress_fingerprint": _truncate_utf8(
-            details.get("progress_fingerprint", ""), 64,
-        ),
+        "code": _safe_failure_atom(details.get("code", "")),
+        "stage": _safe_failure_atom(details.get("stage", "")),
+        "checkpoint_digest": _safe_failure_atom(details.get("checkpoint_digest", "")),
+        "progress_fingerprint": _safe_failure_atom(details.get("progress_fingerprint", "")),
     }
     return _bounded_json(minimal)
 
@@ -1415,7 +1426,10 @@ def scope_report_issue(review, context):
                 and report_mapping_issues(review, context) else None)
     if review.scope_review is None:
         return "scope_review_required"
-    result = review.scope_review
+    try:
+        result = ScopeReview.model_validate(review.scope_review.model_dump())
+    except ValidationError:
+        return "scope_review_incomplete"
     keys = [item.key for item in result.items]
     exclusions = [item.key for item in result.exclusions]
     if (result.version != scope["version"] or len(keys) != len(set(keys))

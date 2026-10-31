@@ -72,13 +72,41 @@ def scope_mapping_issues(findings, review, requirements, finding_ids):
     return issues
 
 
+def _invalid_scope_review_structure():
+    return {
+        "exclusion_key": None, "target_key": None,
+        "required_evidence": None, "available_evidence": [],
+        "reason": "invalid_scope_review_structure",
+    }
+
+
+def _valid_scope_exclusion(exclusion):
+    return (
+        isinstance(exclusion, dict)
+        and isinstance(exclusion.get("key"), str)
+        and exclusion.get("outcome") in ("required", "unrelated", "unknown")
+        and isinstance(exclusion.get("evidence"), list)
+        and (
+            exclusion.get("outcome") != "required"
+            or (
+                isinstance(exclusion.get("required_keys"), list)
+                and all(isinstance(value, str) for value in exclusion["required_keys"])
+            )
+        )
+    )
+
+
 def scope_review_issues(review, requirements, limits):
     """Return value-free exclusion checks shared by review and persistence."""
     requirements = {item["key"]: item for item in requirements}
     limits = {item["key"]: item for item in limits}
     issues = []
-    for exclusion in sorted((review or {}).get("exclusions", []),
-                            key=lambda item: item["key"]):
+    exclusions = review.get("exclusions", []) if isinstance(review, dict) else None
+    if not isinstance(exclusions, list) or not all(
+        _valid_scope_exclusion(item) for item in exclusions
+    ):
+        return [_invalid_scope_review_structure()]
+    for exclusion in sorted(exclusions, key=lambda item: item["key"]):
         key = exclusion["key"]
         if exclusion["outcome"] == "unrelated" and not exclusion["evidence"]:
             issues.append({
