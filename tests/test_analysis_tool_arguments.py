@@ -7,9 +7,13 @@ import time
 from typing import Annotated
 
 import pytest
-from agents import Model, ModelResponse, ModelSettings, Usage, function_tool
+from agents import AgentOutputSchema, Model, ModelResponse, ModelSettings, Usage, function_tool
 from agents.function_schema import function_schema
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 from openai.types.shared import Reasoning
 from pydantic import Field
 from test_execution import service  # noqa: F401
@@ -29,12 +33,23 @@ from repowatch.repository_analysis import (
     Review,
     StageBudget,
     StageModel,
+    bounded_scope_issues,
+    failure_event_payload,
+    report_failure_fingerprint,
+    report_progress_material,
+    report_scope_feedback,
+    report_scope_issues,
     run_analysis,
     scope_report_issue,
 )
 from repowatch.scope_models import ScopeRequirement
 from repowatch.store import Conflict
-from repowatch.task_scopes import register_scope, request_scope_review, scope_packet
+from repowatch.task_scopes import (
+    register_scope,
+    request_scope_review,
+    save_scope_review,
+    scope_packet,
+)
 
 
 def register_task_scope(
@@ -376,6 +391,132 @@ def test_diagnostic_event_storage_keeps_complete_safe_json(service):  # noqa: F8
     assert json.loads(saved) == detail
 
 
+def test_scope_and_failure_events_keep_complete_safe_diagnostics(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analyses = Analyses(execution, Engine())
+    analysis_id = analyses.enqueue(env["id"])
+    scope_detail = {
+        "role": ROLES[-1],
+        "issues": [{
+            "exclusion_key": f"excluded:path_{index}.py",
+            "target_key": f"registered_scope_item_{index}",
+            "required_evidence": "client",
+            "available_evidence": ["integration", "regression"],
+            "reason": "missing_evidence_kind",
+        } for index in range(12)],
+    }
+    failure_detail = {
+        "code": "analysis_report_no_progress",
+        "stage": ROLES[-1],
+        "progress_fingerprint": "a" * 64,
+        "budget": {"diagnostic": "bounded failure diagnostics remain durable"},
+    }
+    scope_encoded, failure_encoded = (
+        json.dumps(scope_detail), json.dumps(failure_detail)
+    )
+    assert len(scope_encoded) > 1024 and len(failure_encoded) < 1024
+    analyses.event(analysis_id, "scope_review_validation", scope_encoded)
+    analyses.event(analysis_id, "failure", failure_encoded)
+    row = analyses.get(analysis_id)
+    saved = {e["kind"]: e["agent"] for e in row["events"]}
+    assert json.loads(saved["scope_review_validation"]) == scope_detail
+    assert json.loads(saved["failure"]) == failure_detail
+
+
+def test_large_failure_budget_is_dropped_before_the_fixed_event_limit():
+    fingerprints = "a" * 64
+    details = {
+        "code": "scope_review_incomplete",
+        "stage": ROLES[-1],
+        "progress_fingerprint": fingerprints,
+        "budget": {"diagnostic": "x" * 4000},
+    }
+    encoded = failure_event_payload(details)
+    saved = json.loads(encoded)
+    assert len(encoded.encode("utf-8")) <= 1000
+    assert saved["progress_fingerprint"] == fingerprints
+    assert "budget" not in saved
+
+
+def test_failure_payload_falls_back_to_bounded_scalars_without_truncating_json():
+    fingerprints = "b" * 64
+    details = {
+        "code": "scope_review_incomplete",
+        "stage": ROLES[-1],
+        "exception_type": "x" * 4000,
+        "progress_fingerprint": fingerprints,
+    }
+    encoded = failure_event_payload(details)
+    saved = json.loads(encoded)
+    assert len(encoded.encode("utf-8")) <= 1000
+    assert saved["code"] == details["code"]
+    assert saved["stage"] == details["stage"]
+    assert saved["progress_fingerprint"] == fingerprints
+    assert len(saved["exception_type"]) == 128
+
+
+def test_failure_payload_has_a_hard_bound_for_every_optional_text_field():
+    details = {
+        key: "界" * 4000
+        for key in (
+            "code", "stage", "exception_type", "checkpoint_digest",
+            "progress_fingerprint",
+            "sqlite_errorcode", "http_status",
+        )
+    }
+    details["elapsed_seconds"] = 10 ** 2000
+    encoded = failure_event_payload(details)
+    saved = json.loads(encoded)
+    assert len(encoded.encode("utf-8")) <= 1000
+    assert len(saved["code"]) <= 128
+    assert len(saved["stage"]) <= 128
+    assert len(saved["checkpoint_digest"]) <= 64
+    assert len(saved["progress_fingerprint"]) <= 64
+    assert "elapsed_seconds" not in saved
+
+
+def test_failure_payload_minimal_atoms_remain_bounded_after_json_escaping():
+    private = "\x00" * 1000
+    payload = failure_event_payload({
+        "code": private,
+        "stage": private,
+        "exception_type": private,
+        "checkpoint_digest": private,
+        "progress_fingerprint": private,
+        "budget": {"diagnostic": private},
+    })
+    assert isinstance(payload, str)
+    assert len(payload.encode("utf-8")) <= 1000
+    saved = json.loads(payload)
+    assert set(saved) == {
+        "code", "stage", "checkpoint_digest", "progress_fingerprint",
+    }
+    assert all(len(value) == 64 for value in saved.values())
+
+
+def test_failure_payload_survives_event_storage_without_truncation(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analyses = Analyses(execution, Engine())
+    analysis_id = analyses.enqueue(env["id"])
+    fingerprints = "d" * 64
+    payload = failure_event_payload({
+        "code": "scope_review_incomplete",
+        "stage": ROLES[-1],
+        "progress_fingerprint": fingerprints,
+        "budget": {"diagnostic": "x" * 4000},
+    })
+    analyses.event(analysis_id, "failure", payload)
+    saved = next(
+        event["agent"] for event in analyses.get(analysis_id)["events"]
+        if event["kind"] == "failure"
+    )
+    assert saved == payload
+    assert len(saved) <= 1024
+    assert json.loads(saved)["progress_fingerprint"] == fingerprints
+
+
 @pytest.mark.parametrize("mutation,expected", [
     ("missing", "scope_review_required"), ("version", "scope_review_incomplete"),
     ("key", "scope_review_incomplete"), ("exclusion", "scope_review_incomplete"),
@@ -399,6 +540,1104 @@ def test_report_requires_current_scope_keys_and_execution_classifications(mutati
         review["exclusions"] = []
     report = Review(summary="Review", limitations=["Unavailable"], findings=[], scope_review=review)
     assert scope_report_issue(report, context) == expected
+
+
+def test_scope_report_issue_rejects_missing_scope_review():
+    context = {"task_scope": {
+        "version": 1,
+        "items": [{"key": "behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [],
+    }}
+    review = Review(
+        summary="Review",
+        limitations=["Limited"],
+        findings=[],
+        scope_review=None,
+    )
+    assert scope_report_issue(review, context) == "scope_review_required"
+
+
+def test_gui_exclusion_requires_client_evidence_before_final_review_acceptance():
+    context = {"task_scope": {
+        "version": 2,
+        "items": [
+            {"key": "trae_cache_adapter_safety",
+             "required_evidence": ["integration", "regression"]},
+            {"key": "windows_client_behavior", "required_evidence": ["client"]},
+        ],
+        "execution_limits": [{
+            "key": "excluded:tests/test_display_names.py",
+            "reasons": ["windows_native"],
+        }],
+    }}
+    review = Review.model_validate({
+        "summary": "Review",
+        "limitations": ["Windows client was unavailable."],
+        "findings": [],
+        "scope_review": {
+            "version": 2,
+            "accepted": False,
+            "rationale": "Coverage is incomplete.",
+            "items": [
+                {"key": "trae_cache_adapter_safety", "outcome": "blocked",
+                 "rationale": "Client evidence is missing.", "evidence": [], "finding_ids": []},
+                {"key": "windows_client_behavior", "outcome": "blocked",
+                 "rationale": "Client evidence is missing.", "evidence": [], "finding_ids": []},
+            ],
+            "exclusions": [{
+                "key": "excluded:tests/test_display_names.py",
+                "outcome": "required",
+                "required_keys": ["trae_cache_adapter_safety"],
+                "rationale": "This file needs Windows-native evidence.",
+                "evidence": [],
+            }],
+        },
+    })
+    assert scope_report_issue(review, context) == "scope_review_incomplete"
+    issues = [{
+        "exclusion_key": "excluded:tests/test_display_names.py",
+        "target_key": "trae_cache_adapter_safety",
+        "required_evidence": "client",
+        "available_evidence": ["integration", "regression"],
+        "reason": "missing_evidence_kind",
+    }]
+    assert report_scope_issues(review, context) == issues
+    fingerprint = report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", review.model_dump(), context,
+    )
+    changed = review.model_copy(deep=True)
+    changed.summary = "Different cosmetic wording."
+    changed.scope_review.exclusions[0].rationale = "Different explanation."
+    changed.scope_review.exclusions[0].required_keys = [
+        "windows_client_behavior", "trae_cache_adapter_safety",
+    ]
+    assert report_scope_issues(changed, context) == issues
+    assert report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", changed.model_dump(), context,
+    ) == fingerprint
+    review.scope_review.exclusions[0].required_keys = ["windows_client_behavior"]
+    assert scope_report_issue(review, context) is None
+    assert report_scope_issues(review, context) == []
+
+
+def test_review_and_save_reject_the_same_gui_scope_semantics(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analyses = Analyses(execution, Engine())
+    analysis_id = analyses.enqueue(env["id"])
+    with execution.store.connection() as db:
+        row = dict(db.execute(
+            "SELECT * FROM repository_analyses WHERE id=?", (analysis_id,),
+        ).fetchone())
+        context = json.loads(row["context"])
+        context.setdefault("files", {})["app.py"] = "print('ok')\n"
+        context["test_result"] = {"desktop_scope": {
+            "excluded": [{
+                "path": "tests/test_display_names.py",
+                "reasons": ["windows_native"],
+            }],
+            "skipped": 0,
+        }}
+        db.execute(
+            "UPDATE repository_analyses SET status='running',context=? WHERE id=?",
+            (json.dumps(context), analysis_id),
+        )
+        row.update(status="running", context=json.dumps(context))
+        first = register_scope(db, row, [{
+            "key": "trae_cache_adapter_safety",
+            "title": "TRAE adapter safety",
+            "expected": "Adapter behavior remains safe.",
+            "paths": ["app.py"],
+            "required_evidence": ["integration", "regression"],
+        }], ROLES[0])
+        scope = register_scope(db, row, [{
+            "key": "windows_client_behavior",
+            "title": "Windows client behavior",
+            "expected": "The native client behavior is verified.",
+            "paths": ["app.py"],
+            "required_evidence": ["client"],
+        }], ROLES[0])
+        assert scope["version"] == first["version"] + 1
+        review = Review.model_validate({
+            "summary": "Review",
+            "limitations": ["Windows-native tests were excluded."],
+            "findings": [],
+            "scope_review": {
+                "version": scope["version"],
+                "accepted": False,
+                "rationale": "Coverage is incomplete.",
+                "items": [
+                    {"key": "trae_cache_adapter_safety", "outcome": "blocked",
+                     "rationale": "Client evidence is missing.", "evidence": [],
+                     "finding_ids": []},
+                    {"key": "windows_client_behavior", "outcome": "blocked",
+                     "rationale": "Client evidence is missing.", "evidence": [],
+                     "finding_ids": []},
+                ],
+                "exclusions": [{
+                    "key": "excluded:tests/test_display_names.py",
+                    "outcome": "required",
+                    "required_keys": ["trae_cache_adapter_safety"],
+                    "rationale": "The excluded file needs Windows-native evidence.",
+                    "evidence": [],
+                }],
+            },
+        })
+        assert scope_report_issue(
+            review, {"task_scope": scope},
+        ) == "scope_review_incomplete"
+        with pytest.raises(Conflict, match="scope_review_incomplete"):
+            save_scope_review(db, row, review.scope_review.model_dump(), [])
+
+
+@pytest.mark.parametrize(("outcome", "targets", "reason", "required_evidence"), [
+    ("required", ["missing_requirement"], "unknown_scope_requirement", "client"),
+    ("required", [], "missing_required_keys", "client"),
+    ("unrelated", [], "unrelated_without_evidence", None),
+])
+def test_scope_semantic_feedback_covers_fixed_failure_reasons(
+        outcome, targets, reason, required_evidence,
+):
+    context = {"task_scope": {
+        "version": 1,
+        "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [{"key": "excluded:app.py", "reasons": ["gui"]}],
+    }}
+    review = Review.model_validate({
+        "summary": "Review",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Coverage is incomplete.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [{
+                "key": "excluded:app.py",
+                "outcome": outcome,
+                "required_keys": targets,
+                "rationale": "Fixture limitation.",
+                "evidence": [],
+            }],
+        },
+    })
+    issues = report_scope_issues(review, context)
+    assert len(issues) == 1
+    assert issues[0]["reason"] == reason
+    assert issues[0]["required_evidence"] == required_evidence
+
+
+def test_scope_feedback_is_bounded_and_explicitly_reports_truncation():
+    issues = [{
+        "exclusion_key": f"excluded:{index:02d}:" + "x" * 120,
+        "target_key": f"target_{index}",
+        "required_evidence": "client",
+        "available_evidence": ["integration", "regression"],
+        "reason": "missing_evidence_kind",
+    } for index in range(12)]
+    feedback = bounded_scope_issues(issues)
+    assert len(feedback["issues"]) == 6
+    assert feedback["total"] == 12
+    assert feedback["truncated"] is True
+    encoded = json.dumps({"role": ROLES[-1], **feedback}, ensure_ascii=False)
+    assert len(encoded) < 4096
+    prompt = report_scope_feedback(issues)
+    assert '"total":12' in prompt and '"truncated":true' in prompt
+
+
+def test_scope_feedback_hashes_unregistered_candidate_keys():
+    context = {"task_scope": {
+        "items": [{"key": "registered_item", "required_evidence": ["client"]}],
+        "execution_limits": [{"key": "registered_exclusion", "reasons": ["gui"]}],
+    }}
+    issues = [{
+        "exclusion_key": "registered_exclusion",
+        "target_key": "registered_item",
+        "required_evidence": "client",
+        "available_evidence": [],
+        "reason": "missing_evidence_kind",
+    }, {
+        "exclusion_key": "candidate_private_exclusion",
+        "target_key": "candidate_private_target",
+        "required_evidence": "client",
+        "available_evidence": [],
+        "reason": "missing_evidence_kind",
+    }]
+    feedback = bounded_scope_issues(issues, context)
+    assert feedback["issues"][0]["exclusion_key"] == "registered_exclusion"
+    assert feedback["issues"][0]["target_key"] == "registered_item"
+    assert feedback["issues"][1]["exclusion_key"].startswith("sha256:")
+    assert feedback["issues"][1]["target_key"].startswith("sha256:")
+    encoded = json.dumps(feedback)
+    assert "candidate_private" not in encoded
+    assert "candidate_private" not in report_scope_feedback(issues, context)
+
+
+def test_scope_feedback_filters_untrusted_evidence_labels():
+    context = {"task_scope": {
+        "items": [{"key": "registered_item", "required_evidence": ["client"]}],
+        "execution_limits": [{"key": "registered_exclusion", "reasons": ["gui"]}],
+    }}
+    issues = [{
+        "exclusion_key": "registered_exclusion",
+        "target_key": "registered_item",
+        "required_evidence": "candidate_required_private",
+        "available_evidence": [
+            "integration", "candidate_available_private", {"private": "candidate_object"},
+        ],
+        "reason": "missing_evidence_kind",
+    }]
+    feedback = bounded_scope_issues(issues, context)
+    detail = feedback["issues"][0]
+    assert detail["required_evidence"] == "type:invalid"
+    assert detail["available_evidence"] == [
+        "integration", "type:invalid", "type:invalid",
+    ]
+    encoded = json.dumps(feedback, ensure_ascii=False)
+    assert "candidate_" not in encoded
+    assert "candidate_" not in report_scope_feedback(issues, context)
+
+
+def test_scope_review_issues_deduplicates_required_keys():
+    context = {"task_scope": {
+        "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [{"key": "excluded:app.py", "reasons": ["gui"]}],
+    }}
+    review = Review.model_validate({
+        "summary": "Review",
+        "limitations": ["Limited"],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Coverage is incomplete.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Client evidence is missing.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [{
+                "key": "excluded:app.py",
+                "outcome": "required",
+                "required_keys": ["fixture_behavior", "fixture_behavior"],
+                "rationale": "This needs client evidence.",
+                "evidence": [],
+            }],
+        },
+    })
+    issues = report_scope_issues(review, context)
+    assert len(issues) == 1
+    assert issues[0]["reason"] == "missing_evidence_kind"
+
+
+def test_scope_review_prevalidation_fails_closed_for_mutated_structure():
+    context = {"task_scope": {
+        "version": 1,
+        "items": [{"key": "fixture_behavior", "required_evidence": ["client"]}],
+        "execution_limits": [{"key": "excluded:app.py", "reasons": ["gui"]}],
+    }}
+    review = Review.model_validate({
+        "summary": "Review",
+        "limitations": ["Limited"],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Coverage is incomplete.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Client evidence is missing.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [{
+                "key": "excluded:app.py",
+                "outcome": "required",
+                "required_keys": ["fixture_behavior"],
+                "rationale": "This needs client evidence.",
+                "evidence": [],
+            }],
+        },
+    })
+    review.scope_review.exclusions[0].required_keys = None
+    assert scope_report_issue(review, context) == "scope_review_incomplete"
+    assert report_scope_issues(review, context) == [{
+        "exclusion_key": None,
+        "target_key": None,
+        "required_evidence": None,
+        "available_evidence": [],
+        "reason": "invalid_scope_review_structure",
+    }]
+
+
+def test_failure_fingerprint_uses_only_safe_structural_material(monkeypatch):
+    context = {"task_scope": {
+        "version": 1,
+        "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [],
+    }}
+    material = []
+
+    def capture(value):
+        material.append(value)
+        return "safe-fingerprint"
+
+    monkeypatch.setattr("repowatch.repository_analysis.digest", capture)
+    malformed = {
+        "summary": "private-candidate-summary",
+        "findings": [{"evidence": [{"quote": "private-source-quote"}]}],
+        "scope_review": {"exclusions": "private-exclusion-text"},
+    }
+    changed = {
+        "summary": "different-private-summary",
+        "findings": [{"evidence": [{"quote": "different-private-quote"}]}],
+        "scope_review": {"exclusions": "different-private-text"},
+    }
+    assert report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", malformed, context,
+    ) == "safe-fingerprint"
+    assert report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", changed, context,
+    ) == "safe-fingerprint"
+    assert material[0] == material[1]
+    encoded = json.dumps(material, sort_keys=True)
+    assert "private-" not in encoded and "candidate" not in encoded
+
+
+def test_failure_fingerprint_uses_only_report_type_for_non_dict_candidate(monkeypatch):
+    material = []
+
+    def capture(value):
+        material.append(value)
+        return "safe-fingerprint"
+
+    monkeypatch.setattr("repowatch.repository_analysis.digest", capture)
+    fingerprint = report_failure_fingerprint(
+        "scope_review_incomplete",
+        "same-checkpoint",
+        "private-candidate-text",
+        {},
+    )
+    assert fingerprint == "safe-fingerprint"
+    assert material == [{
+        "code": "scope_review_incomplete",
+        "report_type": "str",
+        "checkpoint": "same-checkpoint",
+    }]
+    assert "private-candidate-text" not in json.dumps(material)
+
+
+def test_report_progress_material_uses_a_fixed_label_for_invalid_scope_review():
+    context = {"task_scope": {
+        "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [],
+    }}
+    report = {"scope_review": {"exclusions": "private-invalid-structure"}}
+    material = report_progress_material(
+        "scope_review_incomplete", report, context,
+    )
+    assert material == {
+        "code": "scope_review_incomplete",
+        "scope_issues": [{
+            "exclusion_key": None,
+            "target_key": None,
+            "required_evidence": None,
+            "available_evidence": [],
+                "reason": "invalid_scope_review_structure",
+        }],
+    }
+
+
+def test_failure_fingerprint_ignores_scope_review_order_without_semantic_issues(
+        monkeypatch,
+):
+    context = {"task_scope": {
+        "version": 1,
+        "items": [
+            {"key": "first", "required_evidence": ["regression"]},
+            {"key": "second", "required_evidence": ["integration"]},
+        ],
+        "execution_limits": [],
+    }}
+    items = [{
+        "key": "first",
+        "outcome": "blocked",
+        "rationale": "private rationale",
+        "evidence": [],
+        "finding_ids": [],
+    }, {
+        "key": "second",
+        "outcome": "investigating",
+        "rationale": "different private rationale",
+        "evidence": [],
+        "finding_ids": [],
+    }]
+    first = {
+        "summary": "private summary one",
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "private review rationale one",
+            "items": items,
+            "exclusions": [],
+        },
+    }
+    second = {
+        "summary": "private summary two",
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "private review rationale two",
+            "items": list(reversed(items)),
+            "exclusions": [],
+        },
+    }
+    assert report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", first, context,
+    ) == report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", second, context,
+    )
+
+
+def test_repeated_invalid_scope_semantics_stops_without_replaying_forever():
+    class InvalidScopeReview(ReviewModel):
+        attempt = 0
+
+        async def get_response(self, *args, **kwargs):
+            result = await super().get_response(*args, **kwargs)
+            if result.output and result.output[0].type == "message":
+                content = result.output[0].content[0]
+                data = json.loads(content.text)
+                if data.get("scope_review"):
+                    self.attempt += 1
+                    data["scope_review"]["exclusions"] = [{
+                        "key": "excluded:app.py",
+                        "outcome": "required",
+                        "required_keys": ["fixture_behavior"],
+                        "rationale": (
+                            f"The excluded file needs client evidence ({self.attempt})."
+                        ),
+                        "evidence": [],
+                    }]
+                    content.text = json.dumps(data)
+            return result
+
+    events = []
+
+    def event(kind, value):
+        events.append((kind, value))
+        if kind == "scope_batch_check":
+            return []
+        if kind == "scope_batch_execute":
+            packet = json.loads(value)
+            item = packet["batches"][0][0]
+            return [{"version": 2, "items": [item], "execution_limits": [{
+                "key": "excluded:app.py", "reasons": ["windows_native"],
+            }]}]
+
+    context = {
+        "files": {"app.py": "print('ok')"},
+        "config": {},
+        "jobs": [],
+        "test_result": None,
+        "task_scope": {"version": 1, "items": []},
+    }
+    with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
+        asyncio.run(run_analysis(InvalidScopeReview(), context, event))
+    validations = [json.loads(value) for kind, value in events
+                   if kind == "scope_review_validation"]
+    assert validations == [{
+        "role": ROLES[-1],
+        "issues": [{
+            "exclusion_key": "excluded:app.py",
+            "target_key": "fixture_behavior",
+            "required_evidence": "client",
+            "available_evidence": ["regression"],
+            "reason": "missing_evidence_kind",
+        }],
+        "total": 1,
+        "truncated": False,
+    }]
+    assert sum(kind == "format_retry" for kind, _ in events) == 1
+
+
+def test_changed_review_checkpoint_allows_same_invalid_scope_semantics():
+    context = {
+        "task_scope": {
+            "version": 1,
+            "items": [{
+                "key": "fixture_behavior",
+                "required_evidence": ["regression"],
+            }],
+            "execution_limits": [{
+                "key": "excluded:app.py",
+                "reasons": ["windows_native"],
+            }],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Fixture only.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [{
+                "key": "excluded:app.py",
+                "outcome": "required",
+                "required_keys": ["fixture_behavior"],
+                "rationale": "Client evidence is required.",
+                "evidence": [],
+            }],
+        },
+    }
+
+    class RepeatingInvalidReview(Model):
+        calls = 0
+
+        async def get_response(self, system_instructions, input, **kwargs):
+            self.calls += 1
+            return ModelResponse(output=[ResponseOutputMessage(
+                id=f"repeat_{self.calls}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(review),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    model = RepeatingInvalidReview()
+    digests = ("checkpoint-one", "checkpoint-two", "checkpoint-two")
+    events = []
+    stage = StageModel(
+        model,
+        ROLES[-1],
+        StageBudget(),
+        lambda kind, value: events.append((kind, value)),
+        review_contract=lambda _review: "scope_review_incomplete",
+        scope_context=lambda: context,
+        checkpoint_digest=lambda: digests[model.calls - 1],
+        update_private_correction_checkpoint=lambda _value: None,
+    )
+    with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
+        asyncio.run(stage.get_response(
+            "Trusted final-review instructions",
+            json.dumps({"files": {"app.py": "print('ok')"}}),
+            tools=[],
+            handoffs=[],
+            output_schema=AgentOutputSchema(Review),
+            model_settings=ModelSettings(max_tokens=6000),
+        ))
+    assert model.calls == 3
+    assert sum(kind == "scope_review_validation" for kind, _ in events) == 2
+    assert sum(kind == "format_retry" for kind, _ in events) == 2
+
+
+def test_mapping_retry_resets_progress_when_checkpoint_changes(monkeypatch):
+    context = {
+        "task_scope": {
+            "version": 1,
+            "items": [{
+                "key": "fixture_behavior",
+                "required_evidence": ["regression"],
+            }],
+            "execution_limits": [],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Fixture only.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": ["missing_finding"],
+            }],
+            "exclusions": [],
+        },
+    }
+    mapping_issue = {
+        "section": "scope_items",
+        "item": 1,
+        "field": "finding_ids",
+        "reason": "unknown_finding_id",
+        "positions": [1],
+    }
+    monkeypatch.setattr(
+        "repowatch.repository_analysis.report_mapping_issues",
+        lambda *_args: [mapping_issue],
+    )
+
+    class RepeatingMapping(Model):
+        calls = 0
+
+        async def get_response(self, system_instructions, input, **kwargs):
+            self.calls += 1
+            schema = kwargs.get("output_schema")
+            properties = schema.json_schema().get("properties", {}) if schema else {}
+            payload = review
+            if "edits" in properties:
+                payload = {"edits": [{
+                    "section": "scope_items",
+                    "item": 1,
+                    "references": [],
+                    "new_findings": [],
+                    "unresolved": True,
+                    "rationale": "No persisted finding can be linked.",
+                }]}
+            return ModelResponse(output=[ResponseOutputMessage(
+                id=f"mapping_{self.calls}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(payload),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    model = RepeatingMapping()
+    digests = ("checkpoint-one", "checkpoint-two", "checkpoint-two")
+    events = []
+    stage = StageModel(
+        model,
+        ROLES[-1],
+        StageBudget(),
+        lambda kind, value: events.append((kind, value)),
+        review_contract=lambda _review: "scope_mapping_invalid",
+        scope_context=lambda: context,
+        checkpoint_digest=lambda: digests[model.calls - 1],
+        update_private_correction_checkpoint=lambda _value: None,
+    )
+    with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
+        asyncio.run(stage.get_response(
+            "Trusted final-review instructions",
+            json.dumps({"files": {"app.py": "print('ok')"}}),
+            tools=[],
+            handoffs=[],
+            output_schema=AgentOutputSchema(Review),
+            model_settings=ModelSettings(max_tokens=6000),
+        ))
+    assert model.calls == 3
+    assert sum(kind == "scope_mapping_validation" for kind, _ in events) == 2
+
+
+def test_scope_semantics_take_precedence_even_if_contract_reports_mapping_invalid():
+    context = {
+        "task_scope": {
+            "version": 1,
+            "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+            "execution_limits": [{"key": "excluded:app.py", "reasons": ["windows_native"]}],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Fixture only.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": ["missing_finding"],
+            }],
+            "exclusions": [{
+                "key": "excluded:app.py",
+                "outcome": "required",
+                "required_keys": ["fixture_behavior"],
+                "rationale": "Client evidence is required.",
+                "evidence": [],
+            }],
+        },
+    }
+
+    class MappingContractModel(Model):
+        calls = 0
+
+        async def get_response(self, system_instructions, input, **kwargs):
+            self.calls += 1
+            return ModelResponse(output=[ResponseOutputMessage(
+                id=f"mapping_{self.calls}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(review),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    events = []
+    stage = StageModel(
+        MappingContractModel(),
+        ROLES[-1],
+        StageBudget(),
+        lambda kind, value: events.append((kind, value)),
+        review_contract=lambda _review: "scope_mapping_invalid",
+        scope_context=lambda: context,
+        update_private_correction_checkpoint=lambda _value: None,
+    )
+    with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
+        asyncio.run(stage.get_response(
+            "Trusted final-review instructions",
+            json.dumps({"files": {"app.py": "print('ok')"}}),
+            tools=[],
+            handoffs=[],
+            output_schema=AgentOutputSchema(Review),
+            model_settings=ModelSettings(max_tokens=6000),
+        ))
+    assert sum(kind == "scope_review_validation" for kind, _ in events) == 1
+    assert not any(kind == "scope_mapping_validation" for kind, _ in events)
+
+
+def test_first_generic_review_correction_clears_any_stale_private_checkpoint():
+    context = {
+        "task_scope": {
+            "version": 1,
+            "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+            "execution_limits": [],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Fixture only.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [],
+        },
+    }
+
+    class GenericIssueModel(Model):
+        calls = 0
+
+        async def get_response(self, system_instructions, input, **kwargs):
+            self.calls += 1
+            return ModelResponse(output=[ResponseOutputMessage(
+                id=f"generic_{self.calls}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(review),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    contracts = iter(["scope_review_incomplete", None])
+    saved = []
+    model = GenericIssueModel()
+    stage = StageModel(
+        model,
+        ROLES[-1],
+        StageBudget(),
+        lambda *_: None,
+        review_contract=lambda _review: next(contracts),
+        scope_context=lambda: context,
+        update_private_correction_checkpoint=saved.append,
+    )
+    result = asyncio.run(stage.get_response(
+        "Trusted final-review instructions",
+        json.dumps({"files": {"app.py": "print('ok')"}}),
+        tools=[],
+        handoffs=[],
+        output_schema=AgentOutputSchema(Review),
+        model_settings=ModelSettings(max_tokens=6000),
+    ))
+    assert result.output
+    assert saved == [None]
+
+
+def test_scope_contract_mismatch_emits_value_free_diagnostic():
+    context = {
+        "task_scope": {
+            "version": 2,
+            "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+            "execution_limits": [],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Private candidate summary.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Private candidate rationale.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [],
+        },
+    }
+
+    class VersionMismatchModel(Model):
+        async def get_response(self, system_instructions, input, **kwargs):
+            return ModelResponse(output=[ResponseOutputMessage(
+                id="version_mismatch",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(review),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    events = []
+    stage = StageModel(
+        VersionMismatchModel(),
+        ROLES[-1],
+        StageBudget(),
+        lambda kind, value: events.append((kind, value)),
+        review_contract=lambda _review: "scope_review_incomplete",
+        scope_context=lambda: context,
+        update_private_correction_checkpoint=lambda _value: None,
+    )
+    with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
+        asyncio.run(stage.get_response(
+            "Trusted final-review instructions",
+            json.dumps({"files": {"app.py": "print('ok')"}}),
+            tools=[],
+            handoffs=[],
+            output_schema=AgentOutputSchema(Review),
+            model_settings=ModelSettings(max_tokens=6000),
+        ))
+    diagnostics = [
+        json.loads(value) for kind, value in events
+        if kind == "scope_review_validation"
+    ]
+    assert len(diagnostics) == 1
+    detail = diagnostics[0]["issues"][0]
+    assert detail == {
+        "reason": "scope_review_contract_mismatch",
+        "registered_version": 2,
+        "provided_version": 1,
+        "item_counts": {"registered": 1, "provided": 1},
+        "exclusion_counts": {"registered": 0, "provided": 0},
+    }
+    assert "Private candidate" not in json.dumps(diagnostics)
+
+
+def test_scope_review_incomplete_without_scope_context_fails_closed():
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Coverage is incomplete.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [],
+        },
+    }
+
+    class NoScopeContextModel(Model):
+        async def get_response(self, system_instructions, input, **kwargs):
+            return ModelResponse(output=[ResponseOutputMessage(
+                id="no_scope_context",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(review),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    stage = StageModel(
+        NoScopeContextModel(),
+        ROLES[-1],
+        StageBudget(),
+        lambda *_: None,
+        review_contract=lambda _review: "scope_review_incomplete",
+        update_private_correction_checkpoint=lambda _value: None,
+    )
+    with pytest.raises(AnalysisFailure, match="analysis_scope_context_missing"):
+        asyncio.run(stage.get_response(
+            "Trusted final-review instructions",
+            json.dumps({"files": {"app.py": "print('ok')"}}),
+            tools=[],
+            handoffs=[],
+            output_schema=AgentOutputSchema(Review),
+            model_settings=ModelSettings(max_tokens=6000),
+        ))
+
+
+def test_generic_review_correction_clears_stale_private_mapping_checkpoint():
+    context = {
+        "task_scope": {
+            "version": 1,
+            "items": [{
+                "key": "fixture_behavior",
+                "required_evidence": ["regression"],
+            }],
+            "execution_limits": [],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "The mapping still needs review.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": ["missing_finding"],
+            }],
+            "exclusions": [],
+        },
+    }
+
+    class ScopedModel(Model):
+        calls = 0
+
+        async def get_response(self, system_instructions, input, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                payload = {"edits": [{
+                    "section": "scope_items",
+                    "item": 1,
+                    "references": [],
+                    "new_findings": [],
+                    "unresolved": True,
+                    "rationale": "No persisted finding can be linked.",
+                }]}
+            else:
+                payload = review
+            return ModelResponse(output=[ResponseOutputMessage(
+                id=f"review_{self.calls}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(payload),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    contracts = iter(["scope_mapping_invalid", "scope_review_incomplete", None])
+    saved = []
+    model = ScopedModel()
+    stage = StageModel(
+        model,
+        ROLES[-1],
+        StageBudget(),
+        lambda *_: None,
+        review_contract=lambda _review: next(contracts),
+        scope_context=lambda: context,
+        update_private_correction_checkpoint=saved.append,
+    )
+    result = asyncio.run(stage.get_response(
+        "Trusted final-review instructions",
+        json.dumps({"files": {"app.py": "print('ok')"}}),
+        tools=[],
+        handoffs=[],
+        output_schema=AgentOutputSchema(Review),
+        model_settings=ModelSettings(max_tokens=6000),
+    ))
+    assert result.output
+    assert len(saved) == 3
+    assert saved[0]["kind"] == "scope_mapping_correction"
+    assert saved[1]["kind"] == "scope_mapping_correction"
+    assert saved[2] is None
 
 
 @pytest.mark.parametrize("persistent", [False, True])

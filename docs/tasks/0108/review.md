@@ -86,3 +86,24 @@
 
 真实目标仓库的修复发布闭环仍未完成；PR #109 仍需先合并，才能进入隔离实例的
 版本 9 重试和 `gateway-model-assistant` 实跑。
+
+## 主干合并与 PR 冲突解决
+
+- PR #109 原先与默认分支冲突。本轮合入最新主干 `64e5ff7`，该提交已经包含
+  PR #111（Issue #110）和 PR #113（Issue #112）。
+- 唯一冲突是 `docs/design.md` 与 `docs/implementation-plan.md` 的项目状态段落。
+  解决时同时保留 Issue #108 的未合并状态，并把 Issue #112 更新为已通过 PR
+  #113 合入默认分支、尚未部署。
+- 代码文件由 Git 自动合并，没有人工重写生产逻辑；合并后重新执行模型升级和
+  #110/#112 相邻恢复路径的联合回归。
+- `tests/test_model_escalation.py`：24 passed。
+- 模型升级、供应商、系统故障、报告恢复、范围审查、自动恢复和前置条件的联合
+  回归：226 passed、2 failed。
+- 两个失败仍是既有基线问题：
+  `test_resume_still_rejects_fabricated_evidence_and_persists_no_findings`
+  的请求次数断言从 3 变为 4，以及
+  `test_explicit_closing_with_missing_execution_never_calls_provider`
+  向 `StageModel` 传入不存在的 `force_closing`。它们都没有修改对应生产路径，
+  不计作本次冲突解决通过或本次引入的回归。
+- `ruff check`、`compileall`、`git diff --check`：通过。
+- 冲突解决提交仍需独立审查；PR #109 未合并、未部署，真实目标仓库验收仍待完成。

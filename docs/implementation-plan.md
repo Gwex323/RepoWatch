@@ -1,7 +1,7 @@
 # Implementation Plan
 
 Date: 2026-10-09
-Status updated: 2026-10-30
+Status updated: 2026-10-31
 
 ## Current Delivery Status
 
@@ -12,6 +12,16 @@ Status updated: 2026-10-30
   the branch is not merged and not deployed. Remaining offline acceptance items
   are not checked as passed. See
   [review](tasks/0108/review.md).
+
+- Issue #112 was merged into the default branch via PR #113 as merge commit
+  `0c771ae` on 2026-10-31. It aligns final-review and save-time scope exclusion
+  validation, makes malformed scope structures fail closed, binds retry
+  signatures to the current checkpoint, and stops deterministic no-progress
+  recovery with bounded, text-free failure events. Targeted validation passed
+  74 backend cases; Ruff, Python compilation and diff checks passed. Final
+  independent review passed with no blocking findings, including a real
+  save-conflict recovery regression. It is not deployed, port 8765 has not been
+  restarted, and the real analysis replay remains pending.
 
 - Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
   fix correction-state INSERT arity and classify SQLite database failures with

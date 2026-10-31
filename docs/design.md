@@ -2,7 +2,7 @@
 
 Status: local execution, real Issue intake, daily checks and controlled repair/publication
 implemented; central coordination is in staged development
-Updated: 2026-10-30
+Updated: 2026-10-31
 
 ## Goal
 
@@ -17,6 +17,17 @@ protection, durable repair-phase snapshots and failure-safe escalation audit
 passed the current review. Real target-repository acceptance is still pending;
 the branch is not merged and not deployed. See
 [Issue #108 review](tasks/0108/review.md).
+
+Issue #112 was merged into the default branch via PR #113 as merge commit
+`0c771ae` on 2026-10-31. Final-review validation now applies the same
+exclusion-evidence semantics as persistence, malformed correction structures
+fail closed, mapping and scope-review retry signatures include the current
+checkpoint, and repeated unchanged failures stop with a text-free fingerprint.
+Targeted validation passed 74 backend cases; Ruff, Python compilation and diff
+checks also passed. Final independent review passed with no blocking findings,
+including a real save-conflict recovery regression. It is not deployed, the
+production workbench on port 8765 has not been restarted, and the original real
+analysis has not yet been rerun against this branch.
 
 Issue #105 is implemented on `feature/correction-storage-105` (base `96f5105`):
 the correction-state INSERT explicitly binds six columns to six parameters;
