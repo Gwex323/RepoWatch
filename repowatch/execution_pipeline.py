@@ -276,6 +276,12 @@ class ExecutionPipeline:
         return self.get(env_id)
 
     def _cancel_pipeline(self, db, env_id, *, error="execution_cancelled"):
+        active_analyses = db.execute(
+            "SELECT id FROM repository_analyses WHERE env_id=? "
+            "AND status IN ('queued','running','waiting_model')",
+            (env_id,),
+        ).fetchall()
+        self._cancel_analyses(db, [row["id"] for row in active_analyses])
         pipeline = self._active_pipeline(db, env_id=env_id)
         if not pipeline:
             return
@@ -285,13 +291,35 @@ class ExecutionPipeline:
             "AND state IN ('queued','running')",
             (pipeline["id"],),
         )
-        if pipeline["analysis_id"]:
-            db.execute(
-                "UPDATE repository_analyses SET status='cancelled',error='analysis_cancelled',"
-                "version=version+1,updated=? WHERE id=? "
-                "AND status IN ('queued','running','waiting_model')",
-                (time.time(), pipeline["analysis_id"]),
-            )
+
+    def _cancel_analyses(self, db, analysis_ids):
+        if not analysis_ids:
+            return
+        now = time.time()
+        marks = ",".join("?" * len(analysis_ids))
+        analysis_ids = [row["id"] for row in db.execute(
+            f"SELECT id FROM repository_analyses WHERE id IN ({marks}) "
+            "AND status IN ('queued','running','waiting_model')", analysis_ids,
+        )]
+        if not analysis_ids:
+            return
+        marks = ",".join("?" * len(analysis_ids))
+        db.execute(
+            f"UPDATE repository_analyses SET status='cancelled',error='analysis_cancelled',"
+            f"lease=0,version=version+1,updated=? WHERE id IN ({marks})",
+            (now, *analysis_ids),
+        )
+        db.execute(
+            f"UPDATE analysis_report_recovery SET state='stopped',"
+            f"stop_reason='pipeline_stopped',last_error='analysis_cancelled',retry_after=0 "
+            f"WHERE analysis_id IN ({marks})",
+            analysis_ids,
+        )
+        db.executemany(
+            "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+            [(analysis_id, "analysis_cancelled", "pipeline_stopped", now)
+             for analysis_id in analysis_ids],
+        )
 
     def _pipeline_finished_job(self, db, job, error):
         if not job.get("pipeline_id"):
@@ -419,12 +447,7 @@ class ExecutionPipeline:
                     "SELECT * FROM execution_pipelines WHERE id=?", (pipeline["id"],)
                 ).fetchone()
                 if current["state"] not in ACTIVE:
-                    db.execute(
-                        "UPDATE repository_analyses SET status='cancelled',"
-                        "error='analysis_cancelled',version=version+1 WHERE id=? "
-                        "AND status IN ('queued','running','waiting_model')",
-                        (analysis_id,),
-                    )
+                    self._cancel_analyses(db, [analysis_id])
                     continue
                 analysis = db.execute(
                     "SELECT status,error FROM repository_analyses WHERE id=?", (analysis_id,)

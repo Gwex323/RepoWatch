@@ -26,6 +26,7 @@ from openai.types.responses import (
 from test_execution import Runtime, Source, prepare, service  # noqa: F401
 from test_github_accounts import TOKEN_A, MemoryVault, Remote
 
+from repowatch import report_scheduler
 from repowatch.analysis_model import (
     REQUEST_TIMEOUT,
     AnalysisModel,
@@ -41,6 +42,7 @@ from repowatch.analysis_model import (
 from repowatch.app import create_app
 from repowatch.repository_analysis import (
     ANALYSIS_TIMEOUT_SECONDS,
+    MAX_TIMEOUT_RETRIES,
     MAX_TURNS,
     REQUEST_TIMEOUT_SECONDS,
     RETRY_DELAY_SECONDS,
@@ -1166,7 +1168,7 @@ def test_timeout_retries_reuse_the_same_call(monkeypatch):
     assert ANALYSIS_TIMEOUT_SECONDS == 600
 
 
-def test_timeout_retries_continue_until_explicit_provider_stop(monkeypatch):
+def test_timeout_retries_survive_bursty_provider_stalls(monkeypatch):
     monkeypatch.setattr("repowatch.repository_analysis.RETRY_DELAY_SECONDS", 0)
     context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
     events, attempts = [], []
@@ -1183,6 +1185,24 @@ def test_timeout_retries_continue_until_explicit_provider_stop(monkeypatch):
         asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
     assert len(attempts) == 5
     assert sum(kind == "timeout_retry" for kind, _ in events) == 4
+
+
+def test_timeout_retries_have_a_durable_bound(monkeypatch):
+    monkeypatch.setattr("repowatch.repository_analysis.RETRY_DELAY_SECONDS", 0)
+    context = {"files": {"app.py": "print('ok')"}, "config": {}, "jobs": [], "test_result": None}
+    events, attempts = [], []
+    model = ReviewModel()
+
+    async def stalled(*args, **kwargs):
+        attempts.append(1)
+        raise TimeoutError("provider stalled")
+
+    model.get_response = stalled
+    with pytest.raises(AnalysisFailure, match="analysis_provider_timeout_exhausted"):
+        asyncio.run(run_analysis(model, context, lambda *item: events.append(item)))
+    assert len(attempts) == MAX_TIMEOUT_RETRIES + 1
+    assert sum(kind == "timeout_retry" for kind, _ in events) == MAX_TIMEOUT_RETRIES
+    assert any(kind == "timeout_retry_exhausted" for kind, _ in events)
 
 
 def test_timeout_retry_budget_is_shared_across_roles(monkeypatch):
@@ -1291,10 +1311,10 @@ def test_provider_ignoring_explicit_handoff_cannot_execute_source_tools():
         if kind == "handoff_retry":
             rejected.append(value)
             if len(rejected) == 3:
-                raise AnalysisFailure("analysis_handoff_not_followed")
+                raise AnalysisFailure("analysis_tool_arguments_exhausted")
     stage = StageModel(BrowsingModel(ignore_choice=True), ROLES[0], StageBudget(),
                        stop, force_closing=True)
-    with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
+    with pytest.raises(AnalysisFailure, match="analysis_tool_arguments_exhausted"):
         asyncio.run(stage.get_response("fixture", [], tools=[],
             handoffs=[SimpleNamespace(tool_name="transfer_to_problem_investigator")],
             model_settings=ModelSettings()))
@@ -1328,7 +1348,7 @@ def test_native_source_tools_handoffs_and_evidence_validation():
     assert report["findings"][0]["evidence"][0]["quote"] == "print('ok')"
     with pytest.raises(AnalysisFailure, match="analysis_report_invalid"):
         asyncio.run(run_analysis(ReviewModel(invented=True), context))
-    with pytest.raises(AnalysisFailure, match="analysis_handoff_not_followed"):
+    with pytest.raises(AnalysisFailure, match="analysis_tool_arguments_exhausted"):
         asyncio.run(run_analysis(ReviewModel(skip_review=True), context))
     empty = asyncio.run(run_analysis(ReviewModel(findings=False), context))
     assert empty["findings"] == []
@@ -1429,6 +1449,37 @@ def test_automatic_queue_waits_for_model_then_resumes_once(service):  # noqa: F8
     assert asyncio.run(analyses.tick()) is False
     assert len(analyses.list(env["id"])) == 1
     assert execution.store.dashboard()["findings"][0]["id"] == result["findings"][0]["id"]
+
+
+@pytest.mark.parametrize("status", ["cancelled", "completed"])
+def test_manual_analysis_creates_a_new_record_after_terminal_status(service, status):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analyses = Analyses(execution, Engine())
+    first = analyses.enqueue(env["id"], env["version"], manual=True)
+    with execution.store.connection() as db:
+        report_scheduler.begin(db, first, time.time())
+        db.execute(
+            "UPDATE repository_analyses SET status=?,error=? WHERE id=?",
+            (status, "analysis_cancelled" if status == "cancelled" else None, first),
+        )
+    second = analyses.enqueue(env["id"], env["version"], manual=True)
+    assert second != first
+    with execution.store.connection() as db:
+        rows = {
+            row["id"]: row["status"] for row in db.execute(
+                "SELECT id,status FROM repository_analyses WHERE env_id=?", (env["id"],),
+            )
+        }
+    assert rows == {first: "superseded", second: "queued"}
+    with execution.store.connection() as db:
+        recovery = db.execute(
+            "SELECT state,stop_reason,retry_after FROM analysis_report_recovery "
+            "WHERE analysis_id=?", (first,),
+        ).fetchone()
+    assert dict(recovery) == {
+        "state": "stopped", "stop_reason": "superseded", "retry_after": 0,
+    }
 
 
 def test_real_positive_feedback_is_retired_and_never_repairs(service):  # noqa: F811

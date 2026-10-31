@@ -11,6 +11,7 @@ from test_repository_analysis import prepare_tested
 
 from repowatch import report_scheduler
 from repowatch.repository_analysis import (
+    MAX_TIMEOUT_RETRIES,
     Analyses,
     report_diagnostics,
     report_failure_fingerprint,
@@ -370,6 +371,31 @@ def test_scope_review_history_does_not_stop_other_recoverable_errors(service):  
             (queued["id"],),
         ).fetchone()
     assert dict(recovery) == {"state": "waiting", "stop_reason": None}
+
+
+def test_exhausted_timeout_budget_stops_automatic_recovery(service):  # noqa: F811
+    analyses, _, queued = failed_review(service)
+    with analyses.store.connection() as db:
+        db.execute(
+            "UPDATE analysis_report_recovery SET retry_budget=? WHERE analysis_id=?",
+            (json.dumps({"used": MAX_TIMEOUT_RETRIES}), queued["id"]),
+        )
+        db.execute(
+            "UPDATE repository_analyses SET status='failed',"
+            "error='analysis_provider_timeout_exhausted',version=version+1 WHERE id=?",
+            (queued["id"],),
+        )
+        failed = db.execute(
+            "SELECT * FROM repository_analyses WHERE id=?", (queued["id"],),
+        ).fetchone()
+        assert not analyses.schedule_report_recovery(
+            db, failed, "analysis_provider_timeout_exhausted", time.time(),
+        )
+        recovery = db.execute(
+            "SELECT state,stop_reason FROM analysis_report_recovery WHERE analysis_id=?",
+            (queued["id"],),
+        ).fetchone()
+    assert dict(recovery) == {"state": "stopped", "stop_reason": "retry_exhausted"}
 
 
 def test_checkpoint_change_allows_scope_review_recovery(service):  # noqa: F811

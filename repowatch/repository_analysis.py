@@ -97,6 +97,8 @@ MAX_TURNS = None
 ANALYSIS_TIMEOUT_SECONDS = 600  # Initial lease; active workers renew it.
 FINALIZATION_RESERVE_SECONDS = MIN_FINALIZATION_RESERVE_SECONDS
 RETRY_DELAY_SECONDS = 2
+MAX_TIMEOUT_RETRIES = 4
+MAX_TOOL_ARGUMENT_CORRECTIONS = 2
 EXCLUDED = {".git", ".venv", "venv", "node_modules", "dist", "build", "data", "__pycache__"}
 SUFFIXES = {".py", ".go", ".ts", ".tsx", ".js", ".jsx", ".md", ".toml", ".yaml",
             ".yml", ".json", ".ini", ".cfg"}
@@ -273,7 +275,7 @@ class StageModel(Model):
                  tool_parameter_models=None, review_contract=None, evidence_sources=None,
                  scope_context=None, scope_batch=None, resume_correction=None,
                  checkpoint_digest=None, update_private_correction_checkpoint=None,
-                 redact_candidate=redact_values):
+                 redact_candidate=redact_values, force_closing=False):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
         self.deadline = deadline
@@ -281,7 +283,7 @@ class StageModel(Model):
         self.review_evidence = review_evidence
         self.required_read = required_read
         self.separate_schema_from_tools = separate_schema_from_tools
-        self.force_closing = False
+        self.force_closing = force_closing
         self.prepare_review = prepare_review
         self.finalization_reserve = finalization_reserve
         self.tool_parameter_models = tool_parameter_models or {}
@@ -306,6 +308,9 @@ class StageModel(Model):
                 "targets": [{"section": section, "item": item, "issues": issues}
                             for (section, item), issues in correction.targets.items()],
             })
+
+    def tool_corrections_remaining(self):
+        return max(0, MAX_TOOL_ARGUMENT_CORRECTIONS - self.retries.tool_arguments_used)
 
     async def request(self, system_instructions, input, *, request_timeout=None, **kwargs):
         """Every delegated call, including closing corrections, reserves durable quota."""
@@ -574,16 +579,22 @@ class StageModel(Model):
                         raise AnalysisFailure("analysis_tool_not_allowed")
                 if closing and handoff_name:
                     check = self.handoff_validation(response, handoff_name)
+                    corrections_remaining = self.tool_corrections_remaining()
                     recovery = (
                         "not_needed" if check["accepted"] else
                         "argument_correction_active" if tool_repair is not None else "retry"
                     )
-                    retry = recovery == "retry"
-                    check.update(recoverable=retry, recovery=recovery, corrections_remaining=None)
+                    retry = recovery == "retry" and corrections_remaining > 0
+                    check.update(recoverable=retry, recovery=recovery,
+                                 corrections_remaining=corrections_remaining)
                     self.event("handoff_validation", json.dumps(check))
                     if not check["accepted"]:
                         if not retry:
-                            raise AnalysisFailure("analysis_handoff_not_followed")
+                            raise AnalysisFailure(
+                                "analysis_tool_arguments_exhausted"
+                                if recovery == "retry" and corrections_remaining == 0
+                                else "analysis_handoff_not_followed"
+                            )
                         handoff_retried = True
                         self.retries.tool_arguments_used += 1
                         self.event("handoff_retry", self.role)
@@ -625,9 +636,11 @@ class StageModel(Model):
                             detail["reasoning_tokens"] = reasoning_tokens
                     retry = True
                     expansion_blocked = at_limit and tokens >= MAX_OUTPUT_TOKENS
+                    corrections_remaining = self.tool_corrections_remaining()
+                    retry = corrections_remaining > 0
                     detail.update(
                         role=self.role, recoverable=retry and not expansion_blocked,
-                        corrections_remaining=None,
+                        corrections_remaining=corrections_remaining,
                     )
                     self.event("tool_arguments_invalid", json.dumps(detail))
                     if not retry:
@@ -699,19 +712,25 @@ class StageModel(Model):
                         and check["reason"] == "wrong_tool"
                         and check["matching"] == 0
                     )
-                    retry = (check["reason"] == "missing_call" and tool_repair is None)
-                    retry = retry or scope_wrong_tool
+                    retryable = (check["reason"] == "missing_call" and tool_repair is None)
+                    retryable = retryable or scope_wrong_tool
+                    corrections_remaining = self.tool_corrections_remaining()
+                    retry = retryable and corrections_remaining > 0
                     recovery = (
                         "not_needed" if check["accepted"] else "retry" if retry
                         else "request_mismatch" if check["reason"] != "missing_call"
                         else "argument_correction_active"
                     )
                     check.update(recoverable=retry, recovery=recovery,
-                                 corrections_remaining=None if retry else 0)
+                                 corrections_remaining=corrections_remaining)
                     self.event("required_read_validation", json.dumps(check))
                     if not check["accepted"]:
                         if not retry:
-                            raise AnalysisFailure(f"analysis_{read_kind}_read_not_followed")
+                            raise AnalysisFailure(
+                                "analysis_tool_arguments_exhausted"
+                                if retryable and corrections_remaining == 0
+                                else f"analysis_{read_kind}_read_not_followed"
+                            )
                         required_retried = True
                         self.retries.required_read_used += 1
                         self.retries.tool_arguments_used += 1
@@ -938,6 +957,9 @@ class StageModel(Model):
                         raise AnalysisFailure("analysis_finalization_not_followed")
                 break
             except (APITimeoutError, TimeoutError):
+                if self.retries.used >= MAX_TIMEOUT_RETRIES:
+                    self.event("timeout_retry_exhausted", self.role)
+                    raise AnalysisFailure("analysis_provider_timeout_exhausted") from None
                 self.retries.used += 1
                 self.event("analysis_retry_budget", json.dumps(asdict(self.retries)))
                 if (tool_repair is None and review_schema is not None
@@ -1669,7 +1691,7 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
         "Tool-call arguments must match each tool's exact JSON object schema. If a call batch "
         "is rejected for invalid arguments, none of that batch executed. Correct it from the "
         "same real observations; never fabricate reads, results or handoffs. Correction "
-        "usage is retained across all roles without a cumulative quota. "
+        "usage is retained across all roles and is limited to two corrections. "
         "Read source files and execution records before concluding. Passing tests are not proof "
         "that no bugs exist. Missing credentials or blocked networking are configuration limits, "
         "not automatically project bugs. Report only concrete suspected behavioral defects with "
@@ -1992,6 +2014,10 @@ class Analyses:
             reason = "pipeline_stopped"
         if not reason and code == "analysis_report_no_progress":
             reason = "no_progress"
+        if not reason and code == "analysis_provider_timeout_exhausted":
+            budget = json.loads(saved["retry_budget"] or "{}")
+            if budget.get("used", 0) >= MAX_TIMEOUT_RETRIES:
+                reason = "retry_exhausted"
         context = json.loads(row["context"] or "{}")
         if not reason and code not in report_scheduler.RECOVERABLE:
             reason = "non_recoverable"
@@ -2115,11 +2141,25 @@ class Analyses:
                 digest, [job["id"] for job in jobs], pipeline_id, issue_id
             )
             old = db.execute(
-                "SELECT id FROM repository_analyses WHERE env_id=? AND trigger_key=?",
+                "SELECT id,status,trigger_key FROM repository_analyses "
+                "WHERE env_id=? AND trigger_key=?",
                 (env_id, trigger),
             ).fetchone()
             if old:
-                return old["id"]
+                if (pipeline_id or not manual
+                        or old["status"] in ("queued", "running", "waiting_model")):
+                    return old["id"]
+                db.execute(
+                    "UPDATE repository_analyses SET status='superseded',trigger_key=?,"
+                    "version=version+1,updated=? WHERE id=?",
+                    (f"{old['trigger_key']}:{old['id']}", time.time(), old["id"]),
+                )
+                db.execute(
+                    "UPDATE analysis_report_recovery SET state='stopped',"
+                    "stop_reason='superseded',retry_after=0 WHERE analysis_id=? "
+                    "AND state IN ('active','waiting')",
+                    (old["id"],),
+                )
             pending = db.execute(
                 "SELECT id,status,context FROM repository_analyses WHERE env_id=? "
                 "AND status IN ('queued','running','waiting_model')", (env_id,),

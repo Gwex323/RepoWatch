@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+import time
 from unittest.mock import patch
 
 import pytest
 from test_execution import Runtime, Source, prepare, service  # noqa: F401
 from test_repository_analysis import Engine
 
+from repowatch import report_scheduler
 from repowatch.execution import Execution
 from repowatch.repository_analysis import Analyses
 from repowatch.repository_source import discover
@@ -247,8 +249,65 @@ def test_explicit_cancel_during_analysis_cannot_be_overwritten_by_late_model_res
     result = execution.get(env["id"])
     assert result["pipeline"]["state"] == "cancelled" and completed
     with execution.store.connection() as db:
-        assert db.execute("SELECT status FROM repository_analyses").fetchone()[0] == "cancelled"
+        analysis = db.execute(
+            "SELECT status,error,lease FROM repository_analyses"
+        ).fetchone()
+        recovery = db.execute(
+            "SELECT state,stop_reason,retry_after FROM analysis_report_recovery"
+        ).fetchone()
+        cancellation = db.execute(
+            "SELECT kind,agent FROM analysis_events "
+            "WHERE kind='analysis_cancelled'",
+        ).fetchone()
         assert db.execute("SELECT count(*) FROM analysis_findings").fetchone()[0] == 0
+    assert dict(analysis) == {
+        "status": "cancelled", "error": "analysis_cancelled", "lease": 0,
+    }
+    assert dict(recovery) == {
+        "state": "stopped", "stop_reason": "pipeline_stopped", "retry_after": 0,
+    }
+    assert dict(cancellation) == {
+        "kind": "analysis_cancelled", "agent": "pipeline_stopped",
+    }
+
+
+def test_environment_stop_cancels_an_orphan_analysis_and_its_recovery(pipeline):
+    execution, repo, runtime, analyses = pipeline
+    env = prepare((execution, repo, runtime))
+    execution.action(env["id"], env["version"], "test")
+    tick(execution)
+    env = execution.get(env["id"])
+    analysis_id = analyses.enqueue(env["id"], env["version"], manual=True)
+    with execution.store.connection() as db:
+        db.execute(
+            "UPDATE repository_analyses SET status='running',lease=? WHERE id=?",
+            (time.time() + 300, analysis_id),
+        )
+        report_scheduler.begin(db, analysis_id, time.time())
+    execution.action(env["id"], env["version"], "stop")
+    with execution.store.connection() as db:
+        analysis = db.execute(
+            "SELECT status,error,lease FROM repository_analyses WHERE id=?", (analysis_id,),
+        ).fetchone()
+        recovery = db.execute(
+            "SELECT state,stop_reason,last_error,retry_after "
+            "FROM analysis_report_recovery WHERE analysis_id=?", (analysis_id,),
+        ).fetchone()
+        cancellation = db.execute(
+            "SELECT kind,agent FROM analysis_events "
+            "WHERE analysis_id=? AND kind='analysis_cancelled'",
+            (analysis_id,),
+        ).fetchone()
+    assert dict(analysis) == {
+        "status": "cancelled", "error": "analysis_cancelled", "lease": 0,
+    }
+    assert dict(recovery) == {
+        "state": "stopped", "stop_reason": "pipeline_stopped",
+        "last_error": "analysis_cancelled", "retry_after": 0,
+    }
+    assert dict(cancellation) == {
+        "kind": "analysis_cancelled", "agent": "pipeline_stopped",
+    }
 
 
 def test_saved_owner_start_configuration_is_used_on_later_download(pipeline):

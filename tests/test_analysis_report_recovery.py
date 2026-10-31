@@ -227,7 +227,8 @@ def test_resume_still_rejects_fabricated_evidence_and_persists_no_findings(servi
     assert result["status"] == "queued"
     assert result["automatic_recovery"]["state"] == "waiting"
     assert result["report"] is None and not result["findings"]
-    assert len(engine.requests) == 3
+    # One candidate plus three bounded evidence-correction requests.
+    assert len(engine.requests) == 4
 
 
 def test_legacy_failure_without_checkpoint_restarts_full_flow(service):  # noqa: F811

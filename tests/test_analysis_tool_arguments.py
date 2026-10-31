@@ -211,17 +211,23 @@ def test_valid_json_at_cap_and_schema_errors_do_not_trigger_expansion():
     assert "items[0].required_evidence[0]" in delegate.requests[1]["system_instructions"]
 
 
-def test_correction_budget_is_shared_across_roles_and_stops_without_execution():
+def test_correction_budget_is_shared_across_roles_and_bounded():
     retries = RetryBudget()
+    events = []
     bad = response(("read_source_file", '{"path":'))
     first = Script([bad, bad, response(("read_source_file", {
         "path": "app.py", "start_line": 1, "end_line": 1}))])
-    asyncio.run(call(stage(first, retries=retries)))
+    asyncio.run(call(stage(first, events=events, retries=retries)))
     assert retries.tool_arguments_used == 2
     second = Script([bad, response(("read_source_file", {
         "path": "app.py", "start_line": 1, "end_line": 1}))])
-    asyncio.run(call(stage(second, role=ROLES[1], retries=retries)))
-    assert len(second.requests) == 2 and retries.tool_arguments_used == 3
+    with pytest.raises(AnalysisFailure, match="analysis_tool_arguments_exhausted"):
+        asyncio.run(call(stage(second, role=ROLES[1], events=events, retries=retries)))
+    assert len(second.requests) == 1 and retries.tool_arguments_used == 2
+    details = [json.loads(value) for kind, value in events
+               if kind == "tool_arguments_invalid"]
+    assert [detail["corrections_remaining"] for detail in details] == [2, 1, 0]
+    assert details[-1]["recoverable"] is False
 
 
 def test_expansion_exhaustion_is_terminal_in_diagnostics(monkeypatch):
