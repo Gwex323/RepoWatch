@@ -434,7 +434,7 @@ def test_large_failure_budget_is_dropped_before_the_fixed_event_limit():
     }
     encoded = failure_event_payload(details)
     saved = json.loads(encoded)
-    assert len(encoded) <= 1000
+    assert len(encoded.encode("utf-8")) <= 1000
     assert saved["progress_fingerprint"] == fingerprints
     assert "budget" not in saved
 
@@ -449,7 +449,7 @@ def test_failure_payload_falls_back_to_bounded_scalars_without_truncating_json()
     }
     encoded = failure_event_payload(details)
     saved = json.loads(encoded)
-    assert len(encoded) <= 1000
+    assert len(encoded.encode("utf-8")) <= 1000
     assert saved["code"] == details["code"]
     assert saved["stage"] == details["stage"]
     assert saved["progress_fingerprint"] == fingerprints
@@ -468,7 +468,7 @@ def test_failure_payload_has_a_hard_bound_for_every_optional_text_field():
     details["elapsed_seconds"] = 10 ** 2000
     encoded = failure_event_payload(details)
     saved = json.loads(encoded)
-    assert len(encoded) <= 1000
+    assert len(encoded.encode("utf-8")) <= 1000
     assert len(saved["code"]) <= 128
     assert len(saved["stage"]) <= 128
     assert len(saved["checkpoint_digest"]) <= 64
@@ -758,6 +758,31 @@ def test_scope_feedback_hashes_unregistered_candidate_keys():
     encoded = json.dumps(feedback)
     assert "candidate_private" not in encoded
     assert "candidate_private" not in report_scope_feedback(issues, context)
+
+
+def test_scope_feedback_filters_untrusted_evidence_labels():
+    context = {"task_scope": {
+        "items": [{"key": "registered_item", "required_evidence": ["client"]}],
+        "execution_limits": [{"key": "registered_exclusion", "reasons": ["gui"]}],
+    }}
+    issues = [{
+        "exclusion_key": "registered_exclusion",
+        "target_key": "registered_item",
+        "required_evidence": "candidate_required_private",
+        "available_evidence": [
+            "integration", "candidate_available_private", {"private": "candidate_object"},
+        ],
+        "reason": "missing_evidence_kind",
+    }]
+    feedback = bounded_scope_issues(issues, context)
+    detail = feedback["issues"][0]
+    assert detail["required_evidence"] == "type:invalid"
+    assert detail["available_evidence"] == [
+        "integration", "type:invalid", "type:invalid",
+    ]
+    encoded = json.dumps(feedback, ensure_ascii=False)
+    assert "candidate_" not in encoded
+    assert "candidate_" not in report_scope_feedback(issues, context)
 
 
 def test_scope_review_issues_deduplicates_required_keys():

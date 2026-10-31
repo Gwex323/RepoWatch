@@ -1212,6 +1212,7 @@ def report_scope_issues(review, context):
 
 
 SCOPE_FEEDBACK_ISSUE_LIMIT = 6
+SCOPE_EVIDENCE_KINDS = frozenset(("client", "integration", "regression"))
 
 
 def _safe_scope_key(key, registered):
@@ -1221,6 +1222,16 @@ def _safe_scope_key(key, registered):
     if key in registered:
         return key
     return "sha256:" + hashlib.sha256(key.encode()).hexdigest()
+
+
+def _safe_evidence_kind(value):
+    return value if isinstance(value, str) and value in SCOPE_EVIDENCE_KINDS else "type:invalid"
+
+
+def _safe_available_evidence(value):
+    if not isinstance(value, (list, tuple)):
+        return ["type:invalid"]
+    return [_safe_evidence_kind(item) for item in value[:3]]
 
 
 def bounded_scope_issues(issues, context=None):
@@ -1238,6 +1249,12 @@ def bounded_scope_issues(issues, context=None):
         if detail.get("target_key") is not None:
             detail["target_key"] = _safe_scope_key(
                 detail["target_key"], registered_items,
+            )
+        if detail.get("required_evidence") is not None:
+            detail["required_evidence"] = _safe_evidence_kind(detail["required_evidence"])
+        if "available_evidence" in detail:
+            detail["available_evidence"] = _safe_available_evidence(
+                detail["available_evidence"],
             )
         sanitized.append(detail)
     return {
@@ -1343,14 +1360,25 @@ def report_failure_fingerprint(code, checkpoint, report, context):
 FAILURE_EVENT_DETAIL_LIMIT = 1000
 
 
+def _truncate_utf8(value, max_bytes):
+    """Return valid text whose UTF-8 representation does not exceed max_bytes."""
+    encoded = str(value).encode("utf-8", errors="replace")[:max_bytes]
+    return encoded.decode("utf-8", errors="ignore")
+
+
+def _bounded_json(details):
+    encoded = json.dumps(details, ensure_ascii=False, separators=(",", ":"))
+    return encoded if len(encoded.encode("utf-8")) <= FAILURE_EVENT_DETAIL_LIMIT else None
+
+
 def failure_event_payload(details):
     """Serialize bounded diagnostics without ever relying on JSON truncation."""
     candidates = [details]
     if "budget" in details:
         candidates.append({key: value for key, value in details.items() if key != "budget"})
     for candidate in candidates:
-        encoded = json.dumps(candidate)
-        if len(encoded) <= FAILURE_EVENT_DETAIL_LIMIT:
+        encoded = _bounded_json(candidate)
+        if encoded is not None:
             return encoded
 
     fallback = {}
@@ -1360,30 +1388,25 @@ def failure_event_payload(details):
     ):
         value = details.get(key)
         if isinstance(value, str):
-            value = value[:64 if key in (
-                "checkpoint_digest", "progress_fingerprint",
-            ) else 128]
+            value = _truncate_utf8(
+                value,
+                64 if key in ("checkpoint_digest", "progress_fingerprint") else 128,
+            )
         elif not isinstance(value, (int, float, bool)):
             continue
         fallback[key] = value
-    encoded = json.dumps(fallback, ensure_ascii=False, separators=(",", ":"))
-    if len(encoded) <= FAILURE_EVENT_DETAIL_LIMIT:
+    encoded = _bounded_json(fallback)
+    if encoded is not None:
         return encoded
     minimal = {
-        "code": str(details.get("code", ""))[:64],
-        "stage": str(details.get("stage", ""))[:64],
-        "checkpoint_digest": str(details.get("checkpoint_digest", ""))[:64],
-        "progress_fingerprint": str(details.get("progress_fingerprint", ""))[:64],
+        "code": _truncate_utf8(details.get("code", ""), 64),
+        "stage": _truncate_utf8(details.get("stage", ""), 64),
+        "checkpoint_digest": _truncate_utf8(details.get("checkpoint_digest", ""), 64),
+        "progress_fingerprint": _truncate_utf8(
+            details.get("progress_fingerprint", ""), 64,
+        ),
     }
-    encoded = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
-    if len(encoded) <= FAILURE_EVENT_DETAIL_LIMIT:
-        return encoded
-    return json.dumps({
-        "code": minimal["code"],
-        "stage": minimal["stage"],
-        "checkpoint_digest": minimal["checkpoint_digest"],
-        "progress_fingerprint": minimal["progress_fingerprint"],
-    }, ensure_ascii=False, separators=(",", ":"))
+    return _bounded_json(minimal)
 
 
 def scope_report_issue(review, context):
