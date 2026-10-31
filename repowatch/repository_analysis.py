@@ -770,7 +770,7 @@ class StageModel(Model):
                                 and self.scope_context is not None):
                             context = self.scope_context()
                             scope_issues = report_scope_issues(review, context)
-                        if issue == "scope_mapping_invalid" and scope_issues:
+                        if scope_issues:
                             issue = "scope_review_incomplete"
                         if (issue == "scope_mapping_invalid"
                                 and self.scope_context is not None):
@@ -1369,6 +1369,7 @@ def failure_event_payload(details):
         return encoded
     return json.dumps({
         "code": minimal["code"],
+        "stage": minimal["stage"],
         "checkpoint_digest": minimal["checkpoint_digest"],
         "progress_fingerprint": minimal["progress_fingerprint"],
     }, ensure_ascii=False, separators=(",", ":"))
