@@ -1052,6 +1052,107 @@ def test_changed_review_checkpoint_allows_same_invalid_scope_semantics():
     assert sum(kind == "format_retry" for kind, _ in events) == 2
 
 
+def test_mapping_retry_resets_progress_when_checkpoint_changes(monkeypatch):
+    context = {
+        "task_scope": {
+            "version": 1,
+            "items": [{
+                "key": "fixture_behavior",
+                "required_evidence": ["regression"],
+            }],
+            "execution_limits": [],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "Fixture only.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": ["missing_finding"],
+            }],
+            "exclusions": [],
+        },
+    }
+    mapping_issue = {
+        "section": "scope_items",
+        "item": 1,
+        "field": "finding_ids",
+        "reason": "unknown_finding_id",
+        "positions": [1],
+    }
+    monkeypatch.setattr(
+        "repowatch.repository_analysis.report_mapping_issues",
+        lambda *_args: [mapping_issue],
+    )
+
+    class RepeatingMapping(Model):
+        calls = 0
+
+        async def get_response(self, system_instructions, input, **kwargs):
+            self.calls += 1
+            schema = kwargs.get("output_schema")
+            properties = schema.json_schema().get("properties", {}) if schema else {}
+            payload = review
+            if "edits" in properties:
+                payload = {"edits": [{
+                    "section": "scope_items",
+                    "item": 1,
+                    "references": [],
+                    "new_findings": [],
+                    "unresolved": True,
+                    "rationale": "No persisted finding can be linked.",
+                }]}
+            return ModelResponse(output=[ResponseOutputMessage(
+                id=f"mapping_{self.calls}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(payload),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    model = RepeatingMapping()
+    digests = ("checkpoint-one", "checkpoint-two", "checkpoint-two")
+    events = []
+    stage = StageModel(
+        model,
+        ROLES[-1],
+        StageBudget(),
+        lambda kind, value: events.append((kind, value)),
+        review_contract=lambda _review: "scope_mapping_invalid",
+        scope_context=lambda: context,
+        checkpoint_digest=lambda: digests[model.calls - 1],
+        update_private_correction_checkpoint=lambda _value: None,
+    )
+    with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
+        asyncio.run(stage.get_response(
+            "Trusted final-review instructions",
+            json.dumps({"files": {"app.py": "print('ok')"}}),
+            tools=[],
+            handoffs=[],
+            output_schema=AgentOutputSchema(Review),
+            model_settings=ModelSettings(max_tokens=6000),
+        ))
+    assert model.calls == 3
+    assert sum(kind == "scope_mapping_validation" for kind, _ in events) == 2
+
+
 def test_scope_semantics_take_precedence_even_if_contract_reports_mapping_invalid():
     context = {
         "task_scope": {

@@ -775,7 +775,14 @@ class StageModel(Model):
                         if (issue == "scope_mapping_invalid"
                                 and self.scope_context is not None):
                             mapping = report_mapping_issues(review, context)
-                            signature = digest({"issue": issue, "mapping": mapping})
+                            signature = digest({
+                                "issue": issue,
+                                "mapping": mapping,
+                                "checkpoint": (
+                                    self.checkpoint_digest()
+                                    if self.checkpoint_digest else None
+                                ),
+                            })
                             if signature in scope_mapping_attempts:
                                 raise AnalysisFailure("analysis_report_no_progress")
                             scope_mapping_attempts.add(signature)
@@ -842,6 +849,8 @@ class StageModel(Model):
                             )
                             self.event("report_finalization", self.role)
                         if self.update_private_correction_checkpoint is not None:
+                            # Persist the clear before discarding in-memory correction.
+                            # Any storage failure aborts this retry without continuing.
                             self.update_private_correction_checkpoint(None)
                         report_correction = None
                         correction = (
