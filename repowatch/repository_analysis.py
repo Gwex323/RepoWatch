@@ -487,8 +487,10 @@ class StageModel(Model):
         budget.turns += 1
         self.event("model_call", self.role)
         handoff_retried = required_retried = False
-        scope_review_attempts = set()
         scope_mapping_attempts = set()
+        # Scope-review signatures include the saved checkpoint digest, so any
+        # repeat here is under unchanged evidence rather than real progress.
+        scope_review_attempts = set()
         correction = ""
         tool_correction = ""
         tool_repair = None
@@ -1344,7 +1346,7 @@ def failure_event_payload(details):
 
     fallback = {}
     for key in (
-        "code", "stage", "exception_type", "progress_fingerprint",
+        "code", "stage", "exception_type", "checkpoint_digest", "progress_fingerprint",
         "sqlite_errorcode", "http_status", "elapsed_seconds",
     ):
         value = details.get(key)
@@ -1359,6 +1361,7 @@ def failure_event_payload(details):
     minimal = {
         "code": str(details.get("code", ""))[:64],
         "stage": str(details.get("stage", ""))[:64],
+        "checkpoint_digest": str(details.get("checkpoint_digest", ""))[:128],
         "progress_fingerprint": str(details.get("progress_fingerprint", ""))[:128],
     }
     encoded = json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
@@ -1366,6 +1369,7 @@ def failure_event_payload(details):
         return encoded
     return json.dumps({
         "code": minimal["code"],
+        "checkpoint_digest": minimal["checkpoint_digest"],
         "progress_fingerprint": minimal["progress_fingerprint"],
     }, ensure_ascii=False, separators=(",", ":"))
 
@@ -1927,9 +1931,15 @@ class Analyses:
             reason = "basis_changed"
         if not reason and not self.review_checkpoint(db, row, context, self.model_identity()):
             reason = "checkpoint_invalid"
-        if (not reason and code == "scope_review_incomplete"
-                and report_scheduler.repeated_no_progress(db, row["id"], code)):
-            reason = "no_progress"
+        if not reason and code == "scope_review_incomplete":
+            checkpoint = db.execute(
+                "SELECT payload_digest FROM analysis_review_checkpoints "
+                "WHERE analysis_id=?", (row["id"],),
+            ).fetchone()
+            if checkpoint and report_scheduler.repeated_no_progress(
+                db, row["id"], code, checkpoint["payload_digest"],
+            ):
+                reason = "no_progress"
         pipeline_id = context.get("pipeline_id")
         if not reason and pipeline_id and not db.execute(
             "SELECT 1 FROM execution_pipelines p JOIN github_configuration c "
@@ -2761,6 +2771,8 @@ class Analyses:
                 review_candidate,
                 context,
             )
+            if checkpoint and checkpoint["payload_digest"]:
+                details["checkpoint_digest"] = checkpoint["payload_digest"]
             if progress_fingerprint:
                 details["progress_fingerprint"] = progress_fingerprint
             if saved_budget:

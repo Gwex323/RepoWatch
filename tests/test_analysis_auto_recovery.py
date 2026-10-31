@@ -16,6 +16,8 @@ from repowatch.repository_analysis import (
     report_failure_fingerprint,
 )
 
+CHECKPOINT_DIGEST = "checkpoint-safe-hash"
+
 
 def failed_review(execution_fixture):
     execution, _, _ = execution_fixture
@@ -49,7 +51,7 @@ def test_json_diagnostics_are_actionable_and_never_store_candidate_text():
     assert "candidate-private-text" not in json.dumps(details)
 
 
-def test_repeated_failure_fingerprint_requires_two_identical_consecutive_failures(service):  # noqa: F811
+def test_repeated_failure_fingerprint_requires_two_occurrences(service):  # noqa: F811
     execution, _, _ = service
     env = prepare_tested(service)
     analysis_id = Analyses(execution, RecoveryEngine()).enqueue(env["id"])
@@ -59,21 +61,23 @@ def test_repeated_failure_fingerprint_requires_two_identical_consecutive_failure
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
                 (analysis_id, "failure", json.dumps({
                     "code": "scope_review_incomplete",
+                    "checkpoint_digest": CHECKPOINT_DIGEST,
                     "progress_fingerprint": fingerprint,
                 }), time.time()),
             )
         assert report_scheduler.repeated_no_progress(
-            db, analysis_id, "scope_review_incomplete",
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
         db.execute(
             "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
             (analysis_id, "failure", json.dumps({
                 "code": "scope_review_incomplete",
+                "checkpoint_digest": CHECKPOINT_DIGEST,
                 "progress_fingerprint": "changed-safe-hash",
             }), time.time()),
         )
         assert not report_scheduler.repeated_no_progress(
-            db, analysis_id, "scope_review_incomplete",
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
 
 
@@ -87,27 +91,63 @@ def test_repeated_no_progress_counts_only_the_current_error_code(service):  # no
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
                 (analysis_id, "failure", json.dumps({
                     "code": code,
+                    "checkpoint_digest": CHECKPOINT_DIGEST,
                     "progress_fingerprint": "shared-safe-hash",
                 }), time.time()),
             )
         assert not report_scheduler.repeated_no_progress(
-            db, analysis_id, "scope_review_incomplete",
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
         assert not report_scheduler.repeated_no_progress(
-            db, analysis_id, "analysis_provider_timeout_exhausted",
+            db, analysis_id, "analysis_provider_timeout_exhausted", CHECKPOINT_DIGEST,
         )
         db.execute(
             "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
             (analysis_id, "failure", json.dumps({
                 "code": "scope_review_incomplete",
+                "checkpoint_digest": CHECKPOINT_DIGEST,
                 "progress_fingerprint": "shared-safe-hash",
             }), time.time()),
         )
         assert report_scheduler.repeated_no_progress(
-            db, analysis_id, "scope_review_incomplete",
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
         assert not report_scheduler.repeated_no_progress(
-            db, analysis_id, "analysis_provider_timeout_exhausted",
+            db, analysis_id, "analysis_provider_timeout_exhausted", CHECKPOINT_DIGEST,
+        )
+
+
+def test_repeated_no_progress_is_scoped_to_the_current_checkpoint(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analysis_id = Analyses(execution, RecoveryEngine()).enqueue(env["id"])
+    with execution.store.connection() as db:
+        for _ in range(2):
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (analysis_id, "failure", json.dumps({
+                    "code": "scope_review_incomplete",
+                    "checkpoint_digest": "previous-checkpoint",
+                    "progress_fingerprint": "same-safe-hash",
+                }), time.time()),
+            )
+        assert not report_scheduler.repeated_no_progress(
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
+        )
+        assert report_scheduler.repeated_no_progress(
+            db, analysis_id, "scope_review_incomplete", "previous-checkpoint",
+        )
+        for _ in range(2):
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (analysis_id, "failure", json.dumps({
+                    "code": "scope_review_incomplete",
+                    "checkpoint_digest": CHECKPOINT_DIGEST,
+                    "progress_fingerprint": "current-safe-hash",
+                }), time.time()),
+            )
+        assert report_scheduler.repeated_no_progress(
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
 
 
@@ -144,10 +184,18 @@ def test_no_progress_fingerprint_ignores_unrelated_failures_between_repeats(serv
     analysis_id = Analyses(execution, RecoveryEngine()).enqueue(env["id"])
     with execution.store.connection() as db:
         events = [
-            {"code": "scope_review_incomplete", "progress_fingerprint": "same-safe-hash"},
+            {
+                "code": "scope_review_incomplete",
+                "checkpoint_digest": CHECKPOINT_DIGEST,
+                "progress_fingerprint": "same-safe-hash",
+            },
             {"code": "analysis_provider_timeout_exhausted"},
             "not-json",
-            {"code": "scope_review_incomplete", "progress_fingerprint": "same-safe-hash"},
+            {
+                "code": "scope_review_incomplete",
+                "checkpoint_digest": CHECKPOINT_DIGEST,
+                "progress_fingerprint": "same-safe-hash",
+            },
         ]
         for detail in events:
             db.execute(
@@ -156,17 +204,18 @@ def test_no_progress_fingerprint_ignores_unrelated_failures_between_repeats(serv
                  else json.dumps(detail), time.time()),
             )
         assert report_scheduler.repeated_no_progress(
-            db, analysis_id, "scope_review_incomplete",
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
         db.execute(
             "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
             (analysis_id, "failure", json.dumps({
                 "code": "scope_review_incomplete",
+                "checkpoint_digest": CHECKPOINT_DIGEST,
                 "progress_fingerprint": "changed-safe-hash",
             }), time.time()),
         )
         assert not report_scheduler.repeated_no_progress(
-            db, analysis_id, "scope_review_incomplete",
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
 
 
@@ -180,11 +229,12 @@ def test_repeated_no_progress_finds_a_b_a_with_interleaved_safe_failure(service)
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
                 (analysis_id, "failure", json.dumps({
                     "code": "scope_review_incomplete",
+                    "checkpoint_digest": CHECKPOINT_DIGEST,
                     "progress_fingerprint": fingerprint,
                 }), time.time()),
             )
         assert report_scheduler.repeated_no_progress(
-            db, analysis_id, "scope_review_incomplete",
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
 
 
@@ -198,11 +248,13 @@ def test_repeated_no_progress_ignores_non_object_json_events(service):  # noqa: 
             "[1, 2, 3]",
             json.dumps({
                 "code": "scope_review_incomplete",
+                "checkpoint_digest": CHECKPOINT_DIGEST,
                 "progress_fingerprint": "same-safe-hash",
             }),
             "not-json",
             json.dumps({
                 "code": "scope_review_incomplete",
+                "checkpoint_digest": CHECKPOINT_DIGEST,
                 "progress_fingerprint": "same-safe-hash",
             }),
         ]
@@ -212,7 +264,7 @@ def test_repeated_no_progress_ignores_non_object_json_events(service):  # noqa: 
                 (analysis_id, "failure", detail, time.time()),
             )
         assert report_scheduler.repeated_no_progress(
-            db, analysis_id, "scope_review_incomplete",
+            db, analysis_id, "scope_review_incomplete", CHECKPOINT_DIGEST,
         )
 
 
@@ -244,6 +296,7 @@ def test_scope_review_history_does_not_stop_other_recoverable_errors(service):  
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
                 (queued["id"], "failure", json.dumps({
                     "code": "scope_review_incomplete",
+                    "checkpoint_digest": CHECKPOINT_DIGEST,
                     "progress_fingerprint": "same-safe-hash",
                 }), time.time()),
             )
@@ -263,6 +316,84 @@ def test_scope_review_history_does_not_stop_other_recoverable_errors(service):  
             (queued["id"],),
         ).fetchone()
     assert dict(recovery) == {"state": "waiting", "stop_reason": None}
+
+
+def test_checkpoint_change_allows_scope_review_recovery(service):  # noqa: F811
+    analyses, _, queued = failed_review(service)
+    with analyses.store.connection() as db:
+        checkpoint = db.execute(
+            "SELECT payload_digest FROM analysis_review_checkpoints WHERE analysis_id=?",
+            (queued["id"],),
+        ).fetchone()
+        assert checkpoint is not None
+        for _ in range(2):
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (queued["id"], "failure", json.dumps({
+                    "code": "scope_review_incomplete",
+                    "checkpoint_digest": "previous-checkpoint",
+                    "progress_fingerprint": "previous-safe-hash",
+                }), time.time()),
+            )
+        db.execute(
+            "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+            (queued["id"], "failure", json.dumps({
+                "code": "scope_review_incomplete",
+                "checkpoint_digest": checkpoint["payload_digest"],
+                "progress_fingerprint": "current-safe-hash",
+            }), time.time()),
+        )
+        db.execute(
+            "UPDATE repository_analyses SET status='failed',"
+            "error='scope_review_incomplete',version=version+1 WHERE id=?",
+            (queued["id"],),
+        )
+        failed = db.execute(
+            "SELECT * FROM repository_analyses WHERE id=?", (queued["id"],),
+        ).fetchone()
+        assert analyses.schedule_report_recovery(
+            db, failed, "scope_review_incomplete", time.time(),
+        )
+        recovery = db.execute(
+            "SELECT state,stop_reason FROM analysis_report_recovery WHERE analysis_id=?",
+            (queued["id"],),
+        ).fetchone()
+    assert dict(recovery) == {"state": "waiting", "stop_reason": None}
+
+
+def test_same_checkpoint_scope_review_history_stops_recovery(service):  # noqa: F811
+    analyses, _, queued = failed_review(service)
+    with analyses.store.connection() as db:
+        checkpoint = db.execute(
+            "SELECT payload_digest FROM analysis_review_checkpoints WHERE analysis_id=?",
+            (queued["id"],),
+        ).fetchone()
+        assert checkpoint is not None
+        for _ in range(2):
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (queued["id"], "failure", json.dumps({
+                    "code": "scope_review_incomplete",
+                    "checkpoint_digest": checkpoint["payload_digest"],
+                    "progress_fingerprint": "same-safe-hash",
+                }), time.time()),
+            )
+        db.execute(
+            "UPDATE repository_analyses SET status='failed',"
+            "error='scope_review_incomplete',version=version+1 WHERE id=?",
+            (queued["id"],),
+        )
+        failed = db.execute(
+            "SELECT * FROM repository_analyses WHERE id=?", (queued["id"],),
+        ).fetchone()
+        assert not analyses.schedule_report_recovery(
+            db, failed, "scope_review_incomplete", time.time(),
+        )
+        recovery = db.execute(
+            "SELECT state,stop_reason FROM analysis_report_recovery WHERE analysis_id=?",
+            (queued["id"],),
+        ).fetchone()
+    assert dict(recovery) == {"state": "stopped", "stop_reason": "no_progress"}
 
 
 def test_schema_diagnostics_use_only_known_field_labels():

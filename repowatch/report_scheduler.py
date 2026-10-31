@@ -91,19 +91,23 @@ def public_state(saved, now):
     }
 
 
-def repeated_no_progress(db, analysis_id, code):
-    """Return True when this error's latest safe fingerprint has already occurred."""
+def repeated_no_progress(db, analysis_id, code, checkpoint_digest):
+    """Return True when this code/checkpoint fingerprint has already occurred."""
+    if not isinstance(checkpoint_digest, str) or not checkpoint_digest:
+        return False
     row = db.execute(
         "WITH documents AS ("
         "SELECT id, CASE WHEN json_valid(agent) THEN agent ELSE '{}' END AS document "
         "FROM analysis_events WHERE analysis_id=? AND kind='failure'), "
         "fingerprints AS ("
         "SELECT id, json_extract(document, '$.code') AS code, "
+        "json_extract(document, '$.checkpoint_digest') AS checkpoint_digest, "
         "json_extract(document, '$.progress_fingerprint') AS fingerprint "
         "FROM documents WHERE json_type(document)='object') "
         "SELECT fingerprint, COUNT(*) AS occurrences FROM fingerprints "
-        "WHERE code=? AND fingerprint IS NOT NULL AND fingerprint <> '' "
+        "WHERE code=? AND checkpoint_digest=? "
+        "AND fingerprint IS NOT NULL AND fingerprint <> '' "
         "GROUP BY fingerprint ORDER BY MAX(id) DESC LIMIT 1",
-        (analysis_id, code),
+        (analysis_id, code, checkpoint_digest),
     ).fetchone()
     return row is not None and row["occurrences"] >= NO_PROGRESS_LIMIT

@@ -4,7 +4,7 @@
 - Issue：[Gwex323/RepoWatch#112](https://github.com/Gwex323/RepoWatch/issues/112)。
 - 分支：`feature/scope-review-recovery-112`。
 - 基线：`origin/codex/initial-upload` 的 `5c25840`。
-- 状态：七轮独立 flash 审查发现均已核验并补强，等待 flash 第八轮复审；PR 尚未创建。
+- 状态：八轮独立 flash 审查发现均已核验并补强，等待 flash 第九轮复审；PR 尚未创建。
 
 ## 根因
 
@@ -113,6 +113,16 @@
   设计的保护扩大到所有可恢复失败。
 - 失败事件的最终最小回退同时保留固定 `code` 与进度指纹，确保错误码过滤启用后仍可由
   恢复查询识别。
+
+第八轮 flash 审查后补强：
+
+- 失败事件显式保存当前检查点的 `payload_digest`，不再只把检查点差异隐含在进度指纹中。
+- `repeated_no_progress()` 同时按当前错误码和当前检查点摘要过滤，再统计最新安全指纹；
+  检查点推进后的新失败不会与旧检查点历史混合。
+- 新增容器级恢复测试：旧检查点已有重复历史时，当前检查点的单次失败仍进入 `waiting`；
+  当前检查点自身重复两次时才以 `stop_reason=no_progress` 停止。
+- 保留进程内“同一检查点内任意重复即停止”的集合语义。该集合只在当前模型调用内累积，
+  且签名包含检查点摘要；检查点推进会产生新签名，不会误停真实读取进展。
 
 ## 模型路由记录
 
@@ -243,14 +253,30 @@ v4pro 接受错误码过滤和进程内检查点摘要两项，拒绝缺失 `rea
 `payload_digest` 回调，并让进程内与持久化判定复用同一指纹函数；同时对无进展查询增加
 错误码参数，仅在范围审查错误上调用。
 
+第八轮 flash 复审结果：仍为 `approved=false`，5 项发现，其中 P1/P2 聚焦当前检查点
+过滤、进程内集合语义和保存阶段错误码。审查文件为
+`.codex-backups/flash-review-scope-112-r8.json`，用量 prompt 26577、completion 1360、
+total 27937。
+
+第八轮 v4pro 核验记录：
+
+- 脚本：`.codex-backups/v4pro_fix_scope_112.py`
+- 结果：`.codex-backups/v4pro-fix-scope-112-r8.json`
+- 原始响应：`.codex-backups/v4pro-fix-scope-112-r8-raw.json`
+- 用量：prompt 53983、completion 1507、total 55490
+
+v4pro 判定 5 项均不成立，并建议增加检查点变化后的容器级恢复用例。主路径采纳该测试方向，
+同时把检查点摘要写入失败事件并加入 SQL 过滤，使审查关注的安全边界成为显式、可测试的
+契约，而不是只依赖指纹隐含语义。v4pro 未直接提交代码，最终修改与验证由主执行路径完成。
+
 ## 已通过验证
 
 - `tests/test_analysis_tool_arguments.py`：50 passed。
-- `tests/test_analysis_auto_recovery.py`：14 passed。
+- `tests/test_analysis_auto_recovery.py`：17 passed。
 - `tests/test_analysis_report_recovery.py`：29 passed、1 failed；失败项为
   `test_resume_still_rejects_fabricated_evidence_and_persists_no_findings`，实际 4 次请求、
   预期 3 次。该失败已在未修改的 `5c25840` 基线复核。
-- 三个定向测试文件分别运行，共 93 passed、1 failed；唯一失败即上述已在基线复现的
+- 三个定向测试文件分别运行，共 96 passed、1 failed；唯一失败即上述已在基线复现的
   既有断言。
 - 新增 GUI 排除项测试确认缺少 `client` 证据的映射在审查阶段被拒绝，具备 `client`
   证据的映射通过。
@@ -278,6 +304,10 @@ v4pro 接受错误码过滤和进程内检查点摘要两项，拒绝缺失 `rea
 - 新增测试确认相同无效范围语义在检查点摘要变化后允许再次审查，检查点再次相同时才有限
   停止。
 - 新增测试确认范围审查的重复历史不会阻断其他可恢复错误的自动恢复。
+- 新增测试确认失败事件与恢复查询都显式绑定当前检查点摘要，旧检查点的重复历史不会阻断
+  当前检查点恢复。
+- 新增容器级测试确认检查点变化后单次范围审查失败进入 `waiting`，相同检查点重复失败才
+  以 `no_progress` 停止。
 - `ruff check repowatch tests`：通过。
 - 修改模块 `py_compile`：通过。
 - `git diff --check`：通过。
@@ -294,5 +324,5 @@ v4pro 接受错误码过滤和进程内检查点摘要两项，拒绝缺失 `rea
 
 ## 审查结论
 
-前七轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
-让 `deepseek-flash` 对修正后的提交重新执行第八轮独立审查；复审结果将在本节追加。
+前八轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
+让 `deepseek-flash` 对修正后的提交重新执行第九轮独立审查；复审结果将在本节追加。
