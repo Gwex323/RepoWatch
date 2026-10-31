@@ -272,7 +272,7 @@ class StageModel(Model):
                  prepare_review=None, finalization_reserve=FINALIZATION_RESERVE_SECONDS,
                  tool_parameter_models=None, review_contract=None, evidence_sources=None,
                  scope_context=None, scope_batch=None, resume_correction=None,
-                 update_private_correction_checkpoint=None,
+                 checkpoint_digest=None, update_private_correction_checkpoint=None,
                  redact_candidate=redact_values):
         self.delegate, self.role, self.budget, self.event = delegate, role, budget, event
         self.retries = retries if retries is not None else RetryBudget()
@@ -291,6 +291,7 @@ class StageModel(Model):
         self.scope_context = scope_context
         self.scope_batch = scope_batch
         self.resume_correction = resume_correction
+        self.checkpoint_digest = checkpoint_digest
         self.update_private_correction_checkpoint = (
             update_private_correction_checkpoint
         )
@@ -790,9 +791,12 @@ class StageModel(Model):
                                 self.scope_context()
                                 if self.scope_context is not None else {}
                             )
-                            signature = digest(report_progress_material(
-                                issue, review.model_dump(), signature_context,
-                            ))
+                            signature = report_failure_fingerprint(
+                                issue,
+                                self.checkpoint_digest() if self.checkpoint_digest else None,
+                                review.model_dump(),
+                                signature_context,
+                            )
                             if signature in scope_review_attempts:
                                 raise AnalysisFailure("analysis_report_no_progress")
                             scope_review_attempts.add(signature)
@@ -1361,6 +1365,7 @@ def failure_event_payload(details):
     if len(encoded) <= FAILURE_EVENT_DETAIL_LIMIT:
         return encoded
     return json.dumps({
+        "code": minimal["code"],
         "progress_fingerprint": minimal["progress_fingerprint"],
     }, ensure_ascii=False, separators=(",", ":"))
 
@@ -1714,6 +1719,9 @@ async def run_analysis(model, context, event=lambda *_: None, *, reasoning_effor
             scope_context=(lambda: context) if role == ROLES[-1] else None,
             scope_batch=prepare_scope_batch if scope_required else None,
             resume_correction=restore_review_correction if resume and role == ROLES[-1] else None,
+            checkpoint_digest=(
+                context.get("_review_checkpoint_digest") if role == ROLES[-1] else None
+            ),
             update_private_correction_checkpoint=(
                 context.get("_update_private_correction_checkpoint")
                 if role == ROLES[-1] else None
@@ -1919,7 +1927,8 @@ class Analyses:
             reason = "basis_changed"
         if not reason and not self.review_checkpoint(db, row, context, self.model_identity()):
             reason = "checkpoint_invalid"
-        if not reason and report_scheduler.repeated_no_progress(db, row["id"]):
+        if (not reason and code == "scope_review_incomplete"
+                and report_scheduler.repeated_no_progress(db, row["id"], code)):
             reason = "no_progress"
         pipeline_id = context.get("pipeline_id")
         if not reason and pipeline_id and not db.execute(
@@ -2418,6 +2427,14 @@ class Analyses:
             self.event(row["id"], "report_correction_saved" if value is not None
                        else "report_correction_cleared", value["kind"] if value else "invalidated")
 
+        def review_checkpoint_digest():
+            with self.store.connection() as db:
+                saved = db.execute(
+                    "SELECT payload_digest FROM analysis_review_checkpoints "
+                    "WHERE analysis_id=?", (row["id"],),
+                ).fetchone()
+            return saved["payload_digest"] if saved else None
+
         def record(kind, agent):
             nonlocal stage, saved_binding
             if kind in {"analysis_request", "usage"} or kind.endswith("_retry"):
@@ -2625,6 +2642,7 @@ class Analyses:
                 "last_failure": recovery["last_error"], "last_report_validation": diagnostics,
             } if recovery["last_error"] else diagnostics)
             context["_review_model_identity"] = model_identity
+            context["_review_checkpoint_digest"] = review_checkpoint_digest
             context["_update_private_correction_checkpoint"] = (
                 update_private_correction_checkpoint
             )

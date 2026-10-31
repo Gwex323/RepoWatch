@@ -4,7 +4,7 @@
 - Issue：[Gwex323/RepoWatch#112](https://github.com/Gwex323/RepoWatch/issues/112)。
 - 分支：`feature/scope-review-recovery-112`。
 - 基线：`origin/codex/initial-upload` 的 `5c25840`。
-- 状态：六轮独立 flash 审查发现均已核验并补强，等待 flash 第七轮复审；PR 尚未创建。
+- 状态：七轮独立 flash 审查发现均已核验并补强，等待 flash 第八轮复审；PR 尚未创建。
 
 ## 根因
 
@@ -26,10 +26,11 @@
 2. `task_scopes.py` 的保存门禁复用同一函数，删除重复语义，保持原有 fail-closed 行为。
 3. `repository_analysis.py` 在审查阶段调用同一语义检查，并输出 `scope_review_validation`
    结构化事件和中文纠正提示；无合适目标时要求改为 `unknown`，不要求伪造证据。
-4. 同一 `scope_review_incomplete` 的错误语义再次出现时抛出
+4. 同一错误码、同一检查点摘要下的 `scope_review_incomplete` 语义再次出现时抛出
    `analysis_report_no_progress`；范围问题按固定语义签名，仅修改理由或措辞仍视为无进展。
-5. 恢复调度遇到 `analysis_report_no_progress` 立即停止；连续两次安全指纹相同的失败也以
-   `stop_reason=no_progress` 停止。指纹只含错误码、检查点摘要和范围审查摘要，不保存正文。
+5. 恢复调度遇到 `analysis_report_no_progress` 立即停止；连续两次同错误码安全指纹相同的
+   失败也以 `stop_reason=no_progress` 停止。指纹只含错误码、检查点摘要和范围审查摘要，
+   不保存正文。
 6. 通用最终报告纠正覆盖旧的私有纠正检查点时，先清除陈旧检查点，确保内存状态与恢复状态
    一致。
 7. `scope_review_validation` 事件上限提高到 4096 字符，避免结构化诊断被截断；
@@ -99,6 +100,19 @@
   新纠正，也用 `None` 清理陈旧纠正，避免被误解为只处理 mapping 私有检查点。
 - 当 `scope_review_incomplete` 没有具体排除语义问题时，输出只含注册/提供版本和计数的
   `scope_review_contract_mismatch` 固定诊断，既不回显候选文本，也不再只依赖通用提示。
+
+第七轮 flash 审查后补强：
+
+- 恢复查询新增当前错误码过滤，只统计与当前失败相同的 `code`；范围审查历史不会再阻断
+  其他可恢复错误，且同指纹在不同错误码之间不会互相累计。
+- 进程内 `scope_review_attempts` 改用与持久化失败完全相同的
+  `report_failure_fingerprint()`，并注入已保存的
+  `analysis_review_checkpoints.payload_digest`。相同范围语义在同一检查点下仍会有限停止，
+  检查点变化则允许继续，不读取候选正文。
+- 恢复调度只在当前错误码为 `scope_review_incomplete` 时执行无进展查询，避免把为该场景
+  设计的保护扩大到所有可恢复失败。
+- 失败事件的最终最小回退同时保留固定 `code` 与进度指纹，确保错误码过滤启用后仍可由
+  恢复查询识别。
 
 ## 模型路由记录
 
@@ -211,14 +225,32 @@ v4pro 接受 4 项并要求修正 SQL 类型过滤、补端到端持久化测试
 对象类型提取”的 CTE，覆盖非法 JSON、标量、数组和对象混合场景；固定诊断只含版本与计数，
 不采用 v4pro 草案中会回显候选范围键的列表。
 
+第七轮 flash 复审结果：仍为 `approved=false`，4 项发现，其中 P1 为无进展查询未绑定
+当前错误码，P2 为进程内签名未包含检查点摘要。审查文件为
+`.codex-backups/flash-review-scope-112-r7.json`，用量 prompt 24041、completion 1812、
+total 25853。
+
+第七轮 v4pro 核验记录：
+
+- 脚本：`.codex-backups/v4pro_fix_scope_112.py`
+- 结果：`.codex-backups/v4pro-fix-scope-112-r7.json`
+- 原始响应：`.codex-backups/v4pro-fix-scope-112-r7-raw.json`
+- 用量：prompt 48067、completion 3697、total 51764
+
+v4pro 接受错误码过滤和进程内检查点摘要两项，拒绝缺失 `reasons` 回退风险及最终事件
+可读性风险。其草案引用了不存在的 `checkpoint_correction.get(...)` 与
+`checkpoint_provider`。主执行路径未照搬草案，而是在 `Analyses.run()` 中注入只读
+`payload_digest` 回调，并让进程内与持久化判定复用同一指纹函数；同时对无进展查询增加
+错误码参数，仅在范围审查错误上调用。
+
 ## 已通过验证
 
 - `tests/test_analysis_tool_arguments.py`：50 passed。
-- `tests/test_analysis_auto_recovery.py`：11 passed。
+- `tests/test_analysis_auto_recovery.py`：14 passed。
 - `tests/test_analysis_report_recovery.py`：29 passed、1 failed；失败项为
   `test_resume_still_rejects_fabricated_evidence_and_persists_no_findings`，实际 4 次请求、
   预期 3 次。该失败已在未修改的 `5c25840` 基线复核。
-- 三个定向测试文件分别运行，共 90 passed、1 failed；唯一失败即上述已在基线复现的
+- 三个定向测试文件分别运行，共 93 passed、1 failed；唯一失败即上述已在基线复现的
   既有断言。
 - 新增 GUI 排除项测试确认缺少 `client` 证据的映射在审查阶段被拒绝，具备 `client`
   证据的映射通过。
@@ -241,6 +273,11 @@ v4pro 接受 4 项并要求修正 SQL 类型过滤、补端到端持久化测试
 - 新增测试确认失败事件经真实事件表写入/读取后仍保持完整 JSON 与进度指纹。
 - 新增测试确认版本不一致且无排除语义问题时输出无候选文本的固定计数诊断。
 - 检查点清理测试确认新的通用纠正会清除旧私有映射检查点。
+- 新增测试确认相同安全指纹在不同错误码下不会互相累计，只有当前
+  `scope_review_incomplete` 达到阈值才停止。
+- 新增测试确认相同无效范围语义在检查点摘要变化后允许再次审查，检查点再次相同时才有限
+  停止。
+- 新增测试确认范围审查的重复历史不会阻断其他可恢复错误的自动恢复。
 - `ruff check repowatch tests`：通过。
 - 修改模块 `py_compile`：通过。
 - `git diff --check`：通过。
@@ -257,5 +294,5 @@ v4pro 接受 4 项并要求修正 SQL 类型过滤、补端到端持久化测试
 
 ## 审查结论
 
-前六轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
-让 `deepseek-flash` 对修正后的提交重新执行独立审查；复审结果将在本节追加。
+前七轮独立审查均未通过，相关发现已核验、修正并完成定向验证。按仓库规定，创建 PR 前仍需
+让 `deepseek-flash` 对修正后的提交重新执行第八轮独立审查；复审结果将在本节追加。
