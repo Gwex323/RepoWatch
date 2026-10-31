@@ -75,6 +75,7 @@ from .roles import FLOW_ROLES, model_for_role, reasoning_for_role
 from .scope_models import (
     ScopeRequirement,
     ScopeReview,
+    canonical_scope_review,
     scope_mapping_issues,
     scope_review_issues,
 )
@@ -483,6 +484,7 @@ class StageModel(Model):
         self.event("model_call", self.role)
         handoff_retried = required_retried = False
         scope_review_attempts = set()
+        scope_mapping_attempts = set()
         correction = ""
         tool_correction = ""
         tool_repair = None
@@ -756,9 +758,20 @@ class StageModel(Model):
                             review = redact_review(review, self.redact_candidate)
                             issue = self.review_contract(review)
                     if issue:
-                        if issue == "scope_mapping_invalid" and self.scope_context is not None:
+                        scope_issues = []
+                        if (issue in {"scope_mapping_invalid", "scope_review_incomplete"}
+                                and self.scope_context is not None):
                             context = self.scope_context()
+                            scope_issues = report_scope_issues(review, context)
+                        if issue == "scope_mapping_invalid" and scope_issues:
+                            issue = "scope_review_incomplete"
+                        if (issue == "scope_mapping_invalid"
+                                and self.scope_context is not None):
                             mapping = report_mapping_issues(review, context)
+                            signature = digest({"issue": issue, "mapping": mapping})
+                            if signature in scope_mapping_attempts:
+                                raise AnalysisFailure("analysis_report_no_progress")
+                            scope_mapping_attempts.add(signature)
                             for detail in mapping:
                                 self.event("scope_mapping_validation", json.dumps(detail))
                             report_correction = ReportScopeCorrection(review, context, mapping)
@@ -768,12 +781,9 @@ class StageModel(Model):
                                 "role": self.role, "items": len(mapping),
                             }))
                             continue
-                        scope_issues = []
-                        if issue == "scope_review_incomplete" and self.scope_context is not None:
-                            context = self.scope_context()
-                            scope_issues = report_scope_issues(review, context)
+                        if issue == "scope_review_incomplete":
                             scope_review = (
-                                review.scope_review.model_dump()
+                                canonical_scope_review(review.scope_review.model_dump())
                                 if review.scope_review is not None and not scope_issues else None
                             )
                             signature = digest({
@@ -785,8 +795,9 @@ class StageModel(Model):
                                 raise AnalysisFailure("analysis_report_no_progress")
                             scope_review_attempts.add(signature)
                             if scope_issues:
+                                feedback = bounded_scope_issues(scope_issues)
                                 self.event("scope_review_validation", json.dumps({
-                                    "role": self.role, "issues": scope_issues,
+                                    "role": self.role, **feedback,
                                 }, ensure_ascii=False))
                         self.event("report_validation", issue)
                         diagnostics = report_diagnostics(response)
@@ -806,7 +817,7 @@ class StageModel(Model):
                                 else final_report_input(input)
                             )
                             self.event("report_finalization", self.role)
-                        if report_correction is not None and self.save_correction is not None:
+                        if self.save_correction is not None:
                             self.save_correction(None)
                         report_correction = None
                         correction = (
@@ -1168,16 +1179,57 @@ def report_scope_issues(review, context):
     )
 
 
+SCOPE_FEEDBACK_ISSUE_LIMIT = 6
+
+
+def bounded_scope_issues(issues):
+    limited = issues[:SCOPE_FEEDBACK_ISSUE_LIMIT]
+    return {
+        "issues": limited,
+        "total": len(issues),
+        "truncated": len(limited) < len(issues),
+    }
+
+
 def report_scope_feedback(issues):
     if not issues:
         return ""
+    feedback = bounded_scope_issues(issues)
     return (
         "\n范围排除项校验失败，必须修正以下固定标签描述的问题："
-        + json.dumps(issues, ensure_ascii=False, separators=(",", ":"))
+        + json.dumps(feedback, ensure_ascii=False, separators=(",", ":"))
         + "。每个 required 排除项只能关联 required_evidence 包含 required_evidence "
         "字段所示证据类型的已注册范围项；没有合适目标时改为 unknown，不得伪造 client、"
-        "integration 或 regression 证据。保留已注册范围和所有有效来源证据。"
+        "integration 或 regression 证据。truncated=true 时先修正列出的项目，再重新提交，"
+        "不得跳过其余未显示的问题或虚构成功。保留已注册范围和所有有效来源证据。"
     )
+
+
+def report_failure_fingerprint(code, checkpoint, report, context):
+    """Hash only stable report structure, never report text or source quotes."""
+    if not isinstance(report, dict):
+        return None
+    material = {"code": code, "checkpoint": checkpoint}
+    scope = (context or {}).get("task_scope") or {}
+    scope_review = report.get("scope_review")
+    if isinstance(scope_review, dict):
+        try:
+            issues = scope_review_issues(
+                scope_review,
+                scope.get("items", []),
+                scope.get("execution_limits", []),
+            )
+        except (KeyError, TypeError, ValueError):
+            issues = None
+        if issues:
+            material["scope_issues"] = issues
+        elif issues == []:
+            material["scope_review"] = canonical_scope_review(scope_review)
+        else:
+            material["candidate"] = report
+    else:
+        material["candidate"] = report
+    return digest(material)
 
 
 def scope_report_issue(review, context):
@@ -2547,15 +2599,16 @@ class Analyses:
                     "SELECT payload_digest FROM analysis_review_checkpoints "
                     "WHERE analysis_id=?", (row["id"],),
                 ).fetchone()
+            progress_fingerprint = report_failure_fingerprint(
+                code,
+                checkpoint["payload_digest"] if checkpoint else None,
+                review_candidate,
+                context,
+            )
+            if progress_fingerprint:
+                details["progress_fingerprint"] = progress_fingerprint
             if saved_budget:
                 details["budget"] = saved_budget
-            if (isinstance(review_candidate, dict)
-                    and review_candidate.get("scope_review") is not None):
-                details["progress_fingerprint"] = digest({
-                    "code": code,
-                    "checkpoint": checkpoint["payload_digest"] if checkpoint else None,
-                    "scope_review": review_candidate["scope_review"],
-                })
             record("failure", json.dumps(details))
             logging.getLogger(__name__).warning(
                 "Repository analysis %s failed: %s "

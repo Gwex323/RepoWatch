@@ -75,7 +75,8 @@ def scope_review_issues(review, requirements, limits):
     requirements = {item["key"]: item for item in requirements}
     limits = {item["key"]: item for item in limits}
     issues = []
-    for exclusion in (review or {}).get("exclusions", []):
+    for exclusion in sorted((review or {}).get("exclusions", []),
+                            key=lambda item: item["key"]):
         key = exclusion["key"]
         if exclusion["outcome"] == "unrelated" and not exclusion["evidence"]:
             issues.append({
@@ -96,7 +97,7 @@ def scope_review_issues(review, requirements, limits):
                 "reason": "missing_required_keys",
             })
             continue
-        for target_key in targets:
+        for target_key in sorted(targets):
             target = requirements.get(target_key)
             available = sorted(target.get("required_evidence", [])) if target else []
             if target is None:
@@ -110,7 +111,22 @@ def scope_review_issues(review, requirements, limits):
                 "required_evidence": required_kind, "available_evidence": available,
                 "reason": reason,
             })
-    return issues
+    return sorted(issues, key=lambda item: (
+        item["exclusion_key"], item["target_key"] or "", item["reason"],
+    ))
+
+
+def canonical_scope_review(review):
+    """Put ordered references into a stable form for progress comparisons."""
+    if not isinstance(review, dict):
+        return review
+    value = dict(review)
+    value["items"] = sorted(review.get("items", []), key=lambda item: item.get("key", ""))
+    value["exclusions"] = sorted((
+        {**item, "required_keys": sorted(item.get("required_keys", []))}
+        for item in review.get("exclusions", [])
+    ), key=lambda item: item.get("key", ""))
+    return value
 
 
 class RepairScopeCoverage(BaseModel):

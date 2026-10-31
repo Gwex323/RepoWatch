@@ -69,6 +69,34 @@ def test_repeated_failure_fingerprint_requires_two_identical_consecutive_failure
         assert not report_scheduler.repeated_no_progress(db, analysis_id)
 
 
+def test_no_progress_fingerprint_ignores_unrelated_failures_between_repeats(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analysis_id = Analyses(execution, RecoveryEngine()).enqueue(env["id"])
+    with execution.store.connection() as db:
+        events = [
+            {"code": "scope_review_incomplete", "progress_fingerprint": "same-safe-hash"},
+            {"code": "analysis_provider_timeout_exhausted"},
+            "not-json",
+            {"code": "scope_review_incomplete", "progress_fingerprint": "same-safe-hash"},
+        ]
+        for detail in events:
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (analysis_id, "failure", detail if isinstance(detail, str)
+                 else json.dumps(detail), time.time()),
+            )
+        assert report_scheduler.repeated_no_progress(db, analysis_id)
+        db.execute(
+            "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+            (analysis_id, "failure", json.dumps({
+                "code": "scope_review_incomplete",
+                "progress_fingerprint": "changed-safe-hash",
+            }), time.time()),
+        )
+        assert not report_scheduler.repeated_no_progress(db, analysis_id)
+
+
 def test_in_attempt_no_progress_failure_stops_automatic_recovery(service):  # noqa: F811
     analyses, _, queued = failed_review(service)
     with analyses.store.connection() as db:
