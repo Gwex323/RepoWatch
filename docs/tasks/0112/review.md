@@ -4,7 +4,7 @@
 - Issue：[Gwex323/RepoWatch#112](https://github.com/Gwex323/RepoWatch/issues/112)。
 - 分支：`feature/scope-review-recovery-112`。
 - 基线：`origin/codex/initial-upload` 的 `5c25840`。
-- 状态：首轮独立 flash 审查发现已由 v4pro 修正，等待 flash 复审；PR 尚未创建。
+- 状态：两轮独立 flash 审查发现均已由 v4pro 修正，等待 flash 第三轮复审；PR 尚未创建。
 
 ## 根因
 
@@ -46,6 +46,16 @@
 - 映射错误路径先应用统一范围语义；通用纠正无论此前是否存在 `report_correction` 都清除
   陈旧私有纠正检查点。
 
+第二轮 flash 审查后补强：
+
+- 失败指纹不再读取或摘要整个候选报告。范围审查使用只含整数、布尔值、类型名及字符串
+  SHA-256 的无序结构；范围审查缺失或类型错误时只记录已知字段的类型和计数。
+- 无进展指纹查询改为 SQLite 直接提取最近两条有效 `progress_fingerprint`，不再依赖固定
+  事件窗口，也不解析或保留候选正文。
+- `failure` 事件恢复 1024 字符上限；指纹提前写入，预算信息超出 1000 字符时先移除预算，
+  再降至有界标量，必要时只保留错误码、阶段和进度指纹，保持失败事件仍是完整 JSON，
+  且无进展指纹不被截断。
+
 ## 模型路由记录
 
 真实 `deepseek-v4-pro` 仅用于方案分析，未让其直接提交未经审查的代码：
@@ -74,18 +84,40 @@ total 11204。
 主路径采纳了跨重启指纹、无序范围签名、旧检查点清理和映射语义优先等修正；未采纳
 v4pro 关于扩大两个小型映射事件上限的建议，并修正了其测试草案中的调用次数问题。
 
+第二轮 flash 复审结果：仍为 `approved=false`，6 项发现，其中 P1 包括指纹回退材料可能
+接触候选正文、回退未规范化无序结构。审查文件为
+`.codex-backups/flash-review-scope-112-r2.json`，用量 prompt 13469、completion 1506、
+total 14975。
+
+第二轮 v4pro 修正方案记录：
+
+- 脚本：`.codex-backups/v4pro_fix_scope_112.py`
+- 结果：`.codex-backups/v4pro-fix-scope-112-r2.json`
+- 原始响应：`.codex-backups/v4pro-fix-scope-112-r2-raw.json`
+- 用量：prompt 29972、completion 2731、total 32703
+
+主路径采纳了无正文安全指纹、无序结构、事件容量和测试补强方向。v4pro 建议扫描全部
+failure 事件并从 Python 解析；主路径改为 SQLite 直接提取最近两条有效 JSON 指纹，避免
+整表加载。v4pro 的 `canonical_scope_review` 草案仍会在畸形结构上抛异常，主路径改用
+文本哈希和类型/计数结构替代。
+
 ## 已通过验证
 
-- `tests/test_analysis_tool_arguments.py`：38 passed。
+- `tests/test_analysis_tool_arguments.py`：42 passed。
 - `tests/test_analysis_auto_recovery.py`：8 passed。
 - `tests/test_analysis_report_recovery.py`：29 passed、1 failed；失败项为
   `test_resume_still_rejects_fabricated_evidence_and_persists_no_findings`，实际 4 次请求、
   预期 3 次。该失败已在未修改的 `5c25840` 基线复核。
+- 三个定向测试文件组合运行：79 passed、1 failed；唯一失败即上述已在基线复现的既有断言。
 - 新增 GUI 排除项测试确认缺少 `client` 证据的映射在审查阶段被拒绝，具备 `client`
   证据的映射通过。
 - 新增重复语义测试确认模型只改理由时仍只允许一次纠正，并在同一语义再次出现时停止。
 - 新增测试确认无关失败事件不会破坏无进展指纹，且范围反馈超过 6 条时明确标记截断。
 - 新增测试确认映射错误与范围语义错误同时出现时，范围语义优先且不会绕过校验。
+- 新增测试确认畸形范围候选的指纹材料不含候选摘要、证据原文或任意私有字符串，且不同
+  措辞、项目顺序不会改变无进展指纹。
+- 新增测试确认失败事件超长预算会被移除以保留完整指纹和 1024 字符上限。
+- 新增测试确认即使没有 `budget` 且其他诊断字段异常超长，序列化结果仍不依赖事件截断。
 - 检查点清理测试确认新的通用纠正会清除旧私有映射检查点。
 - `ruff check repowatch tests`：通过。
 - 修改模块 `py_compile`：通过。

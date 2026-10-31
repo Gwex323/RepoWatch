@@ -1,5 +1,6 @@
 """Bounded model proposals; none of these fields authorizes completion by itself."""
 
+import hashlib
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -116,17 +117,65 @@ def scope_review_issues(review, requirements, limits):
     ))
 
 
-def canonical_scope_review(review):
-    """Put ordered references into a stable form for progress comparisons."""
+def _label(value):
+    """Hash text so progress material never contains candidate prose or paths."""
+    if not isinstance(value, str):
+        return {"type": type(value).__name__}
+    return {"sha256": hashlib.sha256(value.encode()).hexdigest()}
+
+
+def scope_review_progress(review):
+    """Return a text-free, order-independent shape for no-progress comparisons."""
     if not isinstance(review, dict):
-        return review
-    value = dict(review)
-    value["items"] = sorted(review.get("items", []), key=lambda item: item.get("key", ""))
-    value["exclusions"] = sorted((
-        {**item, "required_keys": sorted(item.get("required_keys", []))}
-        for item in review.get("exclusions", [])
-    ), key=lambda item: item.get("key", ""))
-    return value
+        return {"type": type(review).__name__}
+    items = review.get("items")
+    exclusions = review.get("exclusions")
+    item_rows = []
+    for item in items if isinstance(items, list) else []:
+        if not isinstance(item, dict):
+            item_rows.append({"invalid": type(item).__name__})
+            continue
+        evidence = item.get("evidence")
+        finding_ids = item.get("finding_ids")
+        item_rows.append({
+            "key": _label(item.get("key")),
+            "outcome": _label(item.get("outcome")),
+            "evidence": len(evidence) if isinstance(evidence, list) else type(evidence).__name__,
+            "finding_ids": sorted(
+                _label(identity).get("sha256", "")
+                for identity in finding_ids if isinstance(identity, str)
+            ) if isinstance(finding_ids, list) else type(finding_ids).__name__,
+        })
+    exclusion_rows = []
+    for item in exclusions if isinstance(exclusions, list) else []:
+        if not isinstance(item, dict):
+            exclusion_rows.append({"invalid": type(item).__name__})
+            continue
+        required_keys = item.get("required_keys")
+        evidence = item.get("evidence")
+        exclusion_rows.append({
+            "key": _label(item.get("key")),
+            "outcome": _label(item.get("outcome")),
+            "required_keys": sorted(
+                _label(key).get("sha256", "")
+                for key in required_keys if isinstance(key, str)
+            ) if isinstance(required_keys, list) else type(required_keys).__name__,
+            "evidence": len(evidence) if isinstance(evidence, list) else type(evidence).__name__,
+            "invalid_required_keys": (
+                sum(not isinstance(key, str) for key in required_keys)
+                if isinstance(required_keys, list) else None
+            ),
+        })
+    return {
+        "version": review.get("version") if type(review.get("version")) is int
+        else type(review.get("version")).__name__,
+        "accepted": review.get("accepted") if type(review.get("accepted")) is bool
+        else type(review.get("accepted")).__name__,
+        "items": sorted(item_rows, key=lambda item: repr(item)),
+        "exclusions": sorted(exclusion_rows, key=lambda item: repr(item)),
+        "items_type": type(items).__name__,
+        "exclusions_type": type(exclusions).__name__,
+    }
 
 
 class RepairScopeCoverage(BaseModel):

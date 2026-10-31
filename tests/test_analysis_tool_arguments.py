@@ -34,6 +34,7 @@ from repowatch.repository_analysis import (
     StageBudget,
     StageModel,
     bounded_scope_issues,
+    failure_event_payload,
     report_failure_fingerprint,
     report_scope_feedback,
     report_scope_issues,
@@ -403,20 +404,50 @@ def test_scope_and_failure_events_keep_complete_safe_diagnostics(service):  # no
         "code": "analysis_report_no_progress",
         "stage": ROLES[-1],
         "progress_fingerprint": "a" * 64,
-        "budget": {
-            "diagnostic": "bounded failure diagnostics must remain durable " * 24,
-        },
+        "budget": {"diagnostic": "bounded failure diagnostics remain durable"},
     }
     scope_encoded, failure_encoded = (
         json.dumps(scope_detail), json.dumps(failure_detail)
     )
-    assert len(scope_encoded) > 1024 and len(failure_encoded) > 1024
+    assert len(scope_encoded) > 1024 and len(failure_encoded) < 1024
     analyses.event(analysis_id, "scope_review_validation", scope_encoded)
     analyses.event(analysis_id, "failure", failure_encoded)
     row = analyses.get(analysis_id)
     saved = {e["kind"]: e["agent"] for e in row["events"]}
     assert json.loads(saved["scope_review_validation"]) == scope_detail
     assert json.loads(saved["failure"]) == failure_detail
+
+
+def test_large_failure_budget_is_dropped_before_the_fixed_event_limit():
+    fingerprints = "a" * 64
+    details = {
+        "code": "scope_review_incomplete",
+        "stage": ROLES[-1],
+        "progress_fingerprint": fingerprints,
+        "budget": {"diagnostic": "x" * 4000},
+    }
+    encoded = failure_event_payload(details)
+    saved = json.loads(encoded)
+    assert len(encoded) <= 1000
+    assert saved["progress_fingerprint"] == fingerprints
+    assert "budget" not in saved
+
+
+def test_failure_payload_falls_back_to_bounded_scalars_without_truncating_json():
+    fingerprints = "b" * 64
+    details = {
+        "code": "scope_review_incomplete",
+        "stage": ROLES[-1],
+        "exception_type": "x" * 4000,
+        "progress_fingerprint": fingerprints,
+    }
+    encoded = failure_event_payload(details)
+    saved = json.loads(encoded)
+    assert len(encoded) <= 1000
+    assert saved["code"] == details["code"]
+    assert saved["stage"] == details["stage"]
+    assert saved["progress_fingerprint"] == fingerprints
+    assert len(saved["exception_type"]) == 128
 
 
 @pytest.mark.parametrize("mutation,expected", [
@@ -566,6 +597,93 @@ def test_scope_feedback_is_bounded_and_explicitly_reports_truncation():
     assert len(encoded) < 4096
     prompt = report_scope_feedback(issues)
     assert '"total":12' in prompt and '"truncated":true' in prompt
+
+
+def test_failure_fingerprint_uses_only_safe_structural_material(monkeypatch):
+    context = {"task_scope": {
+        "version": 1,
+        "items": [{"key": "fixture_behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [],
+    }}
+    material = []
+
+    def capture(value):
+        material.append(value)
+        return "safe-fingerprint"
+
+    monkeypatch.setattr("repowatch.repository_analysis.digest", capture)
+    malformed = {
+        "summary": "private-candidate-summary",
+        "findings": [{"evidence": [{"quote": "private-source-quote"}]}],
+        "scope_review": {"exclusions": "private-exclusion-text"},
+    }
+    changed = {
+        "summary": "different-private-summary",
+        "findings": [{"evidence": [{"quote": "different-private-quote"}]}],
+        "scope_review": {"exclusions": "different-private-text"},
+    }
+    assert report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", malformed, context,
+    ) == "safe-fingerprint"
+    assert report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", changed, context,
+    ) == "safe-fingerprint"
+    assert material[0] == material[1]
+    encoded = json.dumps(material, sort_keys=True)
+    assert "private-" not in encoded and "candidate" not in encoded
+
+
+def test_failure_fingerprint_ignores_scope_review_order_without_semantic_issues(
+        monkeypatch,
+):
+    context = {"task_scope": {
+        "version": 1,
+        "items": [
+            {"key": "first", "required_evidence": ["regression"]},
+            {"key": "second", "required_evidence": ["integration"]},
+        ],
+        "execution_limits": [],
+    }}
+    items = [{
+        "key": "first",
+        "outcome": "blocked",
+        "rationale": "private rationale",
+        "evidence": [],
+        "finding_ids": [],
+    }, {
+        "key": "second",
+        "outcome": "investigating",
+        "rationale": "different private rationale",
+        "evidence": [],
+        "finding_ids": [],
+    }]
+    first = {
+        "summary": "private summary one",
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "private review rationale one",
+            "items": items,
+            "exclusions": [],
+        },
+    }
+    second = {
+        "summary": "private summary two",
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "private review rationale two",
+            "items": list(reversed(items)),
+            "exclusions": [],
+        },
+    }
+    assert report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", first, context,
+    ) == report_failure_fingerprint(
+        "scope_review_incomplete", "same-checkpoint", second, context,
+    )
 
 
 def test_repeated_invalid_scope_semantics_stops_without_replaying_forever():

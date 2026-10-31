@@ -75,9 +75,9 @@ from .roles import FLOW_ROLES, model_for_role, reasoning_for_role
 from .scope_models import (
     ScopeRequirement,
     ScopeReview,
-    canonical_scope_review,
     scope_mapping_issues,
     scope_review_issues,
+    scope_review_progress,
 )
 from .store import Conflict, Missing, uid
 from .task_scopes import (
@@ -783,7 +783,7 @@ class StageModel(Model):
                             continue
                         if issue == "scope_review_incomplete":
                             scope_review = (
-                                canonical_scope_review(review.scope_review.model_dump())
+                                scope_review_progress(review.scope_review.model_dump())
                                 if review.scope_review is not None and not scope_issues else None
                             )
                             signature = digest({
@@ -1205,8 +1205,28 @@ def report_scope_feedback(issues):
     )
 
 
+def report_progress_shape(report):
+    """Describe report structure without retaining any candidate-written text."""
+    fields = {
+        "summary": report.get("summary"),
+        "limitations": report.get("limitations"),
+        "findings": report.get("findings"),
+        "scope_review": report.get("scope_review"),
+        "historical_rechecks": report.get("historical_rechecks"),
+        "handoffs": report.get("handoffs"),
+        "files_read": report.get("files_read"),
+        "execution_read": report.get("execution_read"),
+    }
+    return {
+        key: {
+            "type": type(value).__name__,
+            "count": len(value) if isinstance(value, (list, dict)) else None,
+        } for key, value in fields.items()
+    }
+
+
 def report_failure_fingerprint(code, checkpoint, report, context):
-    """Hash only stable report structure, never report text or source quotes."""
+    """Hash only safe structural labels, never report text or source quotes."""
     if not isinstance(report, dict):
         return None
     material = {"code": code, "checkpoint": checkpoint}
@@ -1223,13 +1243,46 @@ def report_failure_fingerprint(code, checkpoint, report, context):
             issues = None
         if issues:
             material["scope_issues"] = issues
-        elif issues == []:
-            material["scope_review"] = canonical_scope_review(scope_review)
         else:
-            material["candidate"] = report
+            material["scope_review"] = scope_review_progress(scope_review)
     else:
-        material["candidate"] = report
+        material["report"] = report_progress_shape(report)
     return digest(material)
+
+
+FAILURE_EVENT_DETAIL_LIMIT = 1000
+
+
+def failure_event_payload(details):
+    """Serialize bounded diagnostics without ever relying on JSON truncation."""
+    candidates = [details]
+    if "budget" in details:
+        candidates.append({key: value for key, value in details.items() if key != "budget"})
+    for candidate in candidates:
+        encoded = json.dumps(candidate)
+        if len(encoded) <= FAILURE_EVENT_DETAIL_LIMIT:
+            return encoded
+
+    fallback = {}
+    for key in (
+        "code", "stage", "exception_type", "progress_fingerprint",
+        "sqlite_errorcode", "http_status", "elapsed_seconds",
+    ):
+        value = details.get(key)
+        if isinstance(value, str):
+            value = value[:128]
+        elif not isinstance(value, (int, float, bool)):
+            continue
+        fallback[key] = value
+    encoded = json.dumps(fallback, ensure_ascii=False, separators=(",", ":"))
+    if len(encoded) <= FAILURE_EVENT_DETAIL_LIMIT:
+        return encoded
+    minimal = {
+        "code": str(details.get("code", ""))[:64],
+        "stage": str(details.get("stage", ""))[:64],
+        "progress_fingerprint": str(details.get("progress_fingerprint", ""))[:128],
+    }
+    return json.dumps(minimal, ensure_ascii=False, separators=(",", ":"))
 
 
 def scope_report_issue(review, context):
@@ -1691,8 +1744,8 @@ class Analyses:
                                      "required_read_validation", "provider_structure",
                                      "handoff_validation", "report_diagnostics",
                                      "model_configuration", "model_request_failed",
-                                     "evidence_comparison", "failure"}
-                     else 240)
+                                     "evidence_comparison"}
+                     else 1024 if kind == "failure" else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
                 (analysis_id, kind, agent[:limit], time.time()),
@@ -2609,7 +2662,7 @@ class Analyses:
                 details["progress_fingerprint"] = progress_fingerprint
             if saved_budget:
                 details["budget"] = saved_budget
-            record("failure", json.dumps(details))
+            record("failure", failure_event_payload(details))
             logging.getLogger(__name__).warning(
                 "Repository analysis %s failed: %s "
                 "(stage=%s, exception_type=%s, sqlite_errorcode=%s)",
