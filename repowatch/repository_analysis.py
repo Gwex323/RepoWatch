@@ -72,7 +72,12 @@ from .report_recovery import (
 )
 from .report_scope_correction import MAPPING_CORRECTION_ERRORS, ReportScopeCorrection
 from .roles import FLOW_ROLES, model_for_role, reasoning_for_role
-from .scope_models import ScopeRequirement, ScopeReview, scope_mapping_issues
+from .scope_models import (
+    ScopeRequirement,
+    ScopeReview,
+    scope_mapping_issues,
+    scope_review_issues,
+)
 from .store import Conflict, Missing, uid
 from .task_scopes import (
     current_scope_findings,
@@ -477,6 +482,7 @@ class StageModel(Model):
         budget.turns += 1
         self.event("model_call", self.role)
         handoff_retried = required_retried = False
+        scope_review_attempts = set()
         correction = ""
         tool_correction = ""
         tool_repair = None
@@ -762,6 +768,26 @@ class StageModel(Model):
                                 "role": self.role, "items": len(mapping),
                             }))
                             continue
+                        scope_issues = []
+                        if issue == "scope_review_incomplete" and self.scope_context is not None:
+                            context = self.scope_context()
+                            scope_issues = report_scope_issues(review, context)
+                            scope_review = (
+                                review.scope_review.model_dump()
+                                if review.scope_review is not None and not scope_issues else None
+                            )
+                            signature = digest({
+                                "issue": issue,
+                                "scope_issues": scope_issues or None,
+                                "scope_review": scope_review,
+                            })
+                            if signature in scope_review_attempts:
+                                raise AnalysisFailure("analysis_report_no_progress")
+                            scope_review_attempts.add(signature)
+                            if scope_issues:
+                                self.event("scope_review_validation", json.dumps({
+                                    "role": self.role, "issues": scope_issues,
+                                }, ensure_ascii=False))
                         self.event("report_validation", issue)
                         diagnostics = report_diagnostics(response)
                         self.event("report_diagnostics", diagnostics)
@@ -780,6 +806,9 @@ class StageModel(Model):
                                 else final_report_input(input)
                             )
                             self.event("report_finalization", self.role)
+                        if report_correction is not None and self.save_correction is not None:
+                            self.save_correction(None)
+                        report_correction = None
                         correction = (
                             "\nThe previous final response failed local validation "
                             f"({issue}). Correct the final report now using only the evidence "
@@ -792,7 +821,8 @@ class StageModel(Model):
                             "key, and a classification for EVERY execution_limits key. Use "
                             "blocked/investigating or unknown for insufficient evidence; do not "
                             "omit items, invent evidence, or treat acceptance as a verified fix."
-                        ) + report_feedback(diagnostics)
+                        ) + (report_scope_feedback(scope_issues) if scope_issues
+                             else report_feedback(diagnostics))
                         continue
                     parts = [part for item in response.output if item.type == "message"
                              for part in item.content]
@@ -1126,6 +1156,30 @@ def report_mapping_issues(review, context):
     )
 
 
+def report_scope_issues(review, context):
+    """Apply the same exclusion semantics before review and before persistence."""
+    scope = context.get("task_scope") or {}
+    if review.scope_review is None or not scope.get("items"):
+        return []
+    return scope_review_issues(
+        review.scope_review.model_dump(),
+        scope.get("items", []),
+        scope.get("execution_limits", []),
+    )
+
+
+def report_scope_feedback(issues):
+    if not issues:
+        return ""
+    return (
+        "\n范围排除项校验失败，必须修正以下固定标签描述的问题："
+        + json.dumps(issues, ensure_ascii=False, separators=(",", ":"))
+        + "。每个 required 排除项只能关联 required_evidence 包含 required_evidence "
+        "字段所示证据类型的已注册范围项；没有合适目标时改为 unknown，不得伪造 client、"
+        "integration 或 regression 证据。保留已注册范围和所有有效来源证据。"
+    )
+
+
 def scope_report_issue(review, context):
     scope = context.get("task_scope") or {}
     if not scope.get("items"):
@@ -1140,6 +1194,8 @@ def scope_report_issue(review, context):
             or set(keys) != {item["key"] for item in scope["items"]}
             or len(exclusions) != len(set(exclusions))
             or set(exclusions) != {item["key"] for item in scope.get("execution_limits", [])}):
+        return "scope_review_incomplete"
+    if report_scope_issues(review, context):
         return "scope_review_incomplete"
     return "scope_mapping_invalid" if report_mapping_issues(review, context) else None
 
@@ -1579,11 +1635,12 @@ class Analyses:
         with self.store.connection() as db:
             limit = (4096 if kind in {"tool_arguments_invalid", "tool_arguments_preserved",
                                      "output_limit", "scope_mapping_validation",
+                                     "scope_review_validation",
                                      "required_read_validation", "provider_structure",
                                      "handoff_validation", "report_diagnostics",
                                      "model_configuration", "model_request_failed",
-                                     "evidence_comparison"}
-                     else 1024 if kind == "failure" else 240)
+                                     "evidence_comparison", "failure"}
+                     else 240)
             db.execute(
                 "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
                 (analysis_id, kind, agent[:limit], time.time()),
@@ -1663,6 +1720,8 @@ class Analyses:
             reason = "basis_changed"
         if not reason and code == "analysis_cancelled":
             reason = "pipeline_stopped"
+        if not reason and code == "analysis_report_no_progress":
+            reason = "no_progress"
         context = json.loads(row["context"] or "{}")
         if not reason and code not in report_scheduler.RECOVERABLE:
             reason = "non_recoverable"
@@ -1672,6 +1731,8 @@ class Analyses:
             reason = "basis_changed"
         if not reason and not self.review_checkpoint(db, row, context, self.model_identity()):
             reason = "checkpoint_invalid"
+        if not reason and report_scheduler.repeated_no_progress(db, row["id"]):
+            reason = "no_progress"
         pipeline_id = context.get("pipeline_id")
         if not reason and pipeline_id and not db.execute(
             "SELECT 1 FROM execution_pipelines p JOIN github_configuration c "
@@ -2113,6 +2174,7 @@ class Analyses:
         model_identity = self.model_identity()
         saved_binding = None
         original_issue = None
+        review_candidate = None
 
         def active():
             with self.store.connection() as db:
@@ -2389,6 +2451,7 @@ class Analyses:
                         raise AnalysisFailure("analysis_model_disabled")
                     await asyncio.wait({task}, timeout=0.5)
                 report = redact_values(await task)
+                review_candidate = report
                 review = validate_report(report, context)
                 scope = (context.get("test_result") or {}).get("desktop_scope")
                 if scope:
@@ -2480,8 +2543,19 @@ class Analyses:
                 saved_budget = report_scheduler.public_state(
                     report_scheduler.row(db, row["id"]), time.time(),
                 )
+                checkpoint = db.execute(
+                    "SELECT payload_digest FROM analysis_review_checkpoints "
+                    "WHERE analysis_id=?", (row["id"],),
+                ).fetchone()
             if saved_budget:
                 details["budget"] = saved_budget
+            if (isinstance(review_candidate, dict)
+                    and review_candidate.get("scope_review") is not None):
+                details["progress_fingerprint"] = digest({
+                    "code": code,
+                    "checkpoint": checkpoint["payload_digest"] if checkpoint else None,
+                    "scope_review": review_candidate["scope_review"],
+                })
             record("failure", json.dumps(details))
             logging.getLogger(__name__).warning(
                 "Repository analysis %s failed: %s "

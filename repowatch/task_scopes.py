@@ -8,7 +8,12 @@ import time
 from .analysis_basis import analysis_current
 from .analysis_tools import tool_allowed
 from .diagnosis import redact, redact_values
-from .scope_models import ScopeRequirement, ScopeReview, scope_mapping_issues
+from .scope_models import (
+    ScopeRequirement,
+    ScopeReview,
+    scope_mapping_issues,
+    scope_review_issues,
+)
 from .store import Conflict, Missing, uid
 
 MAX_ITEMS = 32
@@ -319,19 +324,8 @@ def save_scope_review(db, analysis, review, findings):
     classifications = {item["key"]: item for item in parsed["exclusions"]}
     if len(classifications) != len(parsed["exclusions"]) or not set(classifications) <= set(limits):
         raise Conflict("scope_review_incomplete")
-    for key, item in classifications.items():
-        if item["outcome"] == "unrelated" and not item["evidence"]:
-            raise Conflict("scope_review_incomplete")
-        if item["outcome"] == "required":
-            required_kind = "client" if set(limits[key]["reasons"]) & {
-                "windows_native", "gui",
-            } else "integration"
-            if not item["required_keys"] or any(
-                target not in requirements
-                or required_kind not in requirements[target]["required_evidence"]
-                for target in item["required_keys"]
-            ):
-                raise Conflict("scope_review_incomplete")
+    if scope_review_issues(parsed, requirements.values(), limits.values()):
+        raise Conflict("scope_review_incomplete")
     for item in parsed["items"]:
         for finding_id in set(item["finding_ids"]):
             db.execute("INSERT OR IGNORE INTO task_scope_findings VALUES(?,?,?)",

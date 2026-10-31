@@ -4,6 +4,7 @@ import json
 
 MAX_REQUESTS = None
 MAX_SECONDS = None
+NO_PROGRESS_LIMIT = 2
 RECOVERY_DELAYS = (10, 30, 60)
 RETRY_FIELDS = ("used", "output_used", "format_used", "evidence_used",
                 "required_read_used", "tool_arguments_used")
@@ -88,3 +89,24 @@ def public_state(saved, now):
         "last_error": saved["last_error"], "stop_reason": saved["stop_reason"],
         "retry_budget": json.loads(saved["retry_budget"]),
     }
+
+
+def repeated_no_progress(db, analysis_id):
+    """Return true when the last consecutive failures have the same safe fingerprint."""
+    rows = db.execute(
+        "SELECT agent FROM analysis_events WHERE analysis_id=? AND kind='failure' "
+        "ORDER BY id DESC LIMIT ?", (analysis_id, NO_PROGRESS_LIMIT),
+    ).fetchall()
+    if len(rows) < NO_PROGRESS_LIMIT:
+        return False
+    fingerprints = []
+    for row in rows:
+        try:
+            value = json.loads(row["agent"])
+        except (TypeError, ValueError):
+            return False
+        fingerprint = value.get("progress_fingerprint") if isinstance(value, dict) else None
+        if not isinstance(fingerprint, str) or not fingerprint:
+            return False
+        fingerprints.append(fingerprint)
+    return len(set(fingerprints)) == 1

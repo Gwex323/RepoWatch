@@ -2,12 +2,14 @@
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 from test_analysis_report_recovery import RecoveryEngine
 from test_execution import service  # noqa: F401
 from test_repository_analysis import prepare_tested
 
+from repowatch import report_scheduler
 from repowatch.repository_analysis import Analyses, report_diagnostics
 
 
@@ -41,6 +43,50 @@ def test_json_diagnostics_are_actionable_and_never_store_candidate_text():
     assert details["line"] == 1 and details["column"] > 1
     assert details["reason"] == "expected_delimiter"
     assert "candidate-private-text" not in json.dumps(details)
+
+
+def test_repeated_failure_fingerprint_requires_two_identical_consecutive_failures(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analysis_id = Analyses(execution, RecoveryEngine()).enqueue(env["id"])
+    with execution.store.connection() as db:
+        for fingerprint in ("same-safe-hash", "same-safe-hash"):
+            db.execute(
+                "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+                (analysis_id, "failure", json.dumps({
+                    "code": "scope_review_incomplete",
+                    "progress_fingerprint": fingerprint,
+                }), time.time()),
+            )
+        assert report_scheduler.repeated_no_progress(db, analysis_id)
+        db.execute(
+            "INSERT INTO analysis_events(analysis_id,kind,agent,created) VALUES(?,?,?,?)",
+            (analysis_id, "failure", json.dumps({
+                "code": "scope_review_incomplete",
+                "progress_fingerprint": "changed-safe-hash",
+            }), time.time()),
+        )
+        assert not report_scheduler.repeated_no_progress(db, analysis_id)
+
+
+def test_in_attempt_no_progress_failure_stops_automatic_recovery(service):  # noqa: F811
+    analyses, _, queued = failed_review(service)
+    with analyses.store.connection() as db:
+        db.execute(
+            "UPDATE repository_analyses SET status='failed',error='analysis_report_no_progress',"
+            "version=version+1 WHERE id=?", (queued["id"],),
+        )
+        failed = db.execute(
+            "SELECT * FROM repository_analyses WHERE id=?", (queued["id"],),
+        ).fetchone()
+        assert not analyses.schedule_report_recovery(
+            db, failed, "analysis_report_no_progress", time.time(),
+        )
+        recovery = db.execute(
+            "SELECT state,stop_reason FROM analysis_report_recovery WHERE analysis_id=?",
+            (queued["id"],),
+        ).fetchone()
+    assert dict(recovery) == {"state": "stopped", "stop_reason": "no_progress"}
 
 
 def test_schema_diagnostics_use_only_known_field_labels():

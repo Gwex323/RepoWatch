@@ -70,6 +70,49 @@ def scope_mapping_issues(findings, review, requirements, finding_ids):
     return issues
 
 
+def scope_review_issues(review, requirements, limits):
+    """Return value-free exclusion checks shared by review and persistence."""
+    requirements = {item["key"]: item for item in requirements}
+    limits = {item["key"]: item for item in limits}
+    issues = []
+    for exclusion in (review or {}).get("exclusions", []):
+        key = exclusion["key"]
+        if exclusion["outcome"] == "unrelated" and not exclusion["evidence"]:
+            issues.append({
+                "exclusion_key": key, "target_key": None,
+                "required_evidence": None, "available_evidence": [],
+                "reason": "unrelated_without_evidence",
+            })
+        if exclusion["outcome"] != "required":
+            continue
+        required_kind = "client" if set(limits.get(key, {}).get("reasons", [])) & {
+            "windows_native", "gui",
+        } else "integration"
+        targets = exclusion["required_keys"]
+        if not targets:
+            issues.append({
+                "exclusion_key": key, "target_key": None,
+                "required_evidence": required_kind, "available_evidence": [],
+                "reason": "missing_required_keys",
+            })
+            continue
+        for target_key in targets:
+            target = requirements.get(target_key)
+            available = sorted(target.get("required_evidence", [])) if target else []
+            if target is None:
+                reason = "unknown_scope_requirement"
+            elif required_kind not in available:
+                reason = "missing_evidence_kind"
+            else:
+                continue
+            issues.append({
+                "exclusion_key": key, "target_key": target_key,
+                "required_evidence": required_kind, "available_evidence": available,
+                "reason": reason,
+            })
+    return issues
+
+
 class RepairScopeCoverage(BaseModel):
     model_config = ConfigDict(extra="forbid")
     key: str = Field(min_length=1, max_length=64)

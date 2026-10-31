@@ -7,9 +7,13 @@ import time
 from typing import Annotated
 
 import pytest
-from agents import Model, ModelResponse, ModelSettings, Usage, function_tool
+from agents import AgentOutputSchema, Model, ModelResponse, ModelSettings, Usage, function_tool
 from agents.function_schema import function_schema
-from openai.types.responses import ResponseFunctionToolCall
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseOutputText,
+)
 from openai.types.shared import Reasoning
 from pydantic import Field
 from test_execution import service  # noqa: F401
@@ -29,6 +33,7 @@ from repowatch.repository_analysis import (
     Review,
     StageBudget,
     StageModel,
+    report_scope_issues,
     run_analysis,
     scope_report_issue,
 )
@@ -376,6 +381,41 @@ def test_diagnostic_event_storage_keeps_complete_safe_json(service):  # noqa: F8
     assert json.loads(saved) == detail
 
 
+def test_scope_and_failure_events_keep_complete_safe_diagnostics(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analyses = Analyses(execution, Engine())
+    analysis_id = analyses.enqueue(env["id"])
+    scope_detail = {
+        "role": ROLES[-1],
+        "issues": [{
+            "exclusion_key": f"excluded:path_{index}.py",
+            "target_key": f"registered_scope_item_{index}",
+            "required_evidence": "client",
+            "available_evidence": ["integration", "regression"],
+            "reason": "missing_evidence_kind",
+        } for index in range(12)],
+    }
+    failure_detail = {
+        "code": "analysis_report_no_progress",
+        "stage": ROLES[-1],
+        "progress_fingerprint": "a" * 64,
+        "budget": {
+            "diagnostic": "bounded failure diagnostics must remain durable " * 24,
+        },
+    }
+    scope_encoded, failure_encoded = (
+        json.dumps(scope_detail), json.dumps(failure_detail)
+    )
+    assert len(scope_encoded) > 1024 and len(failure_encoded) > 1024
+    analyses.event(analysis_id, "scope_review_validation", scope_encoded)
+    analyses.event(analysis_id, "failure", failure_encoded)
+    row = analyses.get(analysis_id)
+    saved = {e["kind"]: e["agent"] for e in row["events"]}
+    assert json.loads(saved["scope_review_validation"]) == scope_detail
+    assert json.loads(saved["failure"]) == failure_detail
+
+
 @pytest.mark.parametrize("mutation,expected", [
     ("missing", "scope_review_required"), ("version", "scope_review_incomplete"),
     ("key", "scope_review_incomplete"), ("exclusion", "scope_review_incomplete"),
@@ -399,6 +439,205 @@ def test_report_requires_current_scope_keys_and_execution_classifications(mutati
         review["exclusions"] = []
     report = Review(summary="Review", limitations=["Unavailable"], findings=[], scope_review=review)
     assert scope_report_issue(report, context) == expected
+
+
+def test_gui_exclusion_requires_client_evidence_before_final_review_acceptance():
+    context = {"task_scope": {
+        "version": 2,
+        "items": [
+            {"key": "trae_cache_adapter_safety",
+             "required_evidence": ["integration", "regression"]},
+            {"key": "windows_client_behavior", "required_evidence": ["client"]},
+        ],
+        "execution_limits": [{
+            "key": "excluded:tests/test_display_names.py",
+            "reasons": ["windows_native"],
+        }],
+    }}
+    review = Review.model_validate({
+        "summary": "Review",
+        "limitations": ["Windows client was unavailable."],
+        "findings": [],
+        "scope_review": {
+            "version": 2,
+            "accepted": False,
+            "rationale": "Coverage is incomplete.",
+            "items": [
+                {"key": "trae_cache_adapter_safety", "outcome": "blocked",
+                 "rationale": "Client evidence is missing.", "evidence": [], "finding_ids": []},
+                {"key": "windows_client_behavior", "outcome": "blocked",
+                 "rationale": "Client evidence is missing.", "evidence": [], "finding_ids": []},
+            ],
+            "exclusions": [{
+                "key": "excluded:tests/test_display_names.py",
+                "outcome": "required",
+                "required_keys": ["trae_cache_adapter_safety"],
+                "rationale": "This file needs Windows-native evidence.",
+                "evidence": [],
+            }],
+        },
+    })
+    assert scope_report_issue(review, context) == "scope_review_incomplete"
+    assert report_scope_issues(review, context) == [{
+        "exclusion_key": "excluded:tests/test_display_names.py",
+        "target_key": "trae_cache_adapter_safety",
+        "required_evidence": "client",
+        "available_evidence": ["integration", "regression"],
+        "reason": "missing_evidence_kind",
+    }]
+    review.scope_review.exclusions[0].required_keys = ["windows_client_behavior"]
+    assert scope_report_issue(review, context) is None
+    assert report_scope_issues(review, context) == []
+
+
+def test_repeated_invalid_scope_semantics_stops_without_replaying_forever():
+    class InvalidScopeReview(ReviewModel):
+        attempt = 0
+
+        async def get_response(self, *args, **kwargs):
+            result = await super().get_response(*args, **kwargs)
+            if result.output and result.output[0].type == "message":
+                content = result.output[0].content[0]
+                data = json.loads(content.text)
+                if data.get("scope_review"):
+                    self.attempt += 1
+                    data["scope_review"]["exclusions"] = [{
+                        "key": "excluded:app.py",
+                        "outcome": "required",
+                        "required_keys": ["fixture_behavior"],
+                        "rationale": (
+                            f"The excluded file needs client evidence ({self.attempt})."
+                        ),
+                        "evidence": [],
+                    }]
+                    content.text = json.dumps(data)
+            return result
+
+    events = []
+
+    def event(kind, value):
+        events.append((kind, value))
+        if kind == "scope_batch_check":
+            return []
+        if kind == "scope_batch_execute":
+            packet = json.loads(value)
+            item = packet["batches"][0][0]
+            return [{"version": 2, "items": [item], "execution_limits": [{
+                "key": "excluded:app.py", "reasons": ["windows_native"],
+            }]}]
+
+    context = {
+        "files": {"app.py": "print('ok')"},
+        "config": {},
+        "jobs": [],
+        "test_result": None,
+        "task_scope": {"version": 1, "items": []},
+    }
+    with pytest.raises(AnalysisFailure, match="analysis_report_no_progress"):
+        asyncio.run(run_analysis(InvalidScopeReview(), context, event))
+    validations = [json.loads(value) for kind, value in events
+                   if kind == "scope_review_validation"]
+    assert validations == [{
+        "role": ROLES[-1],
+        "issues": [{
+            "exclusion_key": "excluded:app.py",
+            "target_key": "fixture_behavior",
+            "required_evidence": "client",
+            "available_evidence": ["regression"],
+            "reason": "missing_evidence_kind",
+        }],
+    }]
+    assert sum(kind == "format_retry" for kind, _ in events) == 1
+
+
+def test_generic_review_correction_clears_stale_private_mapping_checkpoint():
+    context = {
+        "task_scope": {
+            "version": 1,
+            "items": [{
+                "key": "fixture_behavior",
+                "required_evidence": ["regression"],
+            }],
+            "execution_limits": [],
+        },
+        "current_scope_findings": [],
+    }
+    review = {
+        "summary": "Review candidate.",
+        "limitations": ["Fixture only."],
+        "findings": [],
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "rationale": "The mapping still needs review.",
+            "items": [{
+                "key": "fixture_behavior",
+                "outcome": "blocked",
+                "rationale": "Fixture only.",
+                "evidence": [],
+                "finding_ids": ["missing_finding"],
+            }],
+            "exclusions": [],
+        },
+    }
+
+    class ScopedModel(Model):
+        calls = 0
+
+        async def get_response(self, system_instructions, input, **kwargs):
+            self.calls += 1
+            if self.calls == 2:
+                payload = {"edits": [{
+                    "section": "scope_items",
+                    "item": 1,
+                    "references": [],
+                    "new_findings": [],
+                    "unresolved": True,
+                    "rationale": "No persisted finding can be linked.",
+                }]}
+            else:
+                payload = review
+            return ModelResponse(output=[ResponseOutputMessage(
+                id=f"review_{self.calls}",
+                type="message",
+                role="assistant",
+                status="completed",
+                content=[ResponseOutputText(
+                    type="output_text",
+                    text=json.dumps(payload),
+                    annotations=[],
+                )],
+            )], usage=Usage(requests=1), response_id=None)
+
+        async def stream_response(self, *args, **kwargs):
+            raise NotImplementedError()
+            yield
+
+    contracts = iter(["scope_mapping_invalid", "scope_review_incomplete", None])
+    saved = []
+    model = ScopedModel()
+    stage = StageModel(
+        model,
+        ROLES[-1],
+        StageBudget(),
+        lambda *_: None,
+        review_contract=lambda _review: next(contracts),
+        scope_context=lambda: context,
+        save_correction=saved.append,
+    )
+    result = asyncio.run(stage.get_response(
+        "Trusted final-review instructions",
+        json.dumps({"files": {"app.py": "print('ok')"}}),
+        tools=[],
+        handoffs=[],
+        output_schema=AgentOutputSchema(Review),
+        model_settings=ModelSettings(max_tokens=6000),
+    ))
+    assert result.output
+    assert len(saved) == 3
+    assert saved[0]["kind"] == "scope_mapping_correction"
+    assert saved[1]["kind"] == "scope_mapping_correction"
+    assert saved[2] is None
 
 
 @pytest.mark.parametrize("persistent", [False, True])
