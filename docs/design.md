@@ -23,14 +23,13 @@ placeholders from long key-shaped values while preserving log redaction and
 credential assignment gates. Focused validation and independent review passed;
 deployment and real target-repository acceptance remain outstanding.
 
-Issue #116 is implemented on `feature/analysis-runaway-retry-116` (base
-`0c4affe`) and published as PR #117 (open, targeting
-`codex/initial-upload`): model-request timeouts now have a persistent
-four-retry budget,
-tool/handoff/required-read corrections share a persistent two-correction
-budget, manual analysis creates a new record after any terminal record instead
-of reusing it, and environment stop/delete cancels orphan analyses together
-with their leases and report recovery. Cancellation and exhausted-budget
+Issue #116 was merged into the default branch via PR #117 as merge commit
+`608d30c` on 2026-10-31. Model-request timeouts now have a persistent
+four-retry budget, tool/handoff/required-read corrections share a persistent
+two-correction budget, manual analysis creates a new record after any terminal
+record instead of reusing it, and environment stop/delete cancels orphan
+analyses together with their leases and report recovery. Cancellation and
+exhausted-budget
 diagnostics are visible in the UI and cannot be restarted indefinitely by
 automatic recovery. Final split regression passed 456 cases, including 43
 system-fault cases. One execution-pipeline timing case initially exceeded its
@@ -38,9 +37,8 @@ three-second wait under parallel load; the complete execution-pipeline file was
 rerun serially and passed 23/23. Ruff, Python compilation, frontend build and
 diff checks passed. Code review found and fixed the timeout auto-recovery loop,
 the tool-detail message override and the missing cancellation audit event. No
-blocking review findings remain. PR #117 is mergeable but is not merged,
-deployed or loaded into the running workbench, and real target-repository
-acceptance is pending.
+blocking review findings remain. Deployment and real target-repository
+acceptance remain outstanding.
 
 Issue #112 was merged into the default branch via PR #113 as merge commit
 `0c771ae` on 2026-10-31. Final-review validation now applies the same

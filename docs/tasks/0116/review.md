@@ -4,9 +4,9 @@
 - Issue：<https://github.com/Gwex323/RepoWatch/issues/116>。
 - 分支：`feature/analysis-runaway-retry-116`，从最新默认分支
   `origin/codex/initial-upload` 的 `0c4affe` 创建。
-- 结论：实现、相关回归、系统故障测试、前端构建和本地代码审查通过；已创建
-  中文 PR #117（目标分支 `codex/initial-upload`），当前开放且可合并，尚未
-  合并、部署或重启工作台，真实目标仓库验收尚未执行。
+- 结论：实现、相关回归、系统故障测试、前端构建和本地代码审查通过；中文
+  PR #117 已合并到默认分支 `codex/initial-upload`，合并提交为 `608d30c`
+  （2026-10-31）。尚未部署或重启工作台，真实目标仓库验收尚未执行。
 
 ## 根因
 
@@ -61,7 +61,7 @@
 
 ## 未完成范围
 
-- PR #117 已创建，当前尚未合并或部署，未重启端口 8765 的工作台。
+- PR #117 已合并，当前尚未部署，未重启端口 8765 的工作台。
 - 尚未对 `Gwex323/gateway-model-assistant` 重新执行真实分析、修复、审查和
   发布验收。
 - 本轮未运行浏览器端到端测试；前端仅完成 TypeScript 和 Vite 生产构建。
