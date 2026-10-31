@@ -43,7 +43,12 @@ from repowatch.repository_analysis import (
 )
 from repowatch.scope_models import ScopeRequirement
 from repowatch.store import Conflict
-from repowatch.task_scopes import register_scope, request_scope_review, scope_packet
+from repowatch.task_scopes import (
+    register_scope,
+    request_scope_review,
+    save_scope_review,
+    scope_packet,
+)
 
 
 def register_task_scope(
@@ -450,6 +455,23 @@ def test_failure_payload_falls_back_to_bounded_scalars_without_truncating_json()
     assert len(saved["exception_type"]) == 128
 
 
+def test_failure_payload_has_a_hard_bound_for_every_optional_text_field():
+    details = {
+        key: "界" * 4000
+        for key in (
+            "code", "stage", "exception_type", "progress_fingerprint",
+            "sqlite_errorcode", "http_status",
+        )
+    }
+    details["elapsed_seconds"] = 1.5
+    encoded = failure_event_payload(details)
+    saved = json.loads(encoded)
+    assert len(encoded) <= 1000
+    assert len(saved["code"]) <= 128
+    assert len(saved["stage"]) <= 128
+    assert len(saved["progress_fingerprint"]) <= 128
+
+
 @pytest.mark.parametrize("mutation,expected", [
     ("missing", "scope_review_required"), ("version", "scope_review_incomplete"),
     ("key", "scope_review_incomplete"), ("exclusion", "scope_review_incomplete"),
@@ -536,6 +558,76 @@ def test_gui_exclusion_requires_client_evidence_before_final_review_acceptance()
     review.scope_review.exclusions[0].required_keys = ["windows_client_behavior"]
     assert scope_report_issue(review, context) is None
     assert report_scope_issues(review, context) == []
+
+
+def test_review_and_save_reject_the_same_gui_scope_semantics(service):  # noqa: F811
+    execution, _, _ = service
+    env = prepare_tested(service)
+    analyses = Analyses(execution, Engine())
+    analysis_id = analyses.enqueue(env["id"])
+    with execution.store.connection() as db:
+        row = dict(db.execute(
+            "SELECT * FROM repository_analyses WHERE id=?", (analysis_id,),
+        ).fetchone())
+        context = json.loads(row["context"])
+        context.setdefault("files", {})["app.py"] = "print('ok')\n"
+        context["test_result"] = {"desktop_scope": {
+            "excluded": [{
+                "path": "tests/test_display_names.py",
+                "reasons": ["windows_native"],
+            }],
+            "skipped": 0,
+        }}
+        db.execute(
+            "UPDATE repository_analyses SET status='running',context=? WHERE id=?",
+            (json.dumps(context), analysis_id),
+        )
+        row.update(status="running", context=json.dumps(context))
+        first = register_scope(db, row, [{
+            "key": "trae_cache_adapter_safety",
+            "title": "TRAE adapter safety",
+            "expected": "Adapter behavior remains safe.",
+            "paths": ["app.py"],
+            "required_evidence": ["integration", "regression"],
+        }], ROLES[0])
+        scope = register_scope(db, row, [{
+            "key": "windows_client_behavior",
+            "title": "Windows client behavior",
+            "expected": "The native client behavior is verified.",
+            "paths": ["app.py"],
+            "required_evidence": ["client"],
+        }], ROLES[0])
+        assert scope["version"] == first["version"] + 1
+        review = Review.model_validate({
+            "summary": "Review",
+            "limitations": ["Windows-native tests were excluded."],
+            "findings": [],
+            "scope_review": {
+                "version": scope["version"],
+                "accepted": False,
+                "rationale": "Coverage is incomplete.",
+                "items": [
+                    {"key": "trae_cache_adapter_safety", "outcome": "blocked",
+                     "rationale": "Client evidence is missing.", "evidence": [],
+                     "finding_ids": []},
+                    {"key": "windows_client_behavior", "outcome": "blocked",
+                     "rationale": "Client evidence is missing.", "evidence": [],
+                     "finding_ids": []},
+                ],
+                "exclusions": [{
+                    "key": "excluded:tests/test_display_names.py",
+                    "outcome": "required",
+                    "required_keys": ["trae_cache_adapter_safety"],
+                    "rationale": "The excluded file needs Windows-native evidence.",
+                    "evidence": [],
+                }],
+            },
+        })
+        assert scope_report_issue(
+            review, {"task_scope": scope},
+        ) == "scope_review_incomplete"
+        with pytest.raises(Conflict, match="scope_review_incomplete"):
+            save_scope_review(db, row, review.scope_review.model_dump(), [])
 
 
 @pytest.mark.parametrize(("outcome", "targets", "reason", "required_evidence"), [

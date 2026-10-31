@@ -10,7 +10,11 @@ from test_execution import service  # noqa: F401
 from test_repository_analysis import prepare_tested
 
 from repowatch import report_scheduler
-from repowatch.repository_analysis import Analyses, report_diagnostics
+from repowatch.repository_analysis import (
+    Analyses,
+    report_diagnostics,
+    report_failure_fingerprint,
+)
 
 
 def failed_review(execution_fixture):
@@ -67,6 +71,33 @@ def test_repeated_failure_fingerprint_requires_two_identical_consecutive_failure
             }), time.time()),
         )
         assert not report_scheduler.repeated_no_progress(db, analysis_id)
+
+
+def test_checkpoint_progress_changes_the_no_progress_fingerprint():
+    context = {"task_scope": {
+        "items": [{"key": "behavior", "required_evidence": ["regression"]}],
+        "execution_limits": [],
+    }}
+    report = {
+        "scope_review": {
+            "version": 1,
+            "accepted": False,
+            "items": [{
+                "key": "behavior",
+                "outcome": "blocked",
+                "evidence": [],
+                "finding_ids": [],
+            }],
+            "exclusions": [],
+        },
+    }
+    before = report_failure_fingerprint(
+        "scope_review_incomplete", "checkpoint-before-new-read", report, context,
+    )
+    after = report_failure_fingerprint(
+        "scope_review_incomplete", "checkpoint-after-new-read", report, context,
+    )
+    assert before != after
 
 
 def test_no_progress_fingerprint_ignores_unrelated_failures_between_repeats(service):  # noqa: F811

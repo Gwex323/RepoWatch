@@ -1,6 +1,7 @@
 """Bounded model proposals; none of these fields authorizes completion by itself."""
 
 import hashlib
+import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -124,6 +125,10 @@ def _label(value):
     return {"sha256": hashlib.sha256(value.encode()).hexdigest()}
 
 
+def _progress_sort_key(value):
+    return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
 def scope_review_progress(review):
     """Return a text-free, order-independent shape for no-progress comparisons."""
     if not isinstance(review, dict):
@@ -171,8 +176,8 @@ def scope_review_progress(review):
         else type(review.get("version")).__name__,
         "accepted": review.get("accepted") if type(review.get("accepted")) is bool
         else type(review.get("accepted")).__name__,
-        "items": sorted(item_rows, key=lambda item: repr(item)),
-        "exclusions": sorted(exclusion_rows, key=lambda item: repr(item)),
+        "items": sorted(item_rows, key=_progress_sort_key),
+        "exclusions": sorted(exclusion_rows, key=_progress_sort_key),
         "items_type": type(items).__name__,
         "exclusions_type": type(exclusions).__name__,
     }
