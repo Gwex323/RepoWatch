@@ -1,0 +1,30 @@
+{
+  "protocol_version": "1",
+  "providers": [
+    {
+      "name": "provider-a",
+      "base_url": "https://provider-a.example/v1",
+      "credential_env": "REPOWATCH_E1_PROVIDER_A_KEY",
+      "credential_revision": 1,
+      "configuration_revision": 1,
+      "processor": {"model": "replace-with-processor-model"},
+      "reviewer": {"model": "replace-with-reviewer-model"}
+    },
+    {
+      "name": "provider-b",
+      "base_url": "https://provider-b.example/v1",
+      "credential_env": "REPOWATCH_E1_PROVIDER_B_KEY",
+      "credential_revision": 1,
+      "configuration_revision": 1,
+      "processor": {"model": "replace-with-processor-model"},
+      "reviewer": {"model": "replace-with-reviewer-model"}
+    }
+  ],
+  "limits": {
+    "max_calls": 32,
+    "max_calls_per_cell": 4,
+    "max_output_tokens": 2048,
+    "request_timeout_seconds": 30,
+    "total_seconds": 300
+  }
+}
