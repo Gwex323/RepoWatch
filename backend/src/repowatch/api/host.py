@@ -5,6 +5,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from repowatch.adapters.credentials import WindowsCredentialVault
+from repowatch.adapters.git_objects import GitObjects
 from repowatch.adapters.github import GitHubReadAdapter
 from repowatch.adapters.providers import ProviderAdapter
 from repowatch.adapters.storage.sqlite import SQLiteBusinessStore
@@ -20,7 +21,9 @@ from repowatch.application.github_reads import GitHubReads, MemorySourceFacts
 from repowatch.application.orchestration import Orchestrator
 from repowatch.application.providers import ProviderService
 from repowatch.application.recovery import RecoveryService
+from repowatch.application.repositories import RepositoryService
 from repowatch.application.roles import RoleService
+from repowatch.application.scans import ScanService
 from repowatch.application.task_records import TaskRecords
 from repowatch.configuration import StorageSettings
 from repowatch.worker.commands import CommandSupervisor
@@ -46,7 +49,15 @@ class HostServices:
         self.roles = RoleService(self.store, self.artifacts)
         self.diagnostics = DiagnosticService(self.store)
         self.github_reads = GitHubReads(self.store, GitHubReadAdapter())
+        self.repositories = RepositoryService(
+            self.store,
+            lambda reference: GitHubReadAdapter(vault=self.vault, credential_reference=reference),
+        )
+        self.queue.target_gate = self.repositories.verify_target
         self.memory_sources = MemorySourceFacts(self.store)
+        self.scans = ScanService(
+            self.store, GitObjects(settings.data_dir / "git-objects"), self.artifacts
+        )
         self.console = Console(self.store, self.budgets, self.providers, self.roles)
 
     def reconcile_startup(self):

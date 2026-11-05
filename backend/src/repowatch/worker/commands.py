@@ -140,6 +140,19 @@ class CommandSupervisor:
         identity = json.loads(row["identity_json"])
         if row["state"] in {"stopped", "isolated"}:
             return json.loads(row["evidence_json"])
+        if identity.get("kind") == "docker":
+            from repowatch.adapters.docker_workspaces import DockerWorkspaces
+
+            backend = DockerWorkspaces(self.staging_dir / "docker", None)
+            proof = backend.command_status(identity)
+            if proof["stopped"]:
+                with self.store.write() as records:
+                    records.change(
+                        "command_states",
+                        {"id": identifier},
+                        {"state": "stopped", "evidence_json": canonical_json(proof)},
+                    )
+            return proof
         if identity.get("job_name") != f"Local\\RepoWatch-{identifier}":
             return {
                 "stopped": False,
@@ -189,6 +202,11 @@ class CommandSupervisor:
         with self.store.read() as records:
             row = required(records, "command_states", id=identifier)
             identity = json.loads(row["identity_json"])
+        if identity.get("kind") == "docker":
+            from repowatch.adapters.docker_workspaces import DockerWorkspaces
+
+            DockerWorkspaces(self.staging_dir / "docker", None).command_status(identity, stop=True)
+            return self.inspect(identifier)
         if row["state"] not in {"stopped", "isolated"}:
             try:
                 job = WindowsJob(identity["job_name"], create=False)

@@ -1,13 +1,13 @@
 # 当前状态与接续
 
-核验日期：2026-11-04。P1 的 2.1—2.8、3.1—3.9 已完成，阶段开发门槛通过：持久队列／预算／恢复、受保护凭据及模型、正式运行引擎、最小控制台和只读来源接口均有实现与验收。最终全量后端 316 项通过、1 项 Docker 用例按既有开关跳过；Ruff、80 项依赖离线锁、wheel／隔离包迁移、前端构建、Edge 12 项操作及 OpenSpec strict 通过。真实 E1 用户复测已核验，8／8 通过、23 次请求均 HTTP 200。完整产品与真实仓库执行尚待 P2—P6；本轮未调用真实 GitHub、未提交／推送或部署。
+核验日期：2026-11-05，P2 最终验收复跑完成。Docker Desktop 恢复后，先前三个 Docker 受阻用例 `3 passed`；完整 Docker-enabled 后端套件 `402 passed, 1 skipped in 460.62s`，JUnit 报告 `.cache/p2-final-docker-ready-20261105.xml`（403 tests，0 failures/errors）。唯一跳过为需额外 `REPOWATCH_DOCKER_E2E=1` 的 LFS／子模块 Git 对象交接实验，不属于 P2 扫描验收。Ruff／格式、OpenSpec strict 和差异检查通过；P2 4.1—5.8 均有任务证据，计数 41／89。当前分支 `feature/p2-repositories-workspaces`，未提交／推送或部署。P3—P6、真实 GitHub 写入、付费模型、发布及最终用户验收未完成。
 
 ## 当前目标与进展
 
 - P0 与全部 P1 任务已完成。P1 提供正式串行执行位、累计预算和有限续期、实际命令监督、显式恢复、角色能力／有限重试、回环会话／API／UI、持久无进展检测及 GitHub 只读来源接口。E1 费用仍待按账单核实。P0 的对象交接、恢复／调度及编码选型结论沿用[门槛汇总](../development/p0-summary.md)和[编码资产评测](../development/embedding-evaluation.md)，不替代后续真实仓库验收。
 - 需求与最终架构已有基线、实施契约和 ADR，来源路由见 [项目索引](../../PROJECT_INDEX.md)。本次不重启需求访谈。
-- 活动变更为 `build-github-issue-agent-harness`：[proposal](../../openspec/changes/build-github-issue-agent-harness/proposal.md)、[design](../../openspec/changes/build-github-issue-agent-harness/design.md)、[11 个能力的 delta specs](../../openspec/changes/build-github-issue-agent-harness/specs/) 和 [tasks](../../openspec/changes/build-github-issue-agent-harness/tasks.md) 已存在。整体完成 27／89，剩余 62 项均为后续阶段；任务级证据在 tasks 维护，本变更尚不归档。
-- 开发安装见[开发入口](../development/README.md)，API／Worker 开发运行与人工入口见[本地控制](../development/local-control.md)，P1 引擎及 E7／E14／E18／E20 内核映射见[运行验收](../development/runtime.md#复跑与实验映射)。当前普通 Worker 未接入真实工作区，会拒绝仓库任务而不在宿主执行代码；独立有界诊断已可派发。完整产品及用户验收未完成，OpenSpec 主规格仍未形成已实现基线。
+- 活动变更为 `build-github-issue-agent-harness`：[proposal](../../openspec/changes/build-github-issue-agent-harness/proposal.md)、[design](../../openspec/changes/build-github-issue-agent-harness/design.md)、[11 个能力的 delta specs](../../openspec/changes/build-github-issue-agent-harness/specs/) 和 [tasks](../../openspec/changes/build-github-issue-agent-harness/tasks.md) 已存在。按当前任务勾选计为 41／89；完整后端最终复跑未完成，本变更不归档。
+- 开发安装见[开发入口](../development/README.md)，API／Worker 与人工入口见[本地控制](../development/local-control.md)，P1 引擎验收见[运行验收](../development/runtime.md#复跑与实验映射)。Worker 已接入扫描协调器，但生产级扫描闭环仍在复核；修复与发布适配尚未交付。完整产品及用户验收未完成。
 - 已补充目标分支 SHA 读取和仓库手动“检查更新”的规划契约与验收场景；实现和运行验证仍待对应阶段完成。
 - 最新决定：本地扫描缺陷由系统查重后创建或关联 GitHub Issue；外部开放 PR 在建分支前及发布前检查，同一问题则关联等待、确认无关则继续，仅关系不明请求用户判断；已合入目标分支的相关 PR 直接核验是否解决。这些业务入口仍待对应阶段。人工介入须提供证据、操作与持久结果，处理后重核门槛；P1 通用补充／配置／预算／诊断／恢复框架已实现，各后续阶段同步交付其专属入口。
 - 最新循环与预算决定：按真实产物检测无进展及振荡；复杂任务有进展但预计额度不足时，耗尽前正常等待用户批准有限追加，账本与检测历史不清零；已耗尽／无进展等仍全局阻塞且不因加额自动恢复。初值与恢复条件见[实施契约 §3](../implementation-contracts.md#无进展检测)。预算、检测、UI 和正式图集成已完成受控验收；真实扫描／修复事实生产及生产样本阈值校准由后续适配补齐。
@@ -15,18 +15,24 @@
 
 ## 阻塞与待核实
 
-- 用户已明确授权按开发文档连续推进全部剩余 P1 项，每项完成后直接继续，仅需要人工介入时暂停；当前任务分支为 `feature/github-issue-agent-harness`，原有未提交文档保留，未提交或推送。
+- 用户已明确授权按开发文档连续推进全部剩余 P2 项，每项完成后直接继续，仅需要人工介入时暂停；当前任务分支为 `feature/p2-repositories-workspaces`，原有未提交改动保留，未提交或推送。
 - P0 六项关键切片均已通过，P1 已放行；但费用账单、真实 GitHub 写入、完整 E11 安装／启停／交付链路、LFS 实体与子模块对象仍未完成，含这些内容的仓库保持阻塞。1.9 主选 `jinaai/jina-embeddings-v2-base-zh`（Apache-2.0、768 维、0.64GB、离线加载通过），代码备选为 `jinaai/jina-embeddings-v2-base-code`；评测仅覆盖 22 条语料／12 条查询，生产召回与运行时锁仍需在 P5 前复核。编码运行时未加入默认依赖，模型资产未固定摘要。
 - P1 已无需要人工介入的开发阻塞。普通仓库执行需 P2 的身份／工作区／Runner／扫描接入；本轮只读 GitHub 通过 HTTP 夹具验证，未访问真实仓库。P1 通过不代表真实修复发布、完整产品部署或最终用户验收通过。
 - 此前 3.3 的凭据预检阻塞已解除：用户完成真实复测，新报告配置摘要匹配，8／8 通过，23 次请求全部 HTTP 200；费用仍待核实。其后 P1 集成已完成，未重复执行付费复测，证据见[P1 供应商](../development/providers.md#当前验证与真实-e1-复测)。
 
 ## 下一步
 
-1. 本次连续 P1 开发已完成。下一开发阶段为 P2，从 4.1 多仓身份／策略与配置 UI 开始，随后接入受管对象、Docker 工作区及扫描；本次未自动启动 P2。
+1. P2 验收已完成。后续如继续开发，从 P3 修复与证据验证按 OpenSpec 顺序推进；P4 检查更新尚未实现，不纳入本阶段声明。
 2. 沿用活动变更与任务分支，保持正式预算／执行权／核验端口，不以 P0 原型代替生产状态机。后续按 tasks 交付对应人工入口并保留原账本和窗口。
 3. 完整安装启停、备份、产品级故障集及真实修复发布仍按 P6 和对应阶段验收，不提前标记最终产品完成。
 
 ## 证据入口与时效
+
+- 2026-11-05 P2 复核修复：最终启用 `REPOWATCH_DOCKER_TESTS=1` 的全量后端 `384 passed, 1 skipped`，本地 JUnit 报告 `.cache/p2-review-final-v3.xml`。此前全量发现的无仓库诊断发布守卫回归已修复并包含在最终套件。真实 Docker 覆盖固定镜像、临时分区、Python wheel／Node 本地依赖离线安装、声明摘要不变、控制停止、结果复用、重建与删除；正式扫描协调器另经真实 Deep Agents 工具／SDK 模拟 HTTP 完成三次调用、原预算记账、宿主覆盖事实、工作区退役与就绪交接。P2 Edge 六项报告 `.cache/p2-browser/1793853681290/report.json`，P1 Edge 十二项复跑截图 `.cache/p1-browser/1793854566359/control.png`。Ruff、TypeScript／Vite、OpenSpec strict 及四份文档 121 处链接检查通过；未调用真实付费模型或 GitHub 写入，完整修复发布未执行。
+- 2026-11-05 中间复核（已被下方最终全量结果取代）：当时末次 Docker／非 Docker 全量运行挂起并中止，相关回归为 `70 passed` 与 `24 passed, 3 skipped`；随后新增供应商失败组合与 Worker 恢复交接测试。此中间记录不是最终门槛结论。
+- 2026-11-05 按序验收：4.5 根锁离线依赖与缺环境报告、5.2 基线状态持久核验、5.4 补扫／拆分／证据重收、5.6 版本批次、5.7 分支与依赖门禁、5.8 UI 操作及 5.5 Worker 跨 Run 恢复交接有直接回归；扫描／正式运行／调度合并 `76 passed`。真实 Docker Python wheel／Node 本地依赖和工作区回归 `12 passed`；Edge 报告 `.cache/p2-browser/1793864390192/report.json` 验证候选选择／排除、任务导航、补充材料、暂停与取消。最后补丁后的全后端套件仍未在本机稳定通过，P2 最终验收待该门槛。
+- 2026-11-05 最终全量复核：用户报告 `402 passed, 1 skipped in 350.52s`；该结果被记录为用户提供的验收证据。本地复跑报告 `.cache/p2-final-20261105.xml` 为 `399 passed, 3 failed, 1 skipped`，3 项都是 Docker Desktop `npipe` 权限拒绝导致的 Docker 操作失败（Python/Node 离线安装、真实 Docker 工作区创建）；不是产品测试断言失败，但也不能计为通过。当前 P2 代码／专项验收齐全，最终全量门槛需在允许 Docker named pipe 的授权环境重新取得绿色报告。报告由本机尝试生成；未提交／推送／部署。
+- 2026-11-05 Docker 恢复后最终报告：`402 passed, 1 skipped in 460.62s`，本地 JUnit `.cache/p2-final-docker-ready-20261105.xml`，403 tests、0 failures、0 errors。Docker 启动后先前三项阻塞测试单独复跑 `3 passed`。唯一跳过为 `test_docker_object_handoff_end_to_end`，受独立 `REPOWATCH_DOCKER_E2E=1` 开关控制，验收 LFS／子模块交接，不属于扫描 P2；此报告取代上一条本机 Docker 权限受阻结果。
 
 - 2026-11-04 P1 最终集成：`experiments/run.py p1-kernel` 全量 316 项通过、1 项 Docker 跳过，报告 `experiments/results/local/p1-kernel.json`。覆盖 E7 多进程／父子执行权、E14 累计预算与持久检测、E18 恢复和 E20 最小存储故障；9 项正式 SDK／图验收和 6 项 GitHub 只读夹具均通过。Ruff 检查／格式、80 项依赖离线锁、前端 TypeScript／Vite、wheel 及解包后隔离导入／`0014_read_sources` 重复迁移／暂停 Worker、OpenSpec strict 均通过。实际 Edge 12 项操作通过，截图 `.cache/p1-browser/1793780726451/control.png`；使用临时回环宿主和测试数据，未调用外部模型／GitHub。真实 E1 用户复测另为完整矩阵 8／8、23 次 HTTP 200，见[P1 供应商证据](../development/providers.md#当前验证与真实-e1-复测)。费用账单、完整产品链路与最终用户验收未完成；未提交／推送或部署。
 

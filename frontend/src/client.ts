@@ -81,6 +81,16 @@ export type State = {
         github_id: string;
         paused: number;
         revision: number;
+        github_owner?: string;
+        github_name?: string;
+        target_branch?: string;
+        contribution_path?: string;
+        credential_reference?: string;
+        import_epoch?: number;
+        scan_ready_sha?: string;
+        publication?: { owner: string; name: string };
+        policy?: { mode: string; allowed_labels: string[]; excluded_labels: string[]; severity_labels: Record<string, number>; claim_comment: boolean; claim_template: string };
+        scan_policy?: { chunk_bytes?: number; exclusions?: Record<string, string> };
     }>;
     tasks: Task[];
     providers: Provider[];

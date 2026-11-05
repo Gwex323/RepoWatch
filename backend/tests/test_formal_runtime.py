@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 
 import httpx
 import pytest
@@ -12,12 +13,13 @@ from repowatch.application.task_records import TaskRecords
 from repowatch.domain.budget import BudgetAmounts
 from repowatch.domain.task_records import canonical_json
 from repowatch.runtime.engine import FormalRuntime, StagePlan, ToolBinding
+from repowatch.runtime.prototype import MissingStructuredResult
 
 
-def start(k, *, policy=None):
+def start(k, *, policy=None, mode="triage", model_calls=30):
     tasks = TaskRecords(k.store)
     repo = tasks.register_repository("runtime-fixture", admission_mode="all_bugs")
-    task = tasks.ensure_task(repo, "runtime-fixture", now=0)
+    task = tasks.ensure_task(repo, "runtime-fixture", mode=mode, now=0)
     with k.store.write() as records:
         records.change("repositories", {"id": repo}, {"target_sha": "a" * 40})
         records.change(
@@ -40,7 +42,11 @@ def start(k, *, policy=None):
         "runtime-budget",
         task,
         BudgetAmounts(
-            active_ms=1000000, model_calls=30, tokens=1000000, repair_rounds=5, recovery_rounds=5
+            active_ms=1000000,
+            model_calls=model_calls,
+            tokens=1000000,
+            repair_rounds=5,
+            recovery_rounds=5,
         ),
         expected_revision=1,
         reason="受控运行夹具",
@@ -151,6 +157,215 @@ def services(k, wire):
     k.clock = lambda: 0
     k.adapter = ProviderAdapter(k.providers, transport=httpx.MockTransport(wire))
     return k
+
+
+def test_scan_missing_structured_output_can_be_rescanned_without_global_block(kernel, monkeypatch):
+    k = kernel
+    bind(k)
+    diagnose(k, "processor")
+    _, token = start(k)
+    wire, _ = fixture_wire()
+    services(k, wire)
+    runtime = FormalRuntime(k)
+    monkeypatch.setattr(
+        "repowatch.runtime.engine.create_deep_agent",
+        lambda **kwargs: type("Graph", (), {"invoke": lambda self, *args, **kw: {}})(),
+    )
+    scan_plan = replace(
+        plan([]),
+        mode="scan",
+        verifier=lambda result, events: {
+            "comparison": {"result": "incomplete"},
+            "verified_fact_ids": [],
+        },
+    )
+    with pytest.raises(MissingStructuredResult):
+        runtime.run(token, scan_plan)
+    with k.store.read() as records:
+        assert not records.find("block_reasons", resolved=0)
+        assert records.find("runtime_stages", state="failed")
+
+
+@pytest.mark.parametrize(
+    "scenario", ["complete", "no_progress", "budget_exhausted", "provider_failure"]
+)
+def test_formal_scan_tools_produce_verified_coverage_on_original_budget(kernel, scenario):
+    from types import SimpleNamespace
+
+    from repowatch.application.repositories import RepositoryService
+    from repowatch.application.scans import ScanService
+    from repowatch.application.workspaces import WorkspaceService
+    from repowatch.worker.scans import ScanCoordinator
+
+    k = kernel
+    bind(k)
+    diagnose(k, "processor")
+    task_id, token = start(k, mode="scan", model_calls=1 if scenario == "budget_exhausted" else 30)
+    content = b"value = 1\n"
+    objects = SimpleNamespace(
+        fetch=lambda *args, **kwargs: "a" * 40,
+        entries=lambda *args: [
+            {
+                "path": "fixture.py",
+                "oid": "b" * 40,
+                "mode": "100644",
+                "kind": "blob",
+            }
+        ],
+        blob=lambda *args: content,
+        repository=lambda *args: "fixture",
+        run=lambda *args: b"a" * 40,
+    )
+    calls = []
+
+    def wire(request):
+        body = json.loads(request.content)
+        calls.append(body)
+        if scenario == "provider_failure":
+            return httpx.Response(503, json={"error": {"message": "fixture unavailable"}})
+        envelope = next(
+            json.loads(message["content"])
+            for message in body["messages"]
+            if message["role"] == "user"
+            and isinstance(message.get("content"), str)
+            and message["content"].startswith('{"protocol_version"')
+        )
+        tools = [message for message in body["messages"] if message["role"] == "tool"]
+        if not tools:
+            name, arguments = "read_source", {}
+        elif len(tools) == 1:
+            inputs = json.loads(tools[0]["content"])
+            name, arguments = (
+                "write_analysis",
+                {
+                    "input_sha256": inputs["unit"]["sha256"],
+                    "complete": scenario != "no_progress",
+                    "analysis": "已核对实际分块的内容、边界、配置及潜在错误路径。",
+                    "findings": [],
+                },
+            )
+        else:
+            name, arguments = (
+                "StructuredResult",
+                {
+                    "context": envelope["context"],
+                    "mode": "scan",
+                    "status": "completed",
+                    "summary": "扫描块已完成",
+                    "artifacts": [],
+                    "unresolved": [],
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "id": "scan",
+                "object": "chat.completion",
+                "created": 0,
+                "model": body["model"],
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": str(len(calls)),
+                                    "type": "function",
+                                    "function": {
+                                        "name": name,
+                                        "arguments": json.dumps(arguments),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
+            },
+        )
+
+    services(k, wire)
+    coordinator = object.__new__(ScanCoordinator)
+    coordinator.services, coordinator.objects = k, objects
+    coordinator.scans = ScanService(k.store, objects, k.artifacts)
+    with k.store.read() as records:
+        repository_id = records.one("tasks", id=task_id)["repository_id"]
+    with k.store.write() as records:
+        records.change(
+            "repositories",
+            {"id": repository_id},
+            {
+                "identity_json": "{}",
+                "github_owner": "up",
+                "github_name": "repo",
+                "target_branch": "main",
+                "credential_reference": "github",
+            },
+        )
+    backend = SimpleNamespace(
+        create=lambda *args, **kwargs: {
+            "id": "formal-workspace",
+            "ready": True,
+            "repository_id": repository_id,
+            "sha": "a" * 40,
+            "image": "fixture",
+            "manifest_sha256": "b" * 64,
+        },
+        remove=lambda *args: None,
+    )
+    k.repositories = RepositoryService(
+        k.store, lambda _: SimpleNamespace(branch=lambda *args: "a" * 40)
+    )
+    k.vault = SimpleNamespace(read=lambda _: None)
+    coordinator.backend = backend
+    coordinator.workspaces = WorkspaceService(k.store, backend)
+    coordinator.runtime = FormalRuntime(k)
+    if scenario != "complete":
+        from repowatch.adapters.providers import ProviderRequestError
+        from repowatch.domain.budget import BudgetDenied
+
+        expected_error = (
+            ProviderRequestError
+            if scenario == "provider_failure"
+            else (PermissionError, BudgetDenied)
+        )
+        with pytest.raises(expected_error):
+            coordinator.run(token)
+        with k.store.read() as records:
+            assert not records.find("scan_coverage")
+            assert records.one("global_control", singleton=1)["paused"]
+            reasons = records.find("block_reasons", resolved=0)
+            assert any(
+                row["code"]
+                == (
+                    "no_progress"
+                    if scenario == "no_progress"
+                    else "budget_exhausted"
+                    if scenario == "budget_exhausted"
+                    else "provider_provider_http_error"
+                )
+                for row in reasons
+            )
+            if scenario == "provider_failure":
+                assert not records.find("scan_attempts")
+            assert records.one("workspaces", id="formal-workspace")["state"] == "removed"
+        assert len(calls) == (
+            9 if scenario == "no_progress" else 3 if scenario == "provider_failure" else 1
+        )
+        return
+    result = coordinator.run(token)
+    assert result["state"] == "ended"
+    with k.store.read() as records:
+        assert records.one("scan_batches", id=result["batch_id"])["state"] == "completed"
+        assert len(records.find("scan_coverage", batch_id=result["batch_id"])) == 1
+        assert records.one("workspaces", id="formal-workspace")["state"] == "removed"
+        progress = records.find("budget_progress", owner_task_id=task_id)
+        assert len(progress) == 1 and progress[0]["kind"] == "coverage"
+        assert not records.find("block_reasons", resolved=0)
+    assert k.budgets.view(task_id)["used"]["model_calls"] == len(calls) == 3
 
 
 def test_actual_sdk_deep_agents_checkpoint_and_first_real_reservation(kernel):

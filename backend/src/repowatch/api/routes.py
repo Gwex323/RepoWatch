@@ -61,6 +61,35 @@ def routes(services):
     def providers():
         return services.providers.list()
 
+    @router.post("/repositories/preflight")
+    def repository_preflight(body: Mutation):
+        return services.repositories.preflight(body.operation_id, body.data, now=services.clock())
+
+    @router.get("/repositories/{repository_id}/scans")
+    def scans(repository_id: str):
+        return services.scans.view(repository_id)
+
+    @router.post("/scan-candidates/{candidate_id}/decide")
+    def candidate_decide(candidate_id: str, body: Mutation):
+        return services.scans.decide_candidate(
+            body.operation_id,
+            candidate_id,
+            body.data["action"],
+            expected_revision=body.revision(),
+            now=services.clock(),
+        )
+
+    @router.post("/repositories/import")
+    def repository_import(body: Mutation):
+        return services.repositories.save(
+            body.operation_id,
+            body.data["preflight_id"],
+            body.data.get("policy", {}),
+            scan_policy=body.data.get("scan_policy"),
+            expected_revision=body.revision(),
+            now=services.clock(),
+        )
+
     @router.post("/providers/import")
     def import_providers(body: Mutation):
         return services.providers.save(body.operation_id, body.data["payload"])

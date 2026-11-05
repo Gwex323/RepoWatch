@@ -1,5 +1,7 @@
 """队列老化的持久计时；所有就绪门槛变更前结算、变更后重算。"""
 
+import json
+
 from repowatch.application.storage import RecordPort
 from repowatch.domain.task_records import require_time
 
@@ -23,10 +25,32 @@ def is_ready(records: RecordPort, task) -> bool:
     ):
         return False
     if task["mode"] in {"implement", "amend"}:
+        from repowatch.domain.scans import readiness
+
+        valid_batch = True
+        if repository["identity_json"] is not None:
+            from repowatch.domain.task_records import content_digest
+
+            batch = (
+                records.one("scan_batches", id=repository["scan_ready_batch_id"])
+                if repository["scan_ready_batch_id"]
+                else None
+            )
+            valid_batch = bool(batch and batch["state"] == "completed")
+            if valid_batch:
+                source_task = records.one("tasks", id=batch["task_id"])
+                valid_batch = json.loads(batch["environment_json"]).get(
+                    "configuration_sha256"
+                ) == content_digest(json.loads(source_task["configuration_json"]))
         return (
-            task["issue_id"] is not None
+            valid_batch
+            and task["issue_id"] is not None
             and bool(repository["target_sha"])
             and repository["target_sha"] == repository["scan_ready_sha"]
+            and (
+                repository["identity_json"] is None
+                or json.loads(repository["scan_ready_json"] or "null") == readiness(repository)
+            )
         )
     return task["mode"] != "diagnose"
 

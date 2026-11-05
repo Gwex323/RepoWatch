@@ -74,7 +74,14 @@ class Worker:
         token = services.queue.claim(now=services.clock())
         if token is None:
             return {"state": "idle"}
-        if self.plan_factory is None:
+        with services.store.read() as records:
+            scan = (
+                required(
+                    records, "tasks", id=required(records, "runs", id=token.run_id)["task_id"]
+                )["mode"]
+                == "scan"
+            )
+        if self.plan_factory is None and not scan:
             with services.store.write() as records:
                 run = required(records, "runs", id=token.run_id)
                 block(records, "workspace_adapter_missing", run["task_id"], now=services.clock())
@@ -84,6 +91,22 @@ class Worker:
             return {"state": "blocked", "reason": "workspace_adapter_missing"}
         with ExecutionHeartbeat(services.queue, token, services.clock) as heartbeat:
             try:
+                if scan and self.plan_factory is None:
+                    from repowatch.worker.scans import ScanCoordinator
+
+                    result = ScanCoordinator(services, self.runtime).run(token)
+                    heartbeat.check()
+                    return result
+                with services.store.read() as records:
+                    current = required(records, "runs", id=token.run_id)
+                    task = required(records, "tasks", id=current["task_id"])
+                    repository = required(records, "repositories", id=task["repository_id"])
+                    verify = (
+                        task["mode"] in {"implement", "amend"}
+                        and repository["identity_json"] is not None
+                    )
+                if verify and not services.repositories.require_ready(token, now=services.clock()):
+                    return {"state": "waiting", "reason": "scan"}
                 plan = self.plan_factory(token)
                 result = self.runtime.run(token, plan)
                 heartbeat.check()
@@ -147,6 +170,24 @@ class Worker:
                 return {"state": "budget_wait", "run_id": token.run_id}
             except StorageError:
                 return {"state": "reconciliation_required", "run_id": token.run_id}
+            except PermissionError as error:
+                reason = "scan_safety_boundary" if scan else "runtime_execution_rejected"
+                with services.store.write() as records:
+                    run = required(records, "runs", id=token.run_id)
+                    block(
+                        records,
+                        reason,
+                        run["task_id"],
+                        now=services.clock(),
+                        detail=str(error),
+                    )
+                try:
+                    services.queue.complete(
+                        token, now=services.clock(), state="blocked", outcome=reason
+                    )
+                except PermissionError:
+                    return {"state": "reconciliation_required", "run_id": token.run_id}
+                return {"state": "blocked", "reason": reason}
             except Exception:
                 with services.store.write() as records:
                     run = required(records, "runs", id=token.run_id)

@@ -12,7 +12,7 @@ from sqlalchemy.pool import NullPool
 from repowatch.application.storage import ConflictError, RecordPort, SchemaMismatch, StorageError
 from repowatch.configuration import StorageSettings
 
-SCHEMA_REVISION = "0014_read_sources"
+SCHEMA_REVISION = "0018_scan_policy"
 
 
 def sqlite_engine(settings: StorageSettings, *, create: bool = False):

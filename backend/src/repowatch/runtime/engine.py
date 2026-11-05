@@ -57,6 +57,7 @@ class StagePlan:
     tools: tuple[ToolBinding, ...]
     verifier: Callable
     children: tuple["StagePlan", ...] = ()
+    code_version: dict | None = None
 
 
 class SerialGate:
@@ -157,7 +158,9 @@ class FormalRuntime:
             else (plan.role_key,)
         )
         services.roles.admit(token, now=services.clock(), keys=keys)
-        code = CodeVersion.model_validate(snapshot["configuration"]["code_version"])
+        code = CodeVersion.model_validate(
+            plan.code_version or snapshot["configuration"]["code_version"]
+        )
         selection = snapshot["roles"][plan.role_key]
         if selection["role"] == "reviewer" and plan.mode != "review":
             raise PermissionError("独审模型只能进入只读独审模式")
@@ -375,6 +378,39 @@ class FormalRuntime:
             except StorageError:
                 pass
             raise StorageError("图状态或必要证据无法持久化，停止新执行") from None
+        except MissingStructuredResult:
+            self._cancel_unstarted(token)
+            if plan.mode == "scan":
+                verified = plan.verifier(None, tuple(events))
+                evidence_id = services.artifacts.register(
+                    token,
+                    "stage-incomplete:" + stage["id"],
+                    canonical_json(
+                        {
+                            **verified,
+                            "producer": "host_stage_verifier",
+                            "objective_key": plan.objective_key,
+                            "status": "completed",
+                        }
+                    ).encode(),
+                    context={
+                        "producer": "host_stage_verifier",
+                        "objective_key": plan.objective_key,
+                    },
+                    now=services.clock(),
+                )
+                self.progress.record(token, plan.objective_key, evidence_id, now=services.clock())
+            with services.store.write() as records:
+                records.change("runtime_stages", {"id": stage["id"]}, {"state": "failed"})
+                if plan.mode != "scan":
+                    block(
+                        records,
+                        "runtime_execution_rejected",
+                        run["task_id"],
+                        now=services.clock(),
+                        stage_id=stage["id"],
+                    )
+            raise
         except (ValueError, PermissionError, ProviderRequestError):
             self._cancel_unstarted(token)
             with services.store.write() as records:

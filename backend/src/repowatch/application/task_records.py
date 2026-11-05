@@ -134,6 +134,8 @@ def capture_run(records, task, run_id, generation, now, *, parent_run_id=None, s
             "admission_revision": admission_revision,
             "target_revision": repository["target_revision"] if repository else None,
             "target_sha": repository["target_sha"] if repository else None,
+            "import_epoch": repository["import_epoch"] if repository else None,
+            "scan_policy_revision": repository["scan_policy_revision"] if repository else None,
             "mode": task["mode"],
             "worker_process": current_process(),
             "configuration": json.loads(task["configuration_json"]),
@@ -567,7 +569,7 @@ class TaskRecords:
                     stop_requested=0,
                     selected=1,
                     state="waiting" if terminal_delivery else "queued",
-                    mode="triage",
+                    mode="scan" if task["mode"] == "scan" else "triage",
                     wait_reason="delivery_review" if terminal_delivery else None,
                     outcome=None,
                 )
@@ -587,12 +589,28 @@ class TaskRecords:
                         input_json=canonical_json(context),
                     )
                 if task["state"] not in {"running", "blocked"}:
-                    changes.update(state="queued", mode="triage", wait_reason=None, outcome=None)
+                    changes.update(
+                        state="queued",
+                        mode="scan" if task["mode"] == "scan" else "triage",
+                        wait_reason=None,
+                        outcome=None,
+                    )
             elif action == "update_configuration":
                 if not payload or DEFAULT_REDACTOR.clean(payload) != payload:
                     raise ValueError("任务配置必须有效且不能包含凭据")
                 resolve_run_roles(records, payload)
                 changes["configuration_json"] = canonical_json(payload)
+                if task["mode"] == "scan":
+                    repository = required(records, "repositories", id=task["repository_id"])
+                    records.change(
+                        "repositories",
+                        {"id": repository["id"]},
+                        {
+                            "scan_ready_sha": None,
+                            "scan_ready_json": None,
+                            "revision": repository["revision"] + 1,
+                        },
+                    )
                 if running:
                     changes["stop_requested"] = 1
             elif action == "set_priority":

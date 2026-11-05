@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { initialAmounts, initialize, labels, mutate, request, type Amounts, type Budget, type BusinessEvent, type Provider, type Reason, type Renewal, type State, type Task } from "./client";
 import "./styles.css";
+import { Repositories } from "./Repositories";
 type Run = (action: () => Promise<unknown>, message?: string) => Promise<void>;
 const statusNames: Record<string, string> = { queued: "排队", running: "执行中", waiting: "等待", blocked: "阻塞", ended: "结束", cancelled: "取消", pending: "待批准", stale: "需刷新", approved: "已批准", rejected: "已拒绝", completed: "通过", failed: "失败", available: "可用", exhausted: "已耗尽", revoked: "已撤销", configuration_required: "待配置" };
 const textStatus = (value: string) => statusNames[value] ?? value;
@@ -468,7 +469,7 @@ export default function App() {
 <p>
 {task.wait_reason ?? task.outcome}</p>
 <button onClick={() => { setTab("tasks"); void run(async () => setSelected(await request<Task>(`/tasks/${task.id}`))); }}>查看证据并处理任务</button>
-</article>)}{state.reasons.length === 0 && state.renewals.every(item => !["pending", "stale"].includes(item.state)) && <p className="empty">当前没有未解决的全局阻塞或预算申请。</p>}</section>}{tab === "repositories" && <section>
+</article>)}{state.reasons.length === 0 && state.renewals.every(item => !["pending", "stale"].includes(item.state)) && <p className="empty">当前没有未解决的全局阻塞或预算申请。</p>}</section>}{tab === "repositories" && <><Repositories state={state} run={run} openTask={id => { setTab("tasks"); void run(async () => setSelected(await request<Task>(`/tasks/${id}`))); }} /><section>
 <h2>仓库</h2>
 {state.repositories.map(repo => <article key={repo.id}>
 <h3>
@@ -477,7 +478,7 @@ export default function App() {
 {repo.paused ? "仓库已暂停" : "仓库未暂停"}</p>
 <button onClick={() => void run(() => mutate(`/control/${repo.paused ? "resume" : "pause"}`, { repository_id: repo.id }, repo.revision))}>
 {repo.paused ? "明确恢复此仓库" : "暂停此仓库"}</button>
-</article>)}{state.repositories.length === 0 && <p className="empty">尚未导入仓库。系统诊断可在未导入仓库时进行。</p>}</section>}{tab === "events" && <section>
+</article>)}{state.repositories.length === 0 && <p className="empty">尚未导入仓库。系统诊断可在未导入仓库时进行。</p>}</section></>}{tab === "events" && <section>
 <h2>业务事件</h2>
 <p className="muted">按持久游标继续读取，重新打开页面不会启动任务。</p>
 {events.slice().reverse().map(event => <article key={event.sequence}>

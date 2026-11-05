@@ -23,7 +23,12 @@ from repowatch.application.task_records import (
     required,
 )
 from repowatch.domain.budget import is_exhausted
-from repowatch.domain.task_records import ExecutionToken, content_digest, require_time
+from repowatch.domain.task_records import (
+    ExecutionToken,
+    canonical_json,
+    content_digest,
+    require_time,
+)
 
 
 def commands_clear(records, run_id):
@@ -82,6 +87,8 @@ def _finish(records, token, now, *, state, wait_reason=None, outcome=None, use_t
         "budget_configuration",
     }:
         state, wait_reason = "waiting", task["budget_wait_reason"]
+    elif task["stop_requested"] and records.find("scan_dependencies", waiting_task_id=task["id"]):
+        state, wait_reason = "waiting", "scan"
     elif task["pending_transition_json"] and use_transition:
         transition = json.loads(task["pending_transition_json"])
         if (
@@ -95,7 +102,12 @@ def _finish(records, token, now, *, state, wait_reason=None, outcome=None, use_t
         else:
             state, wait_reason, outcome, mode = "queued", None, None, "triage"
     elif task["stop_requested"]:
-        state, wait_reason = "waiting", "safe_stop"
+        state = "waiting"
+        wait_reason = (
+            "scan"
+            if records.find("scan_dependencies", waiting_task_id=task["id"])
+            else task["wait_reason"] or "safe_stop"
+        )
     elif (
         state != "blocked"
         and task["mode"] == "triage"
@@ -153,7 +165,9 @@ def _finish(records, token, now, *, state, wait_reason=None, outcome=None, use_t
 
 
 class Orchestrator:
-    def __init__(self, store: BusinessStore, *, aging_interval=86_400, max_auto_priority=4):
+    def __init__(
+        self, store: BusinessStore, *, aging_interval=86_400, max_auto_priority=4, target_gate=None
+    ):
         if (
             not math.isfinite(aging_interval)
             or aging_interval <= 0
@@ -163,6 +177,7 @@ class Orchestrator:
         self.store = store
         self.aging_interval = aging_interval
         self.max_auto_priority = max_auto_priority
+        self.target_gate = target_gate
 
     def claim(
         self, *, now: float, ttl=30, run_id: str | None = None, snapshot: dict | None = None
@@ -263,10 +278,24 @@ class Orchestrator:
         purpose: str = "tool",
         reservation_id: str | None = None,
     ) -> dict:
-        if purpose not in {"tool", "model", "publish", "counter", "result"}:
+        if purpose not in {"tool", "model", "publish", "counter", "result", "boundary"}:
             raise ValueError("未知执行用途")
         if purpose != "result":
             self.store.assert_execution_available()
+        if purpose == "publish":
+            with self.store.read() as records:
+                run = execution_record(records, token, now)
+                task = required(records, "tasks", id=run["task_id"])
+                repository = (
+                    required(records, "repositories", id=task["repository_id"])
+                    if task["repository_id"] is not None
+                    else None
+                )
+                requires_target = repository is not None and repository["identity_json"] is not None
+            if requires_target and (
+                self.target_gate is None or not self.target_gate(token, now=now)
+            ):
+                raise PermissionError("发布必须无条件读取当前目标并通过扫描就绪核验")
         denied = False
         with self.store.write() as records:
             run = execution_record(records, token, now)
@@ -286,7 +315,25 @@ class Orchestrator:
                     or not limits
                     or is_exhausted(limits, used)
                 )
-                if not denied:
+                if purpose == "publish" and task["repository_id"] is not None:
+                    from repowatch.domain.scans import readiness
+
+                    repository = required(records, "repositories", id=task["repository_id"])
+                    if repository["identity_json"] is not None:
+                        batch = (
+                            records.one("scan_batches", id=repository["scan_ready_batch_id"])
+                            if repository["scan_ready_batch_id"]
+                            else None
+                        )
+                        denied = denied or (
+                            json.loads(repository["scan_ready_json"] or "null")
+                            != readiness(repository)
+                            or task["issue_id"] is None
+                            or bool(records.find("scan_dependencies", waiting_task_id=task["id"]))
+                            or batch is None
+                            or batch["state"] != "completed"
+                        )
+                if not denied and purpose != "boundary":
                     reservation_guard(records, run, reservation_id, purpose)
             result = dict(run)
         if denied:
@@ -400,15 +447,38 @@ class Orchestrator:
             if existing_scan_id:
                 scan_id = existing_scan_id
             else:
+                active = [
+                    row
+                    for row in records.find("tasks", repository_id=repository["id"], mode="scan")
+                    if row["id"] != task["id"]
+                    and row["state"] not in {"ended", "cancelled"}
+                    and all(
+                        json.loads(row["input_json"]).get(key) == repository[key]
+                        for key in (
+                            "target_sha",
+                            "target_revision",
+                            "import_epoch",
+                            "scan_policy_revision",
+                        )
+                    )
+                ]
                 source_key = (
-                    f"prerequisite-scan:{repository['target_revision']}:{repository['target_sha']}"
+                    f"prerequisite-scan:{repository['target_revision']}:{repository['import_epoch']}:"
+                    f"{repository['scan_policy_revision']}:{repository['target_sha']}"
                 )
                 source = records.one(
                     "task_sources", repository_id=task["repository_id"], source_key=source_key
                 )
-                if source:
+                if active:
+                    scan_id = active[0]["id"]
+                elif source and required(records, "tasks", id=source["task_id"])["state"] not in {
+                    "ended",
+                    "cancelled",
+                }:
                     scan_id = source["task_id"]
                 else:
+                    if source:
+                        source_key += ":revalidate:" + run["id"]
                     scan_id = create_task(
                         records,
                         task["repository_id"],
@@ -420,14 +490,42 @@ class Orchestrator:
                         input_payload={
                             "target_sha": repository["target_sha"],
                             "target_revision": repository["target_revision"],
+                            "import_epoch": repository["import_epoch"],
+                            "scan_policy_revision": repository["scan_policy_revision"],
+                        },
+                    )
+                    records.change(
+                        "tasks",
+                        {"id": scan_id},
+                        {
+                            "configuration_json": task["configuration_json"],
                         },
                     )
             self._add_dependency(records, task, scan_id, now)
             _finish(records, token, now, state="waiting", wait_reason="scan", use_transition=False)
             return scan_id
 
-    def complete_scan(self, token: ExecutionToken, *, now: float, validated_sha: str):
+    def complete_scan(
+        self, token: ExecutionToken, *, now: float, validated_sha: str, batch_id=None
+    ):
         """受信任扫描协调器提交已验证结果；模型输出不能直接调用本端口。"""
+        from repowatch.domain.scans import readiness
+
+        with self.store.read() as records:
+            run = execution_record(records, token, now)
+            task = required(records, "tasks", id=run["task_id"])
+            repository = required(records, "repositories", id=task["repository_id"])
+        if repository["identity_json"] is not None:
+            if batch_id is None:
+                raise PermissionError("导入仓库必须通过覆盖账本核验完成")
+            from repowatch.application.artifacts import ArtifactService
+            from repowatch.application.scans import ScanService
+
+            batch = ScanService(
+                self.store, None, ArtifactService(self.store, self.store.settings.artifacts_dir)
+            ).validate_complete(token, batch_id, now=now)
+            if json.loads(batch["version_json"]) != readiness(repository):
+                raise ConflictError("扫描批次不属于当前导入／策略／目标版本")
         with self.store.write() as records:
             run = execution_record(records, token, now)
             task = required(records, "tasks", id=run["task_id"])
@@ -438,12 +536,25 @@ class Orchestrator:
                 raise PermissionError("已撤销授权的扫描不能完成依赖交接")
             repository = required(records, "repositories", id=task["repository_id"])
             snapshot = json.loads(run["snapshot_json"])
+            if batch_id and repository["identity_json"] is not None:
+                current_batch = required(records, "scan_batches", id=batch_id)
+                environment = json.loads(current_batch["environment_json"])
+                if json.loads(current_batch["version_json"]) != readiness(
+                    repository
+                ) or environment.get("configuration_sha256") != content_digest(
+                    json.loads(task["configuration_json"])
+                ):
+                    raise ConflictError("完成交接期间扫描版本或环境发生变化")
             expected = snapshot["input"].get("target_sha", snapshot["target_sha"])
             if (
                 not validated_sha
                 or validated_sha != expected
                 or validated_sha != repository["target_sha"]
                 or snapshot["target_revision"] != repository["target_revision"]
+                or snapshot.get("import_epoch", repository["import_epoch"])
+                != repository["import_epoch"]
+                or snapshot.get("scan_policy_revision", repository["scan_policy_revision"])
+                != repository["scan_policy_revision"]
             ):
                 raise ConflictError("扫描结果不是当前固定目标版本")
             commands_clear(records, token.run_id)
@@ -453,9 +564,13 @@ class Orchestrator:
                 {"id": repository["id"]},
                 {
                     "scan_ready_sha": validated_sha,
+                    "scan_ready_json": canonical_json(readiness(repository)),
+                    "scan_ready_batch_id": batch_id,
                     "revision": repository["revision"] + 1,
                 },
             )
+            if batch_id:
+                records.change("scan_batches", {"id": batch_id}, {"state": "completed"})
             for dependency in records.find("scan_dependencies", scan_task_id=task["id"]):
                 waiting = required(records, "tasks", id=dependency["waiting_task_id"])
                 records.remove(
@@ -468,7 +583,7 @@ class Orchestrator:
                     and not waiting["cancel_requested"]
                     and not records.find("scan_dependencies", waiting_task_id=waiting["id"])
                 ):
-                    bump_task(records, waiting, state="queued", wait_reason=None)
+                    bump_task(records, waiting, state="queued", wait_reason=None, stop_requested=0)
             business_event(records, "scan_dependencies_satisfied", task["id"], sha=validated_sha)
             _finish(
                 records, token, now, state="ended", outcome="scan_complete", use_transition=False

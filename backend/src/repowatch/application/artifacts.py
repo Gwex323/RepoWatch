@@ -70,7 +70,7 @@ class ArtifactService:
             self.store.stop_execution()
             raise StorageError("必要产物未能持久登记，停止工具及发布并等待对账") from None
 
-    def require(self, artifact_id, *, run_id=None, now):
+    def require(self, artifact_id, *, run_id=None, now, block_on_failure=True):
         require_time(now)
         with self.store.read() as records:
             artifact = dict(required(records, "artifacts", id=artifact_id))
@@ -92,13 +92,14 @@ class ArtifactService:
                         "artifact_intents", {"id": artifact_id}, {"state": "unavailable"}
                     )
                 run = required(records, "runs", id=artifact["run_id"])
-                block(
-                    records,
-                    "artifact_unavailable",
-                    run["task_id"],
-                    now=now,
-                    artifact_id=artifact_id,
-                )
+                if block_on_failure:
+                    block(
+                        records,
+                        "artifact_unavailable",
+                        run["task_id"],
+                        now=now,
+                        artifact_id=artifact_id,
+                    )
             raise PermissionError("产物缺失或摘要变化，必须重建实际证据")
         return artifact
 

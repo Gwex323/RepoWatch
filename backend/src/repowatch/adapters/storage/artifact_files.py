@@ -35,8 +35,10 @@ def write_immutable(root: Path, relative_path: str, data: bytes, expected_sha256
         if not verify_file(root, temporary.name, expected_sha256)["valid"]:
             raise OSError("临时产物核验失败")
         try:
-            # Atomic no-replace publication on the same volume, including Windows.
-            os.link(temporary, target)
+            if os.name == "nt":
+                os.rename(temporary, target)
+            else:
+                os.link(temporary, target)
         except FileExistsError:
             if not verify_file(root, relative_path, expected_sha256)["valid"]:
                 raise OSError("不可变产物已存在且内容冲突") from None
