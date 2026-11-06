@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 from types import SimpleNamespace
 
 import httpx
@@ -30,6 +31,9 @@ from repowatch.worker.repairs import RepairCoordinator
         ("supplement", "bug"),
         ("review_retry", "bug"),
         ("renew", "bug"),
+        ("claim", "bug"),
+        ("claim", "feature"),
+        ("claim", "refactor"),
     ],
 )
 def test_real_docker_repair_probe_freeze_review_and_evidence(
@@ -388,10 +392,48 @@ def test_real_docker_repair_probe_freeze_review_and_evidence(
                 "base": {"ref": "main"},
             }
         ]
-    monkeypatch.setattr("repowatch.worker.repairs.IssueContexts.read", lambda self, token: remote)
+    if external != "claim":
+        monkeypatch.setattr(
+            "repowatch.worker.repairs.IssueContexts.read", lambda self, token: remote
+        )
+    else:
+        remote["facts"].update(comments=[], complete=True)
+
+        class ClaimPort:
+            def __init__(self, **kwargs):
+                pass
+
+            def _path(self, owner, name):
+                return "/repos/fixture/fixture"
+
+            def issue_context(self, *args):
+                return deepcopy(remote["facts"])
+
+            def write(self, method, path, body):
+                comment = {"id": 501, "body": body["body"], "user": {"login": "worker"}}
+                remote["facts"]["comments"].append(comment)
+                return comment
+
+        monkeypatch.setattr("repowatch.application.issue_context.GitHubReadAdapter", ClaimPort)
+        monkeypatch.setattr("repowatch.application.publication.GitHubPublisher", ClaimPort)
     monkeypatch.setattr(coordinator.objects, "fetch", lambda *args, **kwargs: base["sha"])
 
     def published(publisher, token, session_id, context):
+        if external == "claim":
+            from repowatch.application.acceptance import acceptance_view
+
+            with services.store.read() as records:
+                current = records.one("tasks", id=task)
+                current_acceptance = acceptance_view(records, current)
+                assert current["feedback_revision"] == state["feedback_revision"]
+                assert current_acceptance["current"]
+                if kind != "bug":
+                    assert current_acceptance["approved"]
+                assert (
+                    records.one("publication_intents", task_id=task, kind="claim")["state"]
+                    == "confirmed"
+                )
+            assert len(context["facts"]["comments"]) == 1
         session, frozen = publisher.evidence.require_current(token, session_id)
         assert session["state"] == "verified"
         evidence = json.loads(session["evidence_json"])
@@ -430,6 +472,18 @@ def test_real_docker_repair_probe_freeze_review_and_evidence(
     )
     services.queue.set_pause(False, now=0)
     token = services.queue.claim(now=0, ttl=300)
+    if external == "claim":
+        with services.store.write() as records:
+            records.change(
+                "repositories",
+                {"id": repo},
+                {
+                    "identity_json": canonical_json({"execution_login": "worker"}),
+                    "policy_json": canonical_json(
+                        {"claim_comment": True, "claim_template": "Working on issue"}
+                    ),
+                },
+            )
     try:
         if external == "stuck":
             with pytest.raises(PermissionError, match="无进展"):

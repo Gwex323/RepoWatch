@@ -10,6 +10,7 @@ import os
 import time
 from hashlib import sha256
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from repowatch.adapters.providers import ProviderAdapter
@@ -78,7 +79,81 @@ REVIEW = canonical_json(
 )
 
 
-def triage():
+def fixture_subject(item):
+    text = "\n".join(str(item.get(key) or "") for key in ("title", "body"))
+    files = item.get("files", [])
+    implementations = {
+        name: (
+            defect["path"],
+            defect["marker"].decode(),
+            defect["fixed"].splitlines()[-1].strip(),
+        )
+        for name, defect in DEFECTS.items()
+    }
+    implementations["add"] = ("calc.py", "left - right", "return left + right")
+    changed = {
+        name
+        for name, (path, broken, fixed) in implementations.items()
+        if any(
+            entry.get("filename") == path
+            and any(
+                line.startswith("-") and broken in line
+                for line in (entry.get("patch") or "").splitlines()
+            )
+            and any(
+                line.startswith("+") and line[1:].strip() == fixed
+                for line in (entry.get("patch") or "").splitlines()
+            )
+            for entry in files
+        )
+    }
+    mentioned = {name for name in (*DEFECTS, "add") if name + "()" in text}
+    subjects = changed | mentioned
+    return next(iter(subjects)) if len(subjects) == 1 else None
+
+
+def triage(envelope, evidence):
+    active_name = next(name for name, defect in DEFECTS.items() if defect is ACTIVE)
+    context = evidence.get("remote_context") or {}
+    relations = []
+    for pull in context.get("facts", {}).get("pull_requests", []):
+        subject = fixture_subject(pull)
+        relations.append(
+            {
+                "id": str(pull["id"]),
+                "relation": "same"
+                if subject == active_name
+                else "unrelated"
+                if subject
+                else "uncertain",
+                "evidence": "Current PR description and file patch identify "
+                + str(subject),
+            }
+        )
+    lookup = None
+    marker = "完整 Issue 查重结果："
+    if marker in envelope["objective"]:
+        lookup, _ = json.JSONDecoder().raw_decode(
+            envelope["objective"].split(marker, 1)[1]
+        )
+    matches = [
+        item
+        for item in (lookup or {}).get("issues", [])
+        if fixture_subject(item) == active_name
+    ]
+    issue_relation = {
+        "relation": "same"
+        if matches
+        else "none"
+        if lookup is not None
+        else "uncertain",
+        "evidence": "Compared the current complete issue collection by fixture function",
+    }
+    if matches:
+        selected = min(
+            matches, key=lambda item: (item.get("state") != "open", item["number"])
+        )
+        issue_relation["issue_number"] = selected["number"]
     return {
         "kind": "bug",
         "objective": ACTIVE["objective"],
@@ -88,27 +163,8 @@ def triage():
         "ownership_evidence": [
             "no assignee and no maintainer claim in the current input"
         ],
-        "issue_relation": {
-            "relation": "none",
-            "evidence": "the complete issue list has no report about this function",
-        },
-        "pr_relations": [
-            {
-                "id": "5183900277",
-                "relation": "unrelated",
-                "evidence": "direct PR fixes add()",
-            },
-            {
-                "id": "5184152666",
-                "relation": "unrelated",
-                "evidence": "fork PR fixes add()",
-            },
-            {
-                "id": "5185209138",
-                "relation": "unrelated",
-                "evidence": "direct PR fixes mul()",
-            },
-        ],
+        "issue_relation": issue_relation,
+        "pr_relations": relations,
     }
 
 
@@ -367,7 +423,9 @@ def wire(request):
         if tool_count == 0:
             return reply(body, "read_evidence", {})
         if tool_count == 1:
-            return reply(body, "write_analysis", {"analysis": triage()})
+            return reply(
+                body, "write_analysis", {"analysis": triage(envelope, results[0])}
+            )
         return reply(body, *structured(envelope))
     if mode == "reproduce":
         if tool_count == 0:
@@ -465,6 +523,7 @@ class Acceptance:
                 scope = json.loads(item["scope_json"])
                 if (
                     item["passed"]
+                    and item["expires_at"] > self.now()
                     and scope.get("role") == role
                     and scope.get("provider_revision_id") == provider["revision_id"]
                 ):
@@ -513,11 +572,29 @@ class Acceptance:
             "credential_reference": self.reference,
         }
         preflight = services.repositories.preflight(
-            "p3-preflight", data, now=self.now()
+            "p3-preflight-" + uuid4().hex, data, now=self.now()
         )
         self.log("preflight", identity=preflight["identity"])
+        with services.store.read() as records:
+            existing = records.one(
+                "repositories", github_id=preflight["identity"]["github_id"]
+            )
+        if existing:
+            if (
+                existing["contribution_path"] != data["contribution_path"]
+                or existing["credential_reference"] != self.reference
+                or existing["target_branch"] != "main"
+                or json.loads(existing["publication_json"])
+                != preflight["identity"]["publication"]
+                or existing["target_sha"] != preflight["identity"]["target_sha"]
+            ):
+                raise AssertionError(
+                    "existing acceptance repository configuration changed"
+                )
+            self.log("repository_reused", repository_id=existing["id"])
+            return {"repository_id": existing["id"]}
         result = services.repositories.save(
-            "p3-import",
+            "p3-import-" + uuid4().hex,
             preflight["preflight_id"],
             {
                 "mode": "all_bugs",
@@ -547,7 +624,10 @@ class Acceptance:
 
     def configure(self, task_id, payload):
         with self.services.store.read() as records:
-            revision = records.one("tasks", id=task_id)["revision"]
+            task = records.one("tasks", id=task_id)
+            revision = task["revision"]
+            if json.loads(task["configuration_json"]) == payload:
+                return
         self.services.tasks.operate(
             "p3-config-" + task_id + "-" + str(int(self.now() * 1000)),
             task_id,
@@ -615,16 +695,19 @@ def main():
     run = Acceptance(args.data_dir, args.owner, args.name, args.reference, args.fork)
     services = run.services
     run.bootstrap_provider()
-    run.import_repository()
-    scan = run.scan_task()
-    run.configure(scan["id"], TASK_CONFIG)
-    run.budget(scan["id"], "scan")
-    services.queue.set_pause(False, now=run.now())
-    run.run_until_idle()
+    imported = run.import_repository()
+    with services.store.read() as records:
+        repository = records.one("repositories", id=imported["repository_id"])
+    if not repository["scan_ready_batch_id"] or not repository["scan_ready_sha"]:
+        scan = run.scan_task()
+        run.configure(scan["id"], TASK_CONFIG)
+        run.budget(scan["id"], "scan")
+        services.queue.set_pause(False, now=run.now())
+        run.run_until_idle()
     run.log("scan_complete")
 
     with services.store.read() as records:
-        repository = records.one("repositories", github_id="1447899115")
+        repository = records.one("repositories", id=imported["repository_id"])
         candidates = [
             dict(row)
             for row in records.find(
@@ -635,33 +718,37 @@ def main():
     if not candidates:
         raise AssertionError("no " + ACTIVE["path"] + " candidate")
     candidate = candidates[0]
-    services.scans.decide_candidate(
-        "p3-select",
-        candidate["id"],
-        "select",
-        expected_revision=candidate["revision"],
-        now=run.now(),
-    )
+    if not candidate["request_task_id"]:
+        services.scans.decide_candidate(
+            "p3-select-" + candidate["id"],
+            candidate["id"],
+            "select",
+            expected_revision=candidate["revision"],
+            now=run.now(),
+        )
     with services.store.read() as records:
         candidate_task = records.one("scan_candidates", id=candidate["id"])[
             "request_task_id"
         ]
-    run.configure(candidate_task, TASK_CONFIG)
-    run.budget(candidate_task, "candidate")
+    with services.store.read() as records:
+        task = dict(required(records, "tasks", id=candidate_task))
+    if task["state"] == "queued":
+        run.configure(candidate_task, TASK_CONFIG)
+        run.budget(
+            task["budget_owner_task_id"], "candidate-" + task["budget_owner_task_id"]
+        )
     run.run_until_idle()
     run.log("candidate_triage_complete")
 
     with services.store.read() as records:
-        issue_tasks = [
-            dict(row)
-            for row in records.find("tasks", repository_id=repository["id"])
-            if row["issue_id"] is not None
-            and row["state"] not in {"ended", "cancelled"}
+        target_task = required(records, "scan_candidates", id=candidate["id"])[
+            "request_task_id"
         ]
-    if not issue_tasks:
+        issue_task = dict(required(records, "tasks", id=target_task))
+    if issue_task["issue_id"] is None:
         raise AssertionError("candidate did not create an issue task")
-    issue_task = max(issue_tasks, key=lambda row: row["queued_at"])
-    run.configure(issue_task["id"], TASK_CONFIG)
+    if issue_task["state"] == "queued":
+        run.configure(issue_task["id"], TASK_CONFIG)
     run.run_until_idle()
     run.log("issue_triage_complete", task=issue_task["id"])
 
@@ -680,6 +767,17 @@ def main():
         issue_id=task["issue_id"],
         publication=intent,
     )
+    if task["state"] != "waiting" or task["wait_reason"] not in {
+        "pr_review",
+        "external_pr",
+    }:
+        raise AssertionError(
+            "acceptance did not reach publication or same-problem PR wait"
+        )
+    if task["wait_reason"] == "pr_review" and (
+        not intent or intent["state"] != "confirmed"
+    ):
+        raise AssertionError("publication receipt is not confirmed")
 
 
 if __name__ == "__main__":

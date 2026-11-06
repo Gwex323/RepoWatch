@@ -57,6 +57,8 @@ backend/.venv/Scripts/python.exe -m repowatch.worker
 
 发布器使用稳定受管分支、预期旧 SHA 和冻结候选，分别核对上游／发布仓库身份，保留原 PR 唯一绑定。正文含五段结构、单一 Issue 关闭声明、候选来源、验证摘要与 CI 未执行限制，不公开探针源码。默认不 assign／评论；认领评论须仓库策略显式开启，并保存意图与回执。PR 回执未知可用“请求核对远端回执”排队只读核对；按标记、创建者、仓库、分支及 SHA 唯一匹配，不能盲目重发。已关闭受管 PR 不释放绑定或另建。
 
+认领评论只有在本地发布意图已确认、评论 ID／作者／完整正文匹配且未编辑时，才从外部反馈比较和上下文摘要中排除；实际读取结果仍保留该评论。发评后的重读不会增加反馈修订或使功能／重构的当前批准失效。其他新评论、伪造标记或认领评论被编辑仍须重新分诊。`test_claim_comments.py` 覆盖这些边界，`test_repairs.py` 的 `claim` 三种场景覆盖真实 Docker 修复流程。
+
 验证＋独审后保存待提炼意图，绑定来源摘要及反馈修订；它不是已经生成的记忆。开放 PR 等待释放执行位，保留原累计预算。P5 消费仍须核对来源有效性。
 
 复跑：启用 `REPOWATCH_DOCKER_TESTS=1` 后执行 `backend/.venv/Scripts/python.exe -m pytest backend/tests`；定向覆盖 `test_repairs.py`、`test_verification.py`、`test_publication.py`、`test_candidate_issues.py` 和 `test_issue_context.py`。Docker 必须运行且镜像已准备；模型／GitHub 单元测试使用受控夹具，不能代替产品端到端验收。
@@ -64,6 +66,8 @@ backend/.venv/Scripts/python.exe -m repowatch.worker
 2026-11-06 产品端到端验收：公开上游 `Gwex323/repowatch-p3-sandbox`（ID `1447899115`）与 Fork `gwx541/repowatch-p3-sandbox`（ID `1447913051`）完成两条真实发布路径。直接路径创建 Issue #15（创建者 Gwex323）→ 分支 `repowatch/issue-15-f3ad2679-3c1` @ `88f43247b388b281f1fad588993254a3d563970a` → PR #16；Fork 路径创建 Issue #17（创建者 gwx541）→ Fork 分支 `repowatch/issue-17-49b70683-9eb` @ `05f996df174e4df2b8152ca941dbee6357adc2a8` → 上游 PR #18（head 仓库 ID `1447913051`、base 仓库 ID `1447899115`）。两条发布意图均为 `confirmed`，任务进入 `waiting / pr_review`。模型使用确定性离线夹具，Docker、Git 分支推送与 GitHub 写入为真实；可追踪报告为 `experiments/results/local/p3-github-e2e-20261106.json`。此前 Issue #1／#3 与 PR #2／#4 是人工 API 驱动的仓库准备对象，保留为开放输入；重复的中间测试 Issue #5—#12 已关闭。
 
 复跑入口为 `experiments/p3-github-acceptance.py`。先在停写状态显式迁移目标数据目录，并在 Windows 凭据库写入该目录命名空间下的 GitHub 凭据引用；脚本只使用离线模型 transport，不调用付费模型。示例（不构成执行授权）：
+
+脚本按本次实际读取的 Issue 和 PR 描述及修复 patch 生成关系判断，不绑定固定 PR ID；同问题复用已有 Issue 并等待开放 PR，无法确认关系时保持等待。同一数据目录重复运行会复用已核验的仓库、扫描、任务和发布意图，保留预算；目标 SHA 或贡献配置变化时明确拒绝复用，须单独处理。已有 `pr_review` 等待只证明原发布回执仍保留，不表示再次执行了修复／发布链路。
 
 ```powershell
 backend/.venv/Scripts/python.exe experiments/p3-github-acceptance.py --data-dir <绝对数据目录> --reference github-gwex323

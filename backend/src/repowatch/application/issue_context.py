@@ -96,13 +96,39 @@ class IssueContexts:
         with services.store.read() as records:
             previous = records.find("issue_contexts", task_id=task["id"])
             latest = max(previous, key=lambda item: item["created_at"], default=None)
+            claim = records.one("publication_intents", task_id=task["id"], kind="claim")
+        identity = json.loads(repository["identity_json"] or "{}")
+        execution_login = identity.get("execution_login", "").casefold()
+        claim_receipt = json.loads(claim["result_json"] or "{}") if claim else {}
+        claim_request = json.loads(claim["request_json"]) if claim else {}
+
+        def external_comments(values):
+            return [
+                item
+                for item in values
+                if not (
+                    claim
+                    and claim["state"] == "confirmed"
+                    and claim_receipt.get("id") is not None
+                    and str(item.get("id")) == str(claim_receipt["id"])
+                    and execution_login
+                    and (item.get("user") or {}).get("login", "").casefold() == execution_login
+                    and item.get("body") == claim_request.get("body")
+                    and item.get("updated_at") == item.get("created_at")
+                )
+            ]
+
         changed_relations = False
         if latest:
             prior_facts = json.loads(latest["facts_json"])
             for kind in ("comments", "pull_requests"):
                 cleaned_values = DEFAULT_REDACTOR.clean(facts[kind])
+                prior_values = prior_facts[kind]
+                if kind == "comments":
+                    cleaned_values = external_comments(cleaned_values)
+                    prior_values = external_comments(prior_values)
                 if content_digest(relation_fingerprint(kind, cleaned_values)) == content_digest(
-                    relation_fingerprint(kind, prior_facts[kind])
+                    relation_fingerprint(kind, prior_values)
                 ):
                     continue
                 services.tasks.observe(
@@ -115,7 +141,13 @@ class IssueContexts:
                 )
                 changed_relations = True
         cleaned = DEFAULT_REDACTOR.clean(facts)
-        digest = content_digest(cleaned)
+        digest = content_digest(
+            {
+                **cleaned,
+                "issue": issue_input(cleaned["issue"]),
+                "comments": external_comments(cleaned["comments"]),
+            }
+        )
         with services.store.read() as records:
             old = records.one("issue_contexts", task_id=task["id"], digest=digest)
         if old is None:
