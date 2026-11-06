@@ -1,5 +1,7 @@
 """普通运行与明确诊断共用的发起门槛；诊断豁免不延伸至写入。"""
 
+import json
+
 from repowatch.application.task_records import required
 
 DIAGNOSTIC_PURPOSE = {
@@ -30,4 +32,12 @@ def launch_permitted(records, run, *, now, purpose):
             and purpose == DIAGNOSTIC_PURPOSE[permission["kind"]]
         )
     repository = required(records, "repositories", id=task["repository_id"])
+    snapshot = json.loads(run["snapshot_json"])
+    if snapshot["mode"] in {"implement", "amend", "review", "reproduce"} and (
+        task["input_revision"] != run["input_revision"]
+        or task["feedback_revision"] != run["feedback_revision"]
+        or task["acceptance_revision"] != snapshot["acceptance_revision"]
+        or repository["admission_revision"] != run["admission_revision"]
+    ):
+        return False
     return not (required(records, "global_control", singleton=1)["paused"] or repository["paused"])

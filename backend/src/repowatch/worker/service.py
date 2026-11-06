@@ -3,7 +3,7 @@
 import json
 
 from repowatch.application.budgets import ProgressEvidenceUnavailable
-from repowatch.application.storage import StorageError
+from repowatch.application.storage import ConflictError, StorageError
 from repowatch.application.task_records import block, required
 from repowatch.domain.budget import BudgetDenied, RenewalPlan
 from repowatch.runtime.engine import FormalRuntime
@@ -75,13 +75,16 @@ class Worker:
         if token is None:
             return {"state": "idle"}
         with services.store.read() as records:
-            scan = (
-                required(
-                    records, "tasks", id=required(records, "runs", id=token.run_id)["task_id"]
-                )["mode"]
-                == "scan"
+            claimed = required(
+                records, "tasks", id=required(records, "runs", id=token.run_id)["task_id"]
             )
-        if self.plan_factory is None and not scan:
+            scan = claimed["mode"] == "scan"
+            triage = claimed["mode"] == "triage" and (
+                claimed["issue_id"] is not None
+                or "candidate_id" in json.loads(claimed["input_json"])
+            )
+            repair = claimed["mode"] in {"implement", "amend", "reconcile_publication"}
+        if self.plan_factory is None and not scan and not triage and not repair:
             with services.store.write() as records:
                 run = required(records, "runs", id=token.run_id)
                 block(records, "workspace_adapter_missing", run["task_id"], now=services.clock())
@@ -91,6 +94,18 @@ class Worker:
             return {"state": "blocked", "reason": "workspace_adapter_missing"}
         with ExecutionHeartbeat(services.queue, token, services.clock) as heartbeat:
             try:
+                if repair and self.plan_factory is None:
+                    from repowatch.worker.repairs import RepairCoordinator
+
+                    result = RepairCoordinator(services, self.runtime).run(token)
+                    heartbeat.check()
+                    return result
+                if triage and self.plan_factory is None:
+                    from repowatch.worker.triage import TriageCoordinator
+
+                    result = TriageCoordinator(services, self.runtime).run(token)
+                    heartbeat.check()
+                    return result
                 if scan and self.plan_factory is None:
                     from repowatch.worker.scans import ScanCoordinator
 
@@ -168,6 +183,26 @@ class Worker:
                         outcome="progress_evidence_unavailable",
                     )
                 return {"state": "budget_wait", "run_id": token.run_id}
+            except ConflictError:
+                with services.store.read() as records:
+                    run = required(records, "runs", id=token.run_id)
+                    task = required(records, "tasks", id=run["task_id"])
+                    changed = (
+                        task["input_revision"] != run["input_revision"]
+                        or task["feedback_revision"] != run["feedback_revision"]
+                    )
+                if not changed:
+                    with services.store.write() as records:
+                        block(records, "runtime_version_conflict", task["id"], now=services.clock())
+                    services.queue.complete(
+                        token,
+                        now=services.clock(),
+                        state="blocked",
+                        outcome="runtime_version_conflict",
+                    )
+                    return {"state": "blocked", "reason": "runtime_version_conflict"}
+                services.queue.complete(token, now=services.clock(), state="queued")
+                return {"state": "queued", "reason": "input_changed"}
             except StorageError:
                 return {"state": "reconciliation_required", "run_id": token.run_id}
             except PermissionError as error:

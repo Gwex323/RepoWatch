@@ -507,6 +507,7 @@ class ScanService:
                         "finding": json.loads(candidate["finding_json"]),
                     },
                 )
+                records.change("tasks", {"id": task_id}, {"selected": 1})
                 repository = required(records, "repositories", id=batch["repository_id"])
                 if json.loads(repository["scan_ready_json"] or "null") != readiness(repository):
                     current_scans = [

@@ -24,9 +24,26 @@ def is_ready(records: RecordPort, task) -> bool:
         or records.find("scan_dependencies", waiting_task_id=task["id"])
     ):
         return False
+    if task["mode"] == "triage" and task["issue_id"] is not None:
+        from repowatch.domain.triage import admission_eligible
+
+        if not admission_eligible(repository, json.loads(task["input_json"]), task["selected"]):
+            return False
     if task["mode"] in {"implement", "amend"}:
+        pending_publication = records.one(
+            "publication_intents", task_id=task["id"], kind="pull_request"
+        )
+        if pending_publication and pending_publication["state"] in {"unknown", "dispatched"}:
+            return True
+        from repowatch.application.acceptance import acceptance_view
         from repowatch.domain.scans import readiness
 
+        acceptance = acceptance_view(records, task)
+        if acceptance and (
+            not acceptance["current"]
+            or (acceptance["kind"] in {"feature", "refactor"} and not acceptance["approved"])
+        ):
+            return False
         valid_batch = True
         if repository["identity_json"] is not None:
             from repowatch.domain.task_records import content_digest

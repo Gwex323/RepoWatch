@@ -173,10 +173,94 @@ class DockerWorkspaces:
     def read_source(self, workspace, task_id, path):
         self.require_workspace(workspace, task_id)
         path = source_path(path)
+        if workspace["mode"] in {"implement", "review"}:
+            files = self.snapshot(workspace, task_id)
+            if path not in files or files[path][0] == "120000":
+                raise PermissionError("当前文件不存在或为链接")
+            return files[path][1]
         entries = {entry["path"]: entry for entry in workspace["manifest"]}
         if path not in entries or entries[path]["mode"] in {"120000", "160000"}:
             raise PermissionError("只允许读取清单内的实际文件")
         return self.objects.blob(workspace["repository_id"], entries[path]["oid"])
+
+    def snapshot(self, workspace, task_id):
+        self.require_workspace(workspace, task_id)
+        result = self.docker(
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--mount",
+            "type=volume,src=" + workspace["volume"] + ",dst=/source,readonly",
+            "--entrypoint",
+            "tar",
+            workspace["image"],
+            "-c",
+            "-C",
+            "/source",
+            ".",
+        )
+        if len(result.stdout) > 64 * 1024 * 1024:
+            raise WorkspaceError("候选快照超过当前受控交接上限")
+        files = {}
+        with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+            for member in archive:
+                if member.isdir():
+                    continue
+                path = source_path(member.name.removeprefix("./"))
+                if path in files or member.islnk() or member.size > 16 * 1024 * 1024:
+                    raise WorkspaceError("候选包含重复、硬链接或过大文件")
+                if member.issym():
+                    target = member.linkname
+                    resolved = posixpath.normpath(posixpath.join(posixpath.dirname(path), target))
+                    if target.startswith("/") or resolved == ".." or resolved.startswith("../"):
+                        raise WorkspaceError("候选链接越界")
+                    files[path] = ("120000", target.encode())
+                elif member.isfile():
+                    content = archive.extractfile(member).read()
+                    if content.startswith(b"version https://git-lfs.github.com/spec/v1\n"):
+                        raise WorkspaceError("候选 LFS 实体不可交付")
+                    files[path] = ("100755" if member.mode & 0o111 else "100644", content)
+                else:
+                    raise WorkspaceError("候选包含不支持的文件类型")
+        return files
+
+    def delete_source(self, workspace, task_id, path):
+        self.require_workspace(workspace, task_id)
+        if workspace["mode"] != "implement":
+            raise PermissionError("只允许处理工作区删除当前任务文件")
+        path = source_path(path)
+        script = (
+            'target=/source/$1; parent=$(dirname "$target"); '
+            'while test "$parent" != /source; do test ! -L "$parent"; '
+            'parent=$(dirname "$parent"); done; test ! -d "$target"; rm -f -- "$target"'
+        )
+        self.docker(
+            "run",
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--mount",
+            "type=volume,src=" + workspace["volume"] + ",dst=/source",
+            "--entrypoint",
+            "sh",
+            workspace["image"],
+            "-eu",
+            "-c",
+            script,
+            "delete",
+            path,
+        )
 
     def remove(self, workspace):
         self.require_workspace(workspace, workspace["task_id"])

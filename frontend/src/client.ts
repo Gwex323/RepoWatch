@@ -16,6 +16,16 @@ export type Task = {
     revision: number;
     wait_reason: string | null;
     outcome: string | null;
+    acceptance_revision?: number;
+    acceptance?: { revision: number; kind: "bug" | "feature" | "refactor"; content: Record<string, unknown>; approved_revision: number | null; approved_by: string | null; current: boolean; approved: boolean } | null;
+    triage_decisions?: Array<{ id: string; result: string; reason_code: string; evidence: Record<string, unknown>; input_revision: number; admission_revision: number }>;
+    issue_context?: { digest: string; facts: { issue: Record<string, unknown>; comments: unknown[]; pull_requests: Array<{ id: number; number: number; title: string; html_url: string; state: string }> } } | null;
+    publication_intents?: Array<{id: string; kind: string; state: string; request: Record<string, unknown>; result: Record<string, unknown> | null}>;
+    repair_sessions?: Array<{id: string; state: string; frozen: Record<string, unknown> | null; evidence: Record<string, unknown> | null}>;
+    relation_decisions?: unknown[];
+    candidate_issue_decisions?: unknown[];
+    distillation_intents?: unknown[];
+    artifacts?: Array<{id: string; sha256: string; available: number; context: Record<string, unknown>}>;
     budget_owner_task_id: string;
     input: Record<string, unknown>;
     configuration: Record<string, unknown>;

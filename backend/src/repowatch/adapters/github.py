@@ -124,6 +124,71 @@ class GitHubReadAdapter:
             raise GitHubReadError("invalid_branch_sha")
         return digest
 
+    @staticmethod
+    def _number(number):
+        if type(number) is not int or not 1 <= number <= 2147483647:
+            raise ValueError("GitHub 对象编号无效")
+        return str(number)
+
+    def issue(self, owner, name, number):
+        _, body, _ = self._get(self._path(owner, name) + "/issues/" + self._number(number))
+        if (
+            not isinstance(body, dict)
+            or type(body.get("id")) is not int
+            or body.get("number") != number
+            or "pull_request" in body
+        ):
+            raise GitHubReadError("invalid_issue_identity")
+        return body
+
+    def pull_request(self, owner, name, number):
+        _, body, _ = self._get(self._path(owner, name) + "/pulls/" + self._number(number))
+        if not isinstance(body, dict) or body.get("number") != number:
+            raise GitHubReadError("invalid_pull_request")
+        return body
+
+    def collection(self, path, *, params=None, max_pages=100):
+        result = []
+        for page in range(1, max_pages + 1):
+            _, body, headers = self._get(
+                path, params={**(params or {}), "per_page": 100, "page": page}
+            )
+            if not isinstance(body, list) or len(body) > 100:
+                raise GitHubReadError("invalid_collection_page")
+            result.extend(body)
+            if 'rel="next"' not in headers.get("link", ""):
+                return result
+        raise GitHubReadError("collection_incomplete")
+
+    def issue_context(self, owner, name, number):
+        prefix = self._path(owner, name)
+        issue_path = prefix + "/issues/" + self._number(number)
+        issue = self.issue(owner, name, number)
+        comments = self.collection(issue_path + "/comments")
+        timeline = self.collection(issue_path + "/timeline")
+        pulls = {
+            item["number"]: item
+            for item in self.collection(prefix + "/pulls", params={"state": "open"})
+        }
+        for event in timeline:
+            linked = event.get("source", {}).get("issue", {})
+            if linked.get("pull_request"):
+                source_url = linked.get("repository_url", "")
+                if source_url != self.base_url + prefix:
+                    raise GitHubReadError("cross_repository_relation_requires_review")
+                linked_number = linked.get("number")
+                self._number(linked_number)
+                pulls[linked_number] = linked
+        details = []
+        for pull_number in sorted(pulls):
+            pull = self.pull_request(owner, name, pull_number)
+            pull["files"] = self.collection(prefix + "/pulls/" + str(pull_number) + "/files")
+            details.append(pull)
+        latest = self.issue(owner, name, number)
+        if latest != issue:
+            raise GitHubReadError("issue_changed_during_read")
+        return {"issue": issue, "comments": comments, "pull_requests": details, "complete": True}
+
     def contribution(self, request: RepositoryRequest):
         _, user, _ = self._get("/user")
         if not isinstance(user, dict) or not isinstance(user.get("login"), str):

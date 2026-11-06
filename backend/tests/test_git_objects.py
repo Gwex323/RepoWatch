@@ -56,6 +56,29 @@ def test_fetch_uses_credential_only_in_transient_host_process(tmp_path, monkeypa
     assert not (objects.repository("repo") / "config").read_text().find("token") >= 0
 
 
+def test_candidate_commit_preserves_exact_bytes_modes_new_files_and_deletions(tmp_path):
+    fixture = create_fixture(tmp_path)
+    objects = GitObjects(tmp_path / "objects")
+    parent = objects.import_bundle("repo", fixture["bundle"])
+    files = {
+        "nested/fix.py": ("100644", b"value = 2\r\n"),
+        "tests/test_new.py": ("100755", b"assert True\n"),
+        "alias": ("120000", b"nested/fix.py"),
+    }
+    candidate = objects.commit_files("repo", parent, files, message="controlled candidate")
+    entries = {item["path"]: item for item in objects.entries("repo", candidate["sha"])}
+    assert set(entries) == set(files)
+    for path, (mode, content) in files.items():
+        assert entries[path]["mode"] == mode
+        assert objects.blob("repo", entries[path]["oid"]) == content
+    assert (
+        objects.run(objects.repository("repo"), "rev-parse", candidate["sha"] + "^")
+        .decode()
+        .strip()
+        == parent
+    )
+
+
 @pytest.mark.parametrize("identifier", ["../user", "a/b", "a\\b", "a:b"])
 def test_object_paths_cannot_escape(tmp_path, identifier):
     with pytest.raises(ValueError):

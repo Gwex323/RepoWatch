@@ -3,6 +3,7 @@ import json
 import pytest
 
 from repowatch.adapters.storage.sqlite import SQLiteBusinessStore
+from repowatch.application.acceptance import acceptance_view
 from repowatch.application.orchestration import Orchestrator
 from repowatch.application.storage import ConflictError, StorageError
 from repowatch.application.task_records import TaskRecords
@@ -189,6 +190,227 @@ def test_policy_exclusion_can_be_reconsidered_but_manual_mode_still_needs_select
     manual_task = tasks.ensure_task(manual_repo, "issue:m", issue_id="m", now=5)
     tasks.observe(manual_task, "issue:m", "v2", {"labels": ["bug"]}, now=6)
     assert row(store, "tasks", id=manual_task)["state"] == "waiting"
+
+
+def test_acceptance_spec_is_versioned_and_approval_does_not_survive_revision_changes(kernel):
+    store, _, _, _ = kernel
+    task = task_for(kernel)
+    operate(
+        kernel,
+        task,
+        "set_acceptance",
+        operation_id="acceptance-v1",
+        payload={
+            "kind": "feature",
+            "content": {
+                "objective": "show status",
+                "plan": "add status view",
+                "criteria": ["show status"],
+            },
+        },
+    )
+    assert row(store, "tasks", id=task)["acceptance_revision"] == 2
+    operate(
+        kernel,
+        task,
+        "approve_acceptance",
+        operation_id="approve-v2",
+    )
+    state = row(store, "tasks", id=task)
+    assert (state["state"], state["mode"], state["acceptance_revision"]) == (
+        "queued",
+        "triage",
+        2,
+    )
+    approved = row(store, "task_acceptance_specs", task_id=task, revision=2)
+    assert (approved["approved_revision"], approved["approved_by"]) == (2, "local-user")
+    operate(
+        kernel,
+        task,
+        "set_acceptance",
+        operation_id="acceptance-v2",
+        payload={
+            "kind": "feature",
+            "content": {
+                "objective": "show status",
+                "plan": "add filtered status view",
+                "criteria": ["show status", "filter"],
+            },
+        },
+    )
+    current = row(store, "task_acceptance_specs", task_id=task, revision=3)
+    assert current["approved_revision"] is None
+    assert row(store, "tasks", id=task)["acceptance_revision"] == 3
+    with store.read() as records:
+        history = records.find("task_acceptance_specs", task_id=task)
+    assert [item["revision"] for item in history] == [2, 3]
+
+
+def test_bug_acceptance_approval_does_not_skip_triage(kernel):
+    store, _, _, _ = kernel
+    task = task_for(kernel)
+    operate(
+        kernel,
+        task,
+        "set_acceptance",
+        operation_id="bug-acceptance",
+        payload={
+            "kind": "bug",
+            "content": {"objective": "fix failure", "criteria": ["regression probe passes"]},
+        },
+    )
+    operate(kernel, task, "approve_acceptance", operation_id="approve-bug")
+    state = row(store, "tasks", id=task)
+    assert state["mode"] == "triage"
+    assert state["acceptance_revision"] == 2
+
+
+def test_acceptance_approval_rejects_new_input_until_spec_is_rebound(kernel):
+    store, tasks, _, _ = kernel
+    task = task_for(kernel)
+    payload = {
+        "kind": "feature",
+        "content": {"objective": "show status", "plan": "add view", "criteria": ["status visible"]},
+    }
+    operate(kernel, task, "set_acceptance", operation_id="spec", payload=payload)
+    tasks.observe(task, "issue:1", "new-scope", {"body": "different scope"}, now=6)
+    with pytest.raises(ConflictError):
+        operate(kernel, task, "approve_acceptance", operation_id="stale-approval")
+    operate(kernel, task, "set_acceptance", operation_id="rebind", payload=payload)
+    operate(kernel, task, "approve_acceptance", operation_id="fresh-approval")
+    assert row(store, "task_acceptance_specs", task_id=task, revision=3)["approved_revision"] == 3
+
+
+@pytest.mark.parametrize("action", ["cancel", "exclude"])
+def test_acceptance_cannot_reenable_cancelled_or_excluded_task(kernel, action):
+    store, _, _, _ = kernel
+    task = task_for(kernel)
+    operate(
+        kernel,
+        task,
+        "set_acceptance",
+        operation_id="spec",
+        payload={"kind": "bug", "content": {"objective": "fix", "criteria": ["probe"]}},
+    )
+    operate(kernel, task, action, operation_id="stop")
+    with pytest.raises(ConflictError):
+        operate(kernel, task, "approve_acceptance", operation_id="approval")
+    assert (
+        row(store, "task_acceptance_specs", task_id=task, revision=2)["approved_revision"] is None
+    )
+
+
+def test_related_feedback_invalidates_prior_acceptance_approval(kernel):
+    store, tasks, _, _ = kernel
+    task = task_for(kernel)
+    operate(
+        kernel,
+        task,
+        "set_acceptance",
+        operation_id="spec",
+        payload={"kind": "bug", "content": {"objective": "fix", "criteria": ["probe"]}},
+    )
+    operate(kernel, task, "approve_acceptance", operation_id="approve")
+    tasks.observe(task, "comment:1", "v1", {"body": "acceptance changed"}, kind="feedback", now=6)
+    with pytest.raises(ConflictError):
+        operate(kernel, task, "approve_acceptance", operation_id="repeat-on-new-comment")
+    with store.read() as records:
+        assert not acceptance_view(records, records.one("tasks", id=task))["approved"]
+
+
+def test_input_change_returns_queued_repair_to_triage(kernel):
+    store, tasks, _, _ = kernel
+    task = task_for(kernel)
+    with store.write() as records:
+        records.change("tasks", {"id": task}, {"mode": "implement"})
+    tasks.observe(task, "issue:1", "scope-v2", {"body": "changed scope"}, now=2)
+    assert row(store, "tasks", id=task)["mode"] == "triage"
+
+
+def test_run_snapshot_contains_current_acceptance_specification(kernel):
+    store, _, queue, _ = kernel
+    task = task_for(kernel)
+    operate(
+        kernel,
+        task,
+        "set_acceptance",
+        operation_id="spec",
+        payload={"kind": "bug", "content": {"objective": "fix", "criteria": ["probe"]}},
+    )
+    token = queue.claim(now=6)
+    snapshot = json.loads(row(store, "runs", id=token.run_id)["snapshot_json"])
+    assert snapshot["acceptance"]["current"]
+    assert snapshot["acceptance"]["content"]["criteria"] == ["probe"]
+
+
+@pytest.mark.parametrize("field", ["admission_revision", "target_revision"])
+def test_policy_or_target_configuration_change_invalidates_acceptance(kernel, field):
+    store, _, _, repo = kernel
+    task = task_for(kernel)
+    operate(
+        kernel,
+        task,
+        "set_acceptance",
+        operation_id="spec",
+        payload={"kind": "bug", "content": {"objective": "fix", "criteria": ["probe"]}},
+    )
+    operate(kernel, task, "approve_acceptance", operation_id="approval")
+    with store.write() as records:
+        records.change("repositories", {"id": repo}, {field: 2})
+    with store.read() as records:
+        assert not acceptance_view(records, records.one("tasks", id=task))["approved"]
+
+
+def test_label_admission_wakes_matching_issue_without_manual_selection(kernel):
+    store, tasks, queue, _ = kernel
+    repo = tasks.register_repository("label-repo", admission_mode="labels")
+    with store.write() as records:
+        records.change(
+            "repositories", {"id": repo}, {"policy_json": '{"allowed_labels":["repair"]}'}
+        )
+    task = tasks.ensure_task(repo, "issue:label", issue_id="label", now=1)
+    assert queue.claim(now=1) is None
+    tasks.observe(task, "issue:label", "v1", {"state": "open", "labels": ["repair"]}, now=2)
+    assert row(store, "tasks", id=task)["selected"] == 0
+    token = queue.claim(now=3)
+    assert row(store, "runs", id=token.run_id)["task_id"] == task
+
+
+def test_request_takeover_records_intent_without_changing_assignee(kernel):
+    store, tasks, _, _ = kernel
+    task = task_for(kernel)
+    tasks.observe(task, "issue:1", "assigned", {"assignees": ["other"]}, now=1)
+    operate(
+        kernel,
+        task,
+        "request_takeover",
+        operation_id="takeover",
+        payload={"explanation": "已联系维护者，请重新核验当前占用"},
+    )
+    assert json.loads(row(store, "tasks", id=task)["input_json"])["assignees"] == ["other"]
+    with store.read() as records:
+        assert len(records.find("business_events", task_id=task, kind="takeover_requested")) == 1
+
+
+def test_acceptance_content_and_approved_history_cannot_be_overwritten(kernel):
+    store, _, _, _ = kernel
+    task = task_for(kernel)
+    operate(
+        kernel,
+        task,
+        "set_acceptance",
+        operation_id="spec",
+        payload={"kind": "bug", "content": {"objective": "fix", "criteria": ["probe"]}},
+    )
+    operate(kernel, task, "approve_acceptance", operation_id="approve")
+    with pytest.raises(ConflictError):
+        with store.write() as records:
+            records.change(
+                "task_acceptance_specs", {"task_id": task, "revision": 2}, {"content_json": "{}"}
+            )
+    with pytest.raises(ConflictError):
+        with store.write() as records:
+            records.remove("task_acceptance_specs", task_id=task)
 
 
 def test_closed_managed_pr_keeps_both_unique_identities_and_external_prs_are_observations(kernel):

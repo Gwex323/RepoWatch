@@ -139,6 +139,59 @@ class GitObjects:
         self.run(repository, "bundle", "create", str(destination.resolve()), reference)
         return destination
 
+    def commit_files(self, identifier, parent, files, *, message):
+        self.require_sha(parent)
+        repository = self.repository(identifier)
+        tree = {}
+        for path, entry in sorted(files.items()):
+            parts = path.split("/")
+            directory = tree
+            for part in parts[:-1]:
+                directory = directory.setdefault(part, {})
+                if not isinstance(directory, dict):
+                    raise GitObjectError("文件与目录路径冲突")
+            mode, content = entry
+            if mode not in {"100644", "100755", "120000"}:
+                raise GitObjectError("候选对象模式不可交付")
+            oid = (
+                self.run(repository, "hash-object", "-w", "--stdin", input_bytes=content)
+                .decode()
+                .strip()
+            )
+            directory[parts[-1]] = (mode, oid)
+
+        def write_tree(directory):
+            entries = []
+            for name, value in sorted(directory.items()):
+                if isinstance(value, dict):
+                    mode, kind, oid = "040000", "tree", write_tree(value)
+                else:
+                    mode, oid = value
+                    kind = "blob"
+                entries.append((mode + " " + kind + " " + oid + "\t" + name).encode() + b"\0")
+            return (
+                self.run(repository, "mktree", "-z", input_bytes=b"".join(entries)).decode().strip()
+            )
+
+        tree_sha = write_tree(tree)
+        commit = (
+            self.run(
+                repository,
+                "-c",
+                "user.name=RepoWatch",
+                "-c",
+                "user.email=repowatch@users.noreply.github.com",
+                "commit-tree",
+                tree_sha,
+                "-p",
+                parent,
+                input_bytes=message.encode(),
+            )
+            .decode()
+            .strip()
+        )
+        return {"sha": commit, "tree_sha": tree_sha}
+
     def entries(self, identifier, sha):
         self.require_sha(sha)
         raw = self.run(self.repository(identifier), "ls-tree", "-rz", "--full-tree", sha)

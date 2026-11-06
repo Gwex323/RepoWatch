@@ -58,6 +58,7 @@ class StagePlan:
     verifier: Callable
     children: tuple["StagePlan", ...] = ()
     code_version: dict | None = None
+    record_attempt: bool = True
 
 
 class SerialGate:
@@ -329,7 +330,10 @@ class FormalRuntime:
                     },
                     now=services.clock(),
                 )
-                self.progress.record(token, plan.objective_key, evidence_id, now=services.clock())
+                if plan.record_attempt:
+                    self.progress.record(
+                        token, plan.objective_key, evidence_id, now=services.clock()
+                    )
                 output_id = services.artifacts.register(
                     token,
                     "stage-result:" + stage["id"],

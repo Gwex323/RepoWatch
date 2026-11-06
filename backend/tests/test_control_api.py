@@ -1,5 +1,6 @@
 import json
 import mimetypes
+from hashlib import sha256
 from types import SimpleNamespace
 
 import httpx
@@ -54,6 +55,46 @@ def api(tmp_path):
 
 def mutation(key, revision=None, **data):
     return {"operation_id": key, "expected_revision": revision, "data": data}
+
+
+def test_task_artifact_read_is_scoped_and_has_no_execution_side_effect(api):
+    client, _, services, _ = api
+    repository = services.tasks.register_repository("artifact-view", admission_mode="all_bugs")
+    task = services.tasks.ensure_task(repository, "task:logs", now=0)
+    other = services.tasks.ensure_task(repository, "task:other", now=0)
+    content = b"TARGET_BUG\nAssertionError: sum differs\n"
+    with services.store.write() as records:
+        records.add(
+            "runs",
+            {
+                "id": "log-run",
+                "task_id": task,
+                "budget_owner_task_id": task,
+                "generation": 1,
+                "snapshot_json": "{}",
+                "state": "ended",
+            },
+        )
+        records.add(
+            "artifacts",
+            {
+                "id": "log-artifact",
+                "run_id": "log-run",
+                "sha256": sha256(content).hexdigest(),
+                "relative_path": "fixture-log.txt",
+                "context_json": "{}",
+            },
+        )
+    services.artifacts.root.mkdir(parents=True, exist_ok=True)
+    (services.artifacts.root / "fixture-log.txt").write_bytes(content)
+    assert client.get(f"/api/v1/tasks/{other}/artifacts/log-artifact").status_code == 403
+    response = client.get(f"/api/v1/tasks/{task}/artifacts/log-artifact")
+    assert response.status_code == 200
+    assert response.json()["content"] == content.decode()
+    assert response.json()["truncated"] is False
+    with services.store.read() as records:
+        assert len(records.find("runs")) == 1
+        assert records.one("global_control", singleton=1)["paused"] == 1
 
 
 def test_sse_reconnect_uses_durable_cursor_without_mutations_and_rechecks_session(api):
@@ -195,6 +236,45 @@ def test_task_information_update_deduplicates_and_events_reconnect(api):
     continuation = client.get(f"/api/v1/events?after={events['cursor']}").json()
     assert all(row["sequence"] > events["cursor"] for row in continuation["events"])
     assert "actual-secret" not in json.dumps(detail.json())
+
+
+def test_acceptance_api_replays_approval_and_exposes_stale_input_without_starting_worker(api):
+    client, headers, services, _ = api
+    repo = services.tasks.register_repository("acceptance-api", admission_mode="all_bugs")
+    task = services.tasks.ensure_task(repo, "issue:acceptance", issue_id="acceptance", now=0)
+    specification = mutation(
+        "acceptance-spec",
+        1,
+        action="set_acceptance",
+        payload={
+            "kind": "feature",
+            "content": {
+                "objective": "display status",
+                "plan": "add read-only view",
+                "criteria": ["status visible"],
+            },
+        },
+    )
+    response = client.post(f"/api/v1/tasks/{task}/operate", json=specification, headers=headers)
+    assert response.status_code == 200
+    approval = mutation(
+        "acceptance-approval", response.json()["revision"], action="approve_acceptance"
+    )
+    approved = client.post(f"/api/v1/tasks/{task}/operate", json=approval, headers=headers)
+    assert approved.status_code == 200
+    assert (
+        client.post(f"/api/v1/tasks/{task}/operate", json=approval, headers=headers).json()
+        == approved.json()
+    )
+    detail = client.get(f"/api/v1/tasks/{task}").json()
+    assert detail["acceptance"]["approved"] and detail["acceptance"]["current"]
+    assert detail["mode"] == "triage"
+    services.tasks.observe(task, "issue:acceptance", "v2", {"body": "new scope"}, now=1)
+    stale = client.get(f"/api/v1/tasks/{task}").json()
+    assert not stale["acceptance"]["approved"] and not stale["acceptance"]["current"]
+    with services.store.read() as records:
+        assert not records.find("runs")
+        assert records.one("global_control", singleton=1)["paused"] == 1
 
 
 def test_manual_budget_adjustment_without_run_keeps_pause_usage_and_blockers(api):

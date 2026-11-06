@@ -7,6 +7,7 @@ from typing import Any
 from uuid import uuid4
 
 from repowatch.adapters.windows_jobs import current_process
+from repowatch.application.acceptance import acceptance_view, operate_acceptance, record_proposal
 from repowatch.application.queue_state import refresh_ready, settle_ready
 from repowatch.application.role_snapshots import resolve_run_roles
 from repowatch.application.storage import BusinessStore, ConflictError, RecordPort
@@ -19,6 +20,7 @@ from repowatch.domain.task_records import (
     require_time,
     stable_id,
 )
+from repowatch.domain.triage import admission_eligible
 from repowatch.security import DEFAULT_REDACTOR
 
 
@@ -141,6 +143,7 @@ def capture_run(records, task, run_id, generation, now, *, parent_run_id=None, s
             "configuration": json.loads(task["configuration_json"]),
             "roles": resolve_run_roles(records, json.loads(task["configuration_json"])),
             "acceptance_revision": task["acceptance_revision"],
+            "acceptance": acceptance_view(records, task),
             "budget_owner": {
                 "task_id": owner["id"],
                 "input_revision": owner["input_revision"],
@@ -381,7 +384,11 @@ class TaskRecords:
             if kind == "input":
                 changes["input_json"] = encoded
             repository = required(records, "repositories", id=task["repository_id"])
-            admitted = repository["admission_mode"] == "all_bugs" or task["selected"]
+            admitted = admission_eligible(
+                repository,
+                json.loads(changes.get("input_json", task["input_json"])),
+                task["selected"],
+            )
             reconsider = task["outcome"] == "policy_excluded" or task["wait_reason"] in {
                 "information",
                 "approval",
@@ -390,6 +397,20 @@ class TaskRecords:
             }
             if reconsider and admitted and not task["user_excluded"]:
                 changes.update(state="queued", mode="triage", wait_reason=None, outcome=None)
+            if task["state"] == "queued" and task["mode"] in {"implement", "amend"}:
+                changes.update(mode="triage", pending_transition_json=None)
+            if task["state"] == "running" and task["mode"] in {"implement", "amend"}:
+                changes["pending_transition_json"] = canonical_json(
+                    {
+                        "state": "queued",
+                        "wait_reason": None,
+                        "outcome": None,
+                        "mode": "triage",
+                        "input_revision": changes["input_revision"],
+                        "feedback_revision": changes["feedback_revision"],
+                        "admission_revision": repository["admission_revision"],
+                    }
+                )
             bump_task(records, task, **changes)
             updated = required(records, "tasks", id=task_id)
             records.add(
@@ -430,7 +451,9 @@ class TaskRecords:
                 )
             business_event(records, "run_signals_acknowledged", run["task_id"], run_id=token.run_id)
 
-    def save_triage(self, token: ExecutionToken, decision: TriageDecision, *, now: float) -> str:
+    def save_triage(
+        self, token: ExecutionToken, decision: TriageDecision, *, now: float, proposal=None
+    ) -> str:
         with self.store.write() as records:
             run = execution_record(records, token, now)
             if json.loads(run["snapshot_json"])["mode"] != "triage":
@@ -448,7 +471,8 @@ class TaskRecords:
                 if (
                     existing["result"] != decision.result
                     or existing["reason_code"] != decision.reason_code
-                    or existing["evidence_json"] != canonical_json(decision.evidence)
+                    or existing["evidence_json"]
+                    != canonical_json(DEFAULT_REDACTOR.clean(decision.evidence))
                 ):
                     raise ConflictError("同一分诊输入的决定冲突，不能覆盖原记录")
                 return existing["id"]
@@ -461,15 +485,20 @@ class TaskRecords:
                     **identity,
                     "result": decision.result,
                     "reason_code": decision.reason_code,
-                    "evidence_json": canonical_json(decision.evidence),
+                    "evidence_json": canonical_json(DEFAULT_REDACTOR.clean(decision.evidence)),
                 },
             )
             current = (
                 task["input_revision"] == run["input_revision"]
                 and task["feedback_revision"] == run["feedback_revision"]
                 and repository["admission_revision"] == run["admission_revision"]
+                and task["acceptance_revision"]
+                == json.loads(run["snapshot_json"])["acceptance_revision"]
             )
             if current and not task["user_excluded"] and not task["cancel_requested"]:
+                acceptance_revision = task["acceptance_revision"]
+                if proposal is not None:
+                    acceptance_revision = record_proposal(records, task, repository, proposal)
                 state, wait, outcome = {
                     TriageResult.AUTO_REPAIR: ("queued", None, None),
                     TriageResult.NEEDS_INFORMATION: ("waiting", "information", None),
@@ -485,11 +514,17 @@ class TaskRecords:
                     "input_revision": run["input_revision"],
                     "feedback_revision": run["feedback_revision"],
                     "admission_revision": run["admission_revision"],
+                    "acceptance_revision": acceptance_revision,
                     "mode": "implement"
                     if decision.result == TriageResult.AUTO_REPAIR
                     else "triage",
                 }
-                bump_task(records, task, pending_transition_json=canonical_json(transition))
+                bump_task(
+                    records,
+                    task,
+                    acceptance_revision=acceptance_revision,
+                    pending_transition_json=canonical_json(transition),
+                )
                 if decision.result == TriageResult.BLOCKED:
                     block(records, decision.reason_code, task["id"], now=now, triage_id=identifier)
             business_event(
@@ -573,12 +608,37 @@ class TaskRecords:
                     wait_reason="delivery_review" if terminal_delivery else None,
                     outcome=None,
                 )
-            elif action in {"select", "request_triage", "supply_information"}:
+            elif action in {"reconcile_publication", "reconcile_issue"}:
+                if task["state"] == "running" or task["user_excluded"] or task["cancel_requested"]:
+                    raise ConflictError("任务仍在运行或已取消／排除")
+                kind = "issue" if action == "reconcile_issue" else "pull_request"
+                intent = records.one("publication_intents", task_id=task_id, kind=kind)
+                if intent is None or intent["state"] not in {"unknown", "dispatched", "confirmed"}:
+                    raise ConflictError("没有需要核对的发布意图")
+                next_mode = "triage" if kind == "issue" else "reconcile_publication"
+                if task["state"] == "blocked":
+                    changes.update(mode=next_mode)
+                else:
+                    changes.update(
+                        state="queued",
+                        mode=next_mode,
+                        wait_reason=None,
+                    )
+            elif action in {"select", "request_triage", "request_takeover", "supply_information"}:
                 if task["user_excluded"] or task["cancel_requested"]:
                     raise ConflictError("人工排除或取消必须明确重新启用")
                 if task["state"] == "ended" and task["outcome"] != "policy_excluded":
                     raise ConflictError("交付终态不能由普通选择重开")
                 changes["selected"] = 1
+                if action in {"request_triage", "request_takeover"}:
+                    changes["feedback_revision"] = task["feedback_revision"] + 1
+                if action == "request_takeover":
+                    explanation = payload.get("explanation")
+                    if not isinstance(explanation, str) or not explanation.strip():
+                        raise ValueError("请求接手须提供说明，仍需核对远端占用")
+                    business_event(
+                        records, "takeover_requested", task_id, explanation=explanation, actor=actor
+                    )
                 if action == "supply_information":
                     if not payload:
                         raise ValueError("补充材料不能为空")
@@ -595,6 +655,12 @@ class TaskRecords:
                         wait_reason=None,
                         outcome=None,
                     )
+            elif action in {"set_acceptance", "approve_acceptance"}:
+                changes, event_kind, details = operate_acceptance(
+                    records, task, action, payload, actor
+                )
+                business_event(records, event_kind, task_id, **details)
+                changes["feedback_revision"] = task["feedback_revision"] + 1
             elif action == "update_configuration":
                 if not payload or DEFAULT_REDACTOR.clean(payload) != payload:
                     raise ValueError("任务配置必须有效且不能包含凭据")
@@ -627,7 +693,10 @@ class TaskRecords:
                 raise ValueError("不支持的人工任务操作")
             bump_task(records, task, **changes)
             updated = required(records, "tasks", id=task_id)
-            if updated["input_revision"] != task["input_revision"]:
+            if (
+                updated["input_revision"] != task["input_revision"]
+                or updated["feedback_revision"] != task["feedback_revision"]
+            ):
                 records.add(
                     "task_input_versions",
                     {

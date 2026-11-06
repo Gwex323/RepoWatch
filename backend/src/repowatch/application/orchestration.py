@@ -95,6 +95,8 @@ def _finish(records, token, now, *, state, wait_reason=None, outcome=None, use_t
             transition["input_revision"] == task["input_revision"]
             and transition["feedback_revision"] == task["feedback_revision"]
             and transition["admission_revision"] == repository["admission_revision"]
+            and transition.get("acceptance_revision", task["acceptance_revision"])
+            == task["acceptance_revision"]
         ):
             state, wait_reason, outcome, mode = (
                 transition[key] for key in ("state", "wait_reason", "outcome", "mode")

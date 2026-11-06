@@ -147,6 +147,24 @@ def routes(services):
             now=services.clock(),
         )
 
+    @router.get("/tasks/{task_id}/artifacts/{artifact_id}")
+    def artifact(task_id: str, artifact_id: str):
+        return services.console.artifact(
+            task_id, artifact_id, services.artifacts, now=services.clock()
+        )
+
+    @router.post("/tasks/{task_id}/relations/decide")
+    def relation_decide(task_id: str, body: Mutation):
+        return services.issue_contexts.decide(
+            body.operation_id, task_id, expected_revision=body.revision(), **body.data
+        )
+
+    @router.post("/tasks/{task_id}/candidate-issue/decide")
+    def candidate_issue_decide(task_id: str, body: Mutation):
+        return services.candidate_issues.decide(
+            body.operation_id, task_id, expected_revision=body.revision(), **body.data
+        )
+
     @router.post("/reasons/{reason_id}/resolve")
     def resolve(reason_id: str, body: Mutation):
         return services.control.resolve_reason(

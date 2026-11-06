@@ -14,10 +14,12 @@ from repowatch.api.security import LocalSessions
 from repowatch.application.artifacts import ArtifactService
 from repowatch.application.budget_adjustments import BudgetAdjustments
 from repowatch.application.budgets import BudgetService
+from repowatch.application.candidate_issues import CandidateIssues
 from repowatch.application.console import Console
 from repowatch.application.control import ControlService
 from repowatch.application.diagnostics import DiagnosticService
 from repowatch.application.github_reads import GitHubReads, MemorySourceFacts
+from repowatch.application.issue_context import IssueContexts
 from repowatch.application.orchestration import Orchestrator
 from repowatch.application.providers import ProviderService
 from repowatch.application.recovery import RecoveryService
@@ -59,6 +61,8 @@ class HostServices:
             self.store, GitObjects(settings.data_dir / "git-objects"), self.artifacts
         )
         self.console = Console(self.store, self.budgets, self.providers, self.roles)
+        self.issue_contexts = IssueContexts(self)
+        self.candidate_issues = CandidateIssues(self)
 
     def reconcile_startup(self):
         self.providers.reconcile()

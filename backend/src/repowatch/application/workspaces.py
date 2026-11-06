@@ -9,12 +9,15 @@ class WorkspaceService:
     def __init__(self, store, backend):
         self.store, self.backend = store, backend
 
-    def create(self, token, sha, *, image="alpine/git:latest", now):
+    def create(self, token, sha, *, image="alpine/git:latest", now, mode=None):
         with self.store.read() as records:
             run = execution_record(records, token, now)
             task = required(records, "tasks", id=run["task_id"])
             task_id, repository_id = task["id"], task["repository_id"]
-            mode = "implement" if task["mode"] in {"implement", "amend"} else "scan"
+            allowed = "implement" if task["mode"] in {"implement", "amend"} else "scan"
+            mode = mode or allowed
+            if mode not in {allowed, "check", "review"}:
+                raise PermissionError("工作区模式不能扩大任务写入能力")
         result = self.backend.create(repository_id, sha, task_id=task_id, mode=mode, image=image)
         with self.store.write() as records:
             execution_record(records, token, now)

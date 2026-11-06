@@ -25,6 +25,8 @@ RepoWatch 面向本地开发场景，规划以受控 Agent Harness 扫描 GitHub
 | 查正式图、同步子任务及持久进展／故障验收 | [运行引擎](docs/development/runtime.md)，当前通过范围见 [NOW](docs/context/NOW.md#证据入口与时效) |
 | 查导入扫描、自动补全与版本漂移 | [实施契约](docs/implementation-contracts.md) §4；[自动补全规则](docs/scan-recovery-proposal.md)；[工作流程](docs/workflow-design.md) Q28 |
 | 查 P2 工作区、离线依赖、扫描 UI 与当前复核证据 | [工作区与扫描操作](docs/development/workspaces-scans.md)，未验收项见 [NOW](docs/context/NOW.md) |
+| 查 P3 首批分诊、验收规范与人工批准入口 | [本地控制](docs/development/local-control.md#p3-分诊与验收规范首批接入)，当前进度与未完成项见 [NOW](docs/context/NOW.md) |
+| 查 P3 探针／冻结／独审、候选查重与发布回执 | [修复证据与受控发布](docs/development/local-control.md#p3-修复证据与受控发布)，本地与真实验收边界见 [NOW](docs/context/NOW.md) |
 | 查修复验证、发布或 PR 返修 | [实施契约](docs/implementation-contracts.md) §5、§8；[工作流程](docs/workflow-design.md) Q29 与“PR 人工评审未通过” |
 | 查供应商、Agent 交接、凭证 | [接入设计](docs/integration-discussion.md) Q31、Q35；[实施契约](docs/implementation-contracts.md) §6；已实现端口及验证边界见 [P1 供应商](docs/development/providers.md) |
 | 查巡检频率和同步行为 | [实施契约](docs/implementation-contracts.md) §7 |

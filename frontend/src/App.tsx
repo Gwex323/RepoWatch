@@ -283,11 +283,19 @@ function TaskDetail({ task, state, run, onUpdated }: {
     onUpdated: () => Promise<void>;
 }) {
     const [information, setInformation] = useState("");
+    const [issueNumber, setIssueNumber] = useState(0);
+    const [acceptanceKind, setAcceptanceKind] = useState<"bug" | "feature" | "refactor">(task.acceptance?.kind ?? "bug");
+    const [acceptanceContent, setAcceptanceContent] = useState(pretty(task.acceptance?.content ?? { objective: "", criteria: [] }));
+    useEffect(() => {
+        setAcceptanceKind(task.acceptance?.kind ?? "bug");
+        setAcceptanceContent(pretty(task.acceptance?.content ?? { objective: "", criteria: [] }));
+    }, [task.id, task.acceptance_revision]);
     const [configuration, setConfiguration] = useState(pretty(task.configuration));
     const [amounts, setAmounts] = useState(initialAmounts);
     const [reason, setReason] = useState("");
     const [manualPriority, setManualPriority] = useState(0);
     const [reports, setReports] = useState<Record<string, unknown>>({});
+    const [artifactViews, setArtifactViews] = useState<Record<string, unknown>>({});
     const operate = (action: string, payload?: Record<string, unknown>) => run(async () => { const result = await mutate(`/tasks/${task.id}/operate`, { action, payload }, task.revision); await onUpdated(); return result; });
     const [basis, setBasis] = useState<{basis_sha256: string; ledger: Budget; owner_task_id: string} | null>(null);
     const [basisRefresh, setBasisRefresh] = useState(0);
@@ -317,10 +325,37 @@ function TaskDetail({ task, state, run, onUpdated }: {
 {["select", "request_triage", "cancel", "exclude", "reenable"].map(action => <button key={action} onClick={() => void operate(action)}>
 {({ select: "明确选择", request_triage: "重新分诊", cancel: "取消任务", exclude: "排除", reenable: "明确重新启用" })[action]}</button>)}</div>
 <Evidence value={task.input} title="当前输入与补充材料"/>
+<h3>分诊与验收规范 · 修订 {task.acceptance_revision ?? 1}</h3>
+{task.issue_context && <article><h4>远端占用与 PR 关系核对</h4><Evidence value={task.issue_context.facts} title="当前 Issue、评论及 PR 证据"/>
+<p>填写下方补充信息作为判断依据；判断仅适用于当前远端事实，执行前会重新读取。</p>
+{task.issue_context.facts.pull_requests.map(pull => <p key={pull.id}><a href={pull.html_url} target="_blank" rel="noreferrer">#{pull.number} {pull.title}</a> · {pull.state} {(["same", "unrelated"] as const).map(decision => <button key={decision} disabled={!information.trim()} onClick={() => void run(async () => { await mutate(`/tasks/${task.id}/relations/decide`, {context_digest:task.issue_context!.digest, relation_key:`pr:${pull.id}`, decision, explanation:information}, task.revision); await onUpdated(); })}>{decision === "same" ? "确认同一问题" : "确认无关"}</button>)}</p>)}
+{(["occupied", "available"] as const).map(decision => <button key={decision} disabled={!information.trim()} onClick={() => void run(async () => { await mutate(`/tasks/${task.id}/relations/decide`, {context_digest:task.issue_context!.digest, relation_key:"ownership", decision, explanation:information}, task.revision); await onUpdated(); })}>{decision === "occupied" ? "确认他人处理中" : "确认无维护者占用"}</button>)}</article>}
+{task.triage_decisions?.map(decision => <article key={decision.id}>
+<p>{decision.result} · {decision.reason_code} · 输入修订 {decision.input_revision} · 准入修订 {decision.admission_revision}</p>
+<Evidence value={decision.evidence} title="分诊依据"/>
+{typeof decision.evidence.lookup_digest === "string" && <><label>相同 Issue 编号<input type="number" min="1" value={issueNumber} onChange={event => setIssueNumber(Number(event.target.value))}/></label>
+{(["same", "none"] as const).map(choice => <button key={choice} disabled={!information.trim() || (choice === "same" && issueNumber < 1)} onClick={() => void run(async () => { await mutate(`/tasks/${task.id}/candidate-issue/decide`, {context_digest:decision.evidence.lookup_digest, decision:choice, issue_number:choice === "same" ? issueNumber : null, explanation:information}, task.revision); await onUpdated(); })}>{choice === "same" ? "关联已确认相同 Issue" : "确认完整查重无相似 Issue"}</button>)}</>}
+</article>)}
+{task.repair_sessions?.map(session => <article key={session.id}><h4>修复证据 · {session.state}</h4><Evidence value={{frozen:session.frozen, evidence:session.evidence}} title="冻结内容、修改前后与独审证据"/></article>)}
+{task.repair_sessions?.flatMap(session => Array.isArray(session.evidence?.artifact_ids) ? session.evidence.artifact_ids : []).filter((value, index, values) => typeof value === "string" && values.indexOf(value) === index).map(identifier => <article key={String(identifier)}><button onClick={() => void run(async () => { const value = await request(`/tasks/${task.id}/artifacts/${identifier}`); setArtifactViews(previous => ({...previous, [String(identifier)]:value})); })}>读取验证日志／产物 {String(identifier)}</button>{artifactViews[String(identifier)] !== undefined && <Evidence value={artifactViews[String(identifier)]} title="日志正文与摘要"/>}</article>)}
+{task.artifacts?.filter(artifact => artifact.context.producer === "docker_runner").map(artifact => <article key={artifact.id}><button onClick={() => void run(async () => { const value = await request(`/tasks/${task.id}/artifacts/${artifact.id}`); setArtifactViews(previous => ({...previous, [artifact.id]:value})); })}>读取 Runner 日志 {artifact.id}</button>{artifactViews[artifact.id] !== undefined && <Evidence value={artifactViews[artifact.id]} title="Runner 日志正文与摘要"/>}</article>)}
+{task.publication_intents?.map(intent => <article key={intent.id}><h4>发布意图 · {intent.kind} · {intent.state}</h4><Evidence value={intent} title="发布身份及回执"/>{["pull_request", "issue"].includes(intent.kind) && ["unknown", "dispatched", "confirmed"].includes(intent.state) && <button onClick={() => void operate(intent.kind === "issue" ? "reconcile_issue" : "reconcile_publication")}>请求核对远端回执</button>}</article>)}
+<Evidence value={task.relation_decisions} title="已保存的占用与 PR 关系决定"/>
+<Evidence value={task.candidate_issue_decisions} title="已保存的候选查重决定"/>
+<Evidence value={task.distillation_intents} title="验证后的待提炼意图"/>
+{task.acceptance && <article><p>{task.acceptance.kind} · {!task.acceptance.current ? "输入或策略已变化，需保存新修订" : task.acceptance.approved ? `已由 ${task.acceptance.approved_by ?? "用户"} 批准` : "待批准"}</p><Evidence value={task.acceptance.content} title="当前验收条件"/></article>}
+<form onSubmit={event => { event.preventDefault(); void run(async () => { await mutate(`/tasks/${task.id}/operate`, {action:"set_acceptance", payload:{kind:acceptanceKind, content:JSON.parse(acceptanceContent)}}, task.revision); await onUpdated(); }, "验收规范已更新；先前批准不再适用于新修订。"); }}>
+<label htmlFor="acceptance-kind">任务类型</label><select id="acceptance-kind" value={acceptanceKind} onChange={event => setAcceptanceKind(event.target.value as typeof acceptanceKind)}><option value="bug">Bug 修复</option><option value="feature">功能</option><option value="refactor">纯重构</option></select>
+<label htmlFor="acceptance-content">验收条件（JSON）</label><textarea id="acceptance-content" value={acceptanceContent} onChange={event => setAcceptanceContent(event.target.value)} spellCheck={false} required/>
+<p>填写 objective（目标）和 criteria（验收条件列表）；功能／重构还需 plan（具体方案），纯重构还需 structural_goal（结构目标）与 behavior_preservation（行为保持要求）。批准后仍会重新核验准入和证据。</p>
+<button type="submit">保存新验收修订</button>
+</form>
+{task.acceptance?.current && !task.acceptance.approved && <button onClick={() => void operate("approve_acceptance")}>明确批准当前验收规范</button>}
 <form onSubmit={event => { event.preventDefault(); void operate("supply_information", { information }); }}>
 <label>补充信息<textarea value={information} onChange={e => setInformation(e.target.value)} required/>
 </label>
 <button type="submit">保存补充材料</button>
+<button type="button" disabled={!information.trim()} onClick={() => void operate("request_takeover", {explanation:information})}>请求接手并重新核验占用</button>
 </form>
 <form onSubmit={event => { event.preventDefault(); void run(async () => { const payload = JSON.parse(configuration); await mutate(`/tasks/${task.id}/operate`, {action:"update_configuration", payload}, task.revision); await onUpdated(); }); }}>
 <label>任务策略配置<textarea value={configuration} onChange={e => setConfiguration(e.target.value)} spellCheck={false} required/>
