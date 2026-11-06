@@ -70,7 +70,12 @@ def meter_execution(records, run, now):
     if previous is None:
         previous = round((run["started_at"] if run["started_at"] is not None else now) * 1000)
     if tick < previous:
-        raise PermissionError("宿主计时回退，必须核对运行，不能重置累计时长")
+        # A caller can sample the clock before waiting for this write lock while
+        # a concurrent writer persists a later sample. Never rewind the durable
+        # meter; only a material rollback is a host-clock failure.
+        if previous - tick > 5000:
+            raise PermissionError("宿主计时回退，必须核对运行，不能重置累计时长")
+        tick = previous
     elapsed = tick - previous if run["budget_clock_state"] == "active" else 0
     records.change("runs", {"id": run["id"]}, {"budget_metered_ms": tick})
     limits, used, reserved = ledger_values(ledger)

@@ -1,13 +1,13 @@
 # 当前状态与接续
 
-核验日期：2026-11-06，范围为 P3 修复、候选 Issue、受控发布与本地验收。P2 已提交为 `625fb2c` 并推送至公共仓库 `Gwex323/repowatch`。当前位于 `feature/p3-repair-publication`，已接入分诊／批准、修复探针、冻结候选、回归／独审、外部合并核验、候选 Issue 查重和直接／Fork 发布适配。P3 15 项中 11 项已验收，整体任务为 52／89；7.1／7.2／7.3／7.7 等待真实受控 GitHub 证据，P3 整体尚未放行。代码未提交／推送；P4—P6 和最终用户验收未完成。
+核验日期：2026-11-06，范围为 P3 修复、候选 Issue、受控发布与本地验收。P2 已提交为 `625fb2c` 并推送至公共仓库 `Gwex323/repowatch`。当前位于 `feature/p3-repair-publication`，P3 实现提交 `62508f6` 已推送至同名分支。已接入分诊／批准、修复探针、冻结候选、回归／独审、外部合并核验、候选 Issue 查重和直接／Fork 发布适配。P3 15 项全部通过，整体任务为 56／89；直接与 Fork 两种发布路径已由 RepoWatch 产品在真实受控仓库完成 Issue→分支→PR，模型使用确定性夹具，Docker、Git 与 GitHub 写入为真实。P4—P6 和最终用户验收未完成。
 
 ## 当前目标与进展
 
 - P0 与全部 P1 任务已完成。P1 提供正式串行执行位、累计预算和有限续期、实际命令监督、显式恢复、角色能力／有限重试、回环会话／API／UI、持久无进展检测及 GitHub 只读来源接口。E1 费用仍待按账单核实。P0 的对象交接、恢复／调度及编码选型结论沿用[门槛汇总](../development/p0-summary.md)和[编码资产评测](../development/embedding-evaluation.md)，不替代后续真实仓库验收。
 - 需求与最终架构已有基线、实施契约和 ADR，来源路由见 [项目索引](../../PROJECT_INDEX.md)。本次不重启需求访谈。
-- 活动变更为 `build-github-issue-agent-harness`：[proposal](../../openspec/changes/build-github-issue-agent-harness/proposal.md)、[design](../../openspec/changes/build-github-issue-agent-harness/design.md)、[11 个能力的 delta specs](../../openspec/changes/build-github-issue-agent-harness/specs/) 和 [tasks](../../openspec/changes/build-github-issue-agent-harness/tasks.md) 已存在。按当前勾选计为 52／89；P3 尚在验收，本变更不归档。
-- 开发安装见[开发入口](../development/README.md)，API／Worker 与人工入口见[本地控制](../development/local-control.md)，P1 引擎验收见[运行验收](../development/runtime.md#复跑与实验映射)。P2 扫描已通过阶段验收；P3 修复与发布适配已存在，当前 schema 为 `0021_distillation_state`，测试只迁移临时数据库。尚未执行真实 GitHub Issue／PR 写入、真实模型修复或完整产品用户验收。
+- 活动变更为 `build-github-issue-agent-harness`：[proposal](../../openspec/changes/build-github-issue-agent-harness/proposal.md)、[design](../../openspec/changes/build-github-issue-agent-harness/design.md)、[11 个能力的 delta specs](../../openspec/changes/build-github-issue-agent-harness/specs/) 和 [tasks](../../openspec/changes/build-github-issue-agent-harness/tasks.md) 已存在。按当前勾选计为 56／89；P3 已通过，本变更继续保留至最终归档。
+- 开发安装见[开发入口](../development/README.md)，API／Worker 与人工入口见[本地控制](../development/local-control.md)，P1 引擎验收见[运行验收](../development/runtime.md#复跑与实验映射)。P2 扫描与 P3 修复发布均已通过阶段验收，当前 schema 为 `0021_distillation_state`，测试只迁移临时数据库。尚未执行真实付费模型修复、用户数据库迁移或完整产品用户验收。
 - 已补充目标分支 SHA 读取和仓库手动“检查更新”的规划契约与验收场景；实现和运行验证仍待对应阶段完成。
 - 最新决定：本地扫描缺陷先完整查重再创建或关联 GitHub Issue；外部开放 PR 同问题等待、无关继续、关系不明请求用户判断。P3 已接入这些入口及人工决定持久回读，远端 PR／评论变化会递增反馈并重新分诊。已合并 PR 须验证提交进入当前目标历史并运行真实探针，已解决记为 `externally_resolved`，目标仍失败则以当前版本继续验证；不会凭 `merged` 自证解决。
 - 最新循环与预算决定：按真实产物检测无进展及振荡；复杂任务有进展但预计额度不足时，耗尽前正常等待用户批准有限追加，账本与检测历史不清零；已耗尽／无进展等仍全局阻塞且不因加额自动恢复。初值与恢复条件见[实施契约 §3](../implementation-contracts.md#无进展检测)。预算、检测、UI 和正式图集成已完成受控验收；真实扫描／修复事实生产及生产样本阈值校准由后续适配补齐。
@@ -15,7 +15,7 @@
 
 ## 阻塞与待核实
 
-- 用户已授权继续 P3 开发；当前分支 `feature/p3-repair-publication`，保留原有未跟踪临时目录，未提交／推送。2026-11-06 沙箱外只读核实 `gh api user` 为 `Gwex323`；沙箱内认证报告失效是环境可见性差异。真实 GitHub 写入验收还需明确指定可写测试上游与 Gwex323 Fork 配对；不能把项目代码仓库或其他账户当作默认测试授权对象。
+- 用户已授权准备专用测试仓库并继续 P3 开发；当前分支 `feature/p3-repair-publication`，实现提交 `62508f6` 已推送，保留原有未跟踪临时目录。`Gwex323/repowatch-p3-sandbox`（ID `1447899115`）及第二个账户 Fork `gwx541/repowatch-p3-sandbox`（ID `1447913051`）完成本轮专用验收。2026-11-06 RepoWatch 产品真实完成直接路径 Issue #15→PR #16 与 Fork 路径 Issue #17→PR #18，身份、base/head ref 与 SHA 匹配，两条发布意图均为 `confirmed`；模型使用确定性夹具，Docker、Git 与 GitHub 写入为真实。此前 Issue #1／#3、PR #2／#4 为人工 API 驱动的仓库准备对象。沙箱内外认证可见性不同，不代表凭据失效。
 - Docker Desktop 此前停止，首次重跑为 `466 passed, 4 failed, 1 skipped`；四项均因引擎不可用。启动已安装 Docker 后容器专项 `15 passed`，后续全套 `491 passed, 1 skipped`。沙箱内 TestClient 挂起在沙箱外基础测试 `2 passed` 后解除；这些环境失败不再作为代码阻塞。最终证据防伪／原 PR 更新等后续修改的最新报告见下方，不沿用旧全量宣称最终冻结通过。
 - P0 六项关键切片均已通过，P1 已放行；但费用账单、真实 GitHub 写入、完整 E11 安装／启停／交付链路、LFS 实体与子模块对象仍未完成，含这些内容的仓库保持阻塞。1.9 主选 `jinaai/jina-embeddings-v2-base-zh`（Apache-2.0、768 维、0.64GB、离线加载通过），代码备选为 `jinaai/jina-embeddings-v2-base-code`；评测仅覆盖 22 条语料／12 条查询，生产召回与运行时锁仍需在 P5 前复核。编码运行时未加入默认依赖，模型资产未固定摘要。
 - P1 已无需要人工介入的开发阻塞。普通仓库执行需 P2 的身份／工作区／Runner／扫描接入；本轮只读 GitHub 通过 HTTP 夹具验证，未访问真实仓库。P1 通过不代表真实修复发布、完整产品部署或最终用户验收通过。
@@ -23,11 +23,14 @@
 
 ## 下一步
 
-1. P3 本地开发及验收已继续推进：共享 SDK＋真实 Docker、三类验收、独审补查／返修、无进展及续期、认领评论故障和只读回执均有记录。7.1／7.2／7.3／7.7 的真实远端分支竞争、直接／Fork 写入与回执仍缺受控仓库证据，保留未勾选，不进入 P4。
-2. 提供获授权的可写测试上游与用户 Fork 配对后，执行 7.3／7.7 真实链路并记录上游／发布身份、base／head 与实际 SHA；目前不写入真实仓库、不跨账户自行创建 Fork。继续沿用原预算、执行权和唯一 PR 生命周期约束。
-3. 完整安装启停、备份、产品级故障集及真实修复发布仍按 P6 和对应阶段验收，不提前标记最终产品完成。
+1. P3 已通过；按 tasks 进入 P4，先实现单 API 同步循环、独立同步租约与触发合并（8.1），再推进 Issue／PR 同步、重分诊和 PR 评审返修。不得把 P3 的确定性模型夹具结果当作真实模型效果证据。
+2. 保留 `Gwex323/repowatch-p3-sandbox` 与 `gwx541/repowatch-p3-sandbox` 现有 Issue #15／#17、PR #16／#18 作为 P4 远端输入；未获授权不合并、关闭或删除。重复的中间测试 Issue #5—#12 已关闭。
+3. 完整安装启停、备份、产品级故障集及真实付费修复发布仍按 P6 和对应阶段验收，不提前标记最终产品完成。
 
 ## 证据入口与时效
+
+- 2026-11-06 P3 真实 GitHub 双路径端到端（产品执行、真实 Docker／Git／GitHub、确定性模型夹具）：直接路径 Issue #15（ID `6239516253`，创建者 Gwex323）→ 分支 `repowatch/issue-15-f3ad2679-3c1` @ `88f43247b388b281f1fad588993254a3d563970a` → PR #16（ID `5185209138`，head/base 仓库 ID `1447899115`，base `main` @ `3ebd49d8c6c8687c1915ad8bf8e582c217eea717`）；Fork 路径 Issue #17（ID `6239877510`，创建者 gwx541）→ Fork 分支 `repowatch/issue-17-49b70683-9eb` @ `05f996df174e4df2b8152ca941dbee6357adc2a8` → 上游 PR #18（ID `5185513712`，head 仓库 ID `1447913051`、base 仓库 ID `1447899115`，base `main` @ `e196700ff21fa018d536682511256c9efccc5a77`）。两条发布意图均为 `confirmed`，任务进入 `waiting / pr_review`；报告 `experiments/results/local/p3-github-e2e-20261106.json`。本轮修复心跳与预算计时的并发陈旧样本竞态、PR 易变字段导致的误判重分诊，并将单步输入上限改为任务可配置；P3 未调用付费模型、未合并或关闭这些 PR。
+- 2026-11-06 P3 专用 GitHub 仓库人工驱动对账：公开上游 `Gwex323/repowatch-p3-sandbox`（仓库 ID `1447899115`，默认分支 `main`），Fork `gwx541/repowatch-p3-sandbox`（仓库 ID `1447913051`，parent 为上述上游）。直接路径 Issue #1、PR #2：base `main` SHA `50b0c34f5145925cdb9ab92e65a3fd38a3bb9d56`，head `repowatch/issue-1-p3-direct` SHA `c70981623985df96c9b5f8010d4e97c5d2c072f7`，head/base 仓库 ID 均为 `1447899115`。Fork 路径 Issue #3、PR #4：同一 base SHA，head `repowatch/issue-3-p3-fork` SHA `2f570b66e90d1e3f91606980c2b42ceb7cb3c71a`，head 仓库 ID `1447913051`、base 仓库 ID `1447899115`。两 PR 均为开放状态，GitHub API 读回的 Issue 关联和仓库身份匹配。以上远端对象由人工 API 命令写入，不是 RepoWatch 真实产品端到端执行或发布器回执报告；因此只证明 GitHub 直接／Fork 远端对象可用，7.1／7.2／7.3／7.7 继续未勾选，P3 不放行。未运行真实模型或将 PR 合并。
 
 - 2026-11-06 P3 本地重试：末次完整 Docker-enabled 后端 `507 passed, 1 skipped in 800.44s`，JUnit `.cache/p3-release-review-final.xml`（唯一跳过仍为独立开关控制的 Git 对象交接实验）。此前 `491 passed, 1 skipped`／`500 passed, 1 skipped` 被该报告取代；全量启动后新增创建前查重重读、专用回执模式及测试，最后冻结定向回归 `.cache/p3-final-delta.xml` 为 `68 passed`，覆盖发布／候选／Worker／调度／API／SDK 分诊；创建竞争 `6 passed`、`.cache/p3-worker-receipt-final.xml` 的 `10 passed`、`.cache/p3-scope-final.xml` 的 `7 passed`。真实 SDK／Deep Agents＋Docker 串行修复 `1 passed`（`.cache/p3-sdk-docker.xml`），证据防伪与原始日志绑定真实 Docker `6 passed`（`.cache/p3-proof-binding.xml`），独审补查／返修 `2 passed`（`.cache/p3-review-reentry.xml`），真实进展后有限续期 `1 passed`（`.cache/p3-repair-renewal.xml`），认领评论默认不发／成功／丢回执 `3 passed`（`.cache/p3-claim-contracts.xml`）。Edge 十项报告 `.cache/p3-browser/1793942951731/report.json`：保存／批准／刷新／输入失效、暂停操作、无隐式执行、候选查重决定、PR 关系决定、专用只读回执排队及任务归属 Runner 日志读取。Ruff、前端 TypeScript／Vite、OpenSpec strict、四份直接关联文档的 136 处本地链接目标及差异检查通过（未全面复核历史锚点／外链）。模型 HTTP 与远端发布使用受控夹具；真实模型、真实 GitHub 写入、用户数据库迁移、提交／推送均未执行。
 

@@ -18,6 +18,37 @@ from repowatch.domain.task_records import canonical_json, content_digest
 from repowatch.security import DEFAULT_REDACTOR
 
 
+def relation_fingerprint(kind, values):
+    """Stable projection for relation changes; ignores volatile GitHub fields."""
+    if kind == "comments":
+        return [
+            {
+                "id": item.get("id"),
+                "body": item.get("body"),
+                "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
+                "user": (item.get("user") or {}).get("login"),
+            }
+            for item in values
+        ]
+    return [
+        {
+            "id": item.get("id"),
+            "number": item.get("number"),
+            "state": item.get("state"),
+            "title": item.get("title"),
+            "body": item.get("body"),
+            "merged": item.get("merged"),
+            "merged_at": item.get("merged_at"),
+            "head": (item.get("head") or {}).get("sha"),
+            "head_ref": (item.get("head") or {}).get("ref"),
+            "base_ref": (item.get("base") or {}).get("ref"),
+            "base_sha": (item.get("base") or {}).get("sha"),
+        }
+        for item in values
+    ]
+
+
 class IssueContexts:
     def __init__(self, services):
         self.services = services
@@ -70,7 +101,9 @@ class IssueContexts:
             prior_facts = json.loads(latest["facts_json"])
             for kind in ("comments", "pull_requests"):
                 cleaned_values = DEFAULT_REDACTOR.clean(facts[kind])
-                if content_digest(cleaned_values) == content_digest(prior_facts[kind]):
+                if content_digest(relation_fingerprint(kind, cleaned_values)) == content_digest(
+                    relation_fingerprint(kind, prior_facts[kind])
+                ):
                     continue
                 services.tasks.observe(
                     task["id"],

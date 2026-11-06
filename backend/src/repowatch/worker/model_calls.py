@@ -129,11 +129,14 @@ def managed_role_model(
     max_input_tokens=16000,
 ):
     limits, policy = limits or ModelLimits(), policy or RetryPolicy()
-    if type(max_input_tokens) is not int or not 4096 <= max_input_tokens <= 100000:
-        raise ValueError("单步输入上限必须是有限的安全整数")
     with calls.store.read() as records:
         snapshot = json.loads(records.one("runs", id=token.run_id)["snapshot_json"])
         resolved = snapshot.get("roles", {}).get(role_key)
+    configured = snapshot.get("configuration", {}).get("max_input_tokens")
+    if configured is not None:
+        max_input_tokens = configured
+    if type(max_input_tokens) is not int or not 4096 <= max_input_tokens <= 100000:
+        raise ValueError("单步输入上限必须是有限的安全整数")
     if not resolved:
         raise PermissionError("当前运行尚未固化指定角色配置")
     with adapter.session(

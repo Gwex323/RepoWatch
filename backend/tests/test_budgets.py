@@ -578,8 +578,21 @@ def test_overrun_and_actual_usage_beyond_bound_are_charged_and_blocked(kernel):
     assert view["used"]["active_ms"] == 120
     assert view["used"]["tokens"] == 25
     assert row(k, "global_control", singleton=1)["paused"] == 1
+
     k["queue"].complete(token, now=k["clock"].now())
     assert row(k, "tasks", id=k["task"])["state"] == "blocked"
+
+
+def test_stale_clock_sample_is_clamped_without_rewinding_meter(kernel):
+    k = kernel
+    authorize(k)
+    token = claim(k)
+    k["queue"].heartbeat(token, now=10)
+    k["queue"].heartbeat(token, now=9.999)
+    k["queue"].heartbeat(token, now=9)
+    assert k["budgets"].view(k["task"])["used"]["active_ms"] == 10000
+    with pytest.raises(PermissionError, match="计时回退"):
+        k["queue"].heartbeat(token, now=4)
 
 
 def test_actual_counts_cannot_be_reset_and_progress_proof_must_exist(kernel):

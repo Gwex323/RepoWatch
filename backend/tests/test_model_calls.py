@@ -8,7 +8,9 @@ from test_roles import kernel as kernel
 from repowatch.adapters.providers import ModelLimits, ProviderAdapter, ProviderRequestError
 from repowatch.application.provider_calls import ModelCalls
 from repowatch.application.storage import ConflictError
+from repowatch.application.task_records import TaskRecords
 from repowatch.domain.budget import BudgetAmounts, BudgetDenied
+from repowatch.domain.task_records import canonical_json
 from repowatch.worker.model_calls import managed_role_model
 
 
@@ -187,3 +189,71 @@ def test_sdk_wrapper_meters_each_http_attempt_and_preserves_tool_binding(kernel)
     assert len(requests) == 2
     assert k.budgets.view(task)["used"]["model_calls"] == 2
     assert k.budgets.view(task)["used"]["tokens"] == 8
+
+
+@pytest.mark.parametrize(("configured", "allowed"), [(None, False), (24000, True)])
+def test_step_input_limit_can_be_raised_by_task_configuration(kernel, configured, allowed):
+    k = kernel
+    bind(k)
+    diagnose(k, "processor")
+    tasks = TaskRecords(k.store)
+    repository = tasks.register_repository("limit", admission_mode="all_bugs")
+    task = tasks.ensure_task(repository, "issue:limit", issue_id="1", now=0)
+    if configured is not None:
+        with k.store.write() as records:
+            records.change(
+                "tasks",
+                {"id": task},
+                {"configuration_json": canonical_json({"max_input_tokens": configured})},
+            )
+    k.budgets.authorize_initial(
+        "budget-limit",
+        task,
+        BudgetAmounts(
+            active_ms=100000,
+            model_calls=10,
+            tokens=100000,
+            repair_rounds=2,
+            recovery_rounds=2,
+        ),
+        expected_revision=1,
+        reason="input limit",
+        now=0,
+    )
+    k.queue.set_pause(False, now=0)
+    token = k.queue.claim(now=0)
+    calls, _ = service(k, roles=k.roles)
+
+    def wire(_request):
+        return httpx.Response(
+            200,
+            json={
+                "id": "c",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "model",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": "ok"},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+            },
+        )
+
+    adapter = ProviderAdapter(k.providers, transport=httpx.MockTransport(wire))
+    with managed_role_model(
+        adapter,
+        calls,
+        token,
+        "processor",
+        "node",
+        limits=ModelLimits(timeout_seconds=1, max_output_tokens=32),
+    ) as model:
+        if allowed:
+            assert model.invoke("x" * 14000).text == "ok"
+        else:
+            with pytest.raises(PermissionError, match="单步输入"):
+                model.invoke("x" * 14000)

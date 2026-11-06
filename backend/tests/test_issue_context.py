@@ -207,3 +207,65 @@ def test_new_pr_invalidates_feedback_and_hands_active_repair_back_to_triage(kern
         assert first["digest"] in {
             item["digest"] for item in records.find("issue_contexts", task_id=task)
         }
+
+
+def test_volatile_pr_fields_do_not_invalidate_feedback(kernel, monkeypatch):
+    services = kernel
+    services.clock = lambda: 0
+    services.tasks = TaskRecords(services.store)
+    services.vault = SimpleNamespace()
+    repository = services.tasks.register_repository("context-volatile", admission_mode="all_bugs")
+    task = services.tasks.ensure_task(repository, "issue:1", issue_id="101", now=0)
+    issue = {"id": 101, "number": 1, "state": "open"}
+    services.tasks.observe(task, "issue:1", "v1", issue_input(issue), now=0)
+    services.budgets.authorize_initial(
+        "budget",
+        task,
+        BudgetAmounts(
+            active_ms=1000000, model_calls=10, tokens=10000, repair_rounds=5, recovery_rounds=5
+        ),
+        expected_revision=1,
+        reason="fixture",
+        now=0,
+    )
+    with services.store.write() as records:
+        records.change(
+            "repositories",
+            {"id": repository},
+            {"target_sha": "a" * 40, "scan_ready_sha": "a" * 40},
+        )
+        records.change("tasks", {"id": task}, {"mode": "implement"})
+    services.queue.set_pause(False, now=0)
+    token = services.queue.claim(now=0)
+    facts = {
+        "issue": issue,
+        "comments": [],
+        "pull_requests": [
+            {
+                "id": 701,
+                "number": 7,
+                "state": "open",
+                "mergeable": None,
+                "mergeable_state": "unknown",
+            }
+        ],
+        "complete": True,
+    }
+
+    class Port:
+        def __init__(self, **kwargs):
+            pass
+
+        def issue_context(self, *args):
+            return facts
+
+    monkeypatch.setattr("repowatch.application.issue_context.GitHubReadAdapter", Port)
+    reader = IssueContexts(services)
+    first = reader.read(token)
+    facts["pull_requests"][0].update(mergeable=True, mergeable_state="clean")
+    second = reader.read(token)
+    assert second["digest"] != first["digest"]
+    with services.store.read() as records:
+        current = records.one("tasks", id=task)
+        assert current["mode"] == "implement"
+        assert current["feedback_revision"] == 1

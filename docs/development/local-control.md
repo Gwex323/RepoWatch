@@ -59,7 +59,16 @@ backend/.venv/Scripts/python.exe -m repowatch.worker
 
 验证＋独审后保存待提炼意图，绑定来源摘要及反馈修订；它不是已经生成的记忆。开放 PR 等待释放执行位，保留原累计预算。P5 消费仍须核对来源有效性。
 
-复跑：启用 `REPOWATCH_DOCKER_TESTS=1` 后执行 `backend/.venv/Scripts/python.exe -m pytest backend/tests`；定向覆盖 `test_repairs.py`、`test_verification.py`、`test_publication.py`、`test_candidate_issues.py` 和 `test_issue_context.py`。Docker 必须运行且镜像已准备；模型／GitHub 均使用受控夹具，不能代替 7.3／7.7 要求的真实受控仓库验收。浏览器报告及当前未通过项统一见 [NOW](../context/NOW.md)。
+复跑：启用 `REPOWATCH_DOCKER_TESTS=1` 后执行 `backend/.venv/Scripts/python.exe -m pytest backend/tests`；定向覆盖 `test_repairs.py`、`test_verification.py`、`test_publication.py`、`test_candidate_issues.py` 和 `test_issue_context.py`。Docker 必须运行且镜像已准备；模型／GitHub 单元测试使用受控夹具，不能代替产品端到端验收。
+
+2026-11-06 产品端到端验收：公开上游 `Gwex323/repowatch-p3-sandbox`（ID `1447899115`）与 Fork `gwx541/repowatch-p3-sandbox`（ID `1447913051`）完成两条真实发布路径。直接路径创建 Issue #15（创建者 Gwex323）→ 分支 `repowatch/issue-15-f3ad2679-3c1` @ `88f43247b388b281f1fad588993254a3d563970a` → PR #16；Fork 路径创建 Issue #17（创建者 gwx541）→ Fork 分支 `repowatch/issue-17-49b70683-9eb` @ `05f996df174e4df2b8152ca941dbee6357adc2a8` → 上游 PR #18（head 仓库 ID `1447913051`、base 仓库 ID `1447899115`）。两条发布意图均为 `confirmed`，任务进入 `waiting / pr_review`。模型使用确定性离线夹具，Docker、Git 分支推送与 GitHub 写入为真实；可追踪报告为 `experiments/results/local/p3-github-e2e-20261106.json`。此前 Issue #1／#3 与 PR #2／#4 是人工 API 驱动的仓库准备对象，保留为开放输入；重复的中间测试 Issue #5—#12 已关闭。
+
+复跑入口为 `experiments/p3-github-acceptance.py`。先在停写状态显式迁移目标数据目录，并在 Windows 凭据库写入该目录命名空间下的 GitHub 凭据引用；脚本只使用离线模型 transport，不调用付费模型。示例（不构成执行授权）：
+
+```powershell
+backend/.venv/Scripts/python.exe experiments/p3-github-acceptance.py --data-dir <绝对数据目录> --reference github-gwex323
+backend/.venv/Scripts/python.exe experiments/p3-github-acceptance.py --data-dir <另一个绝对数据目录> --reference github-gwx541 --fork --defect sub
+```
 
 `test_control_api.py` 验证安全会话、脱敏、重复／过期操作、恢复前置、有限预算及 SSE 游标；`test_worker_service.py` 验证显式诊断与暂停保留。真实浏览器夹具入口为：
 

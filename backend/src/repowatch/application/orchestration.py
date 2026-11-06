@@ -342,10 +342,14 @@ class Orchestrator:
             raise PermissionError("暂停、取消、排除或预算未授权，不能发起新执行")
         return result
 
-    def heartbeat(self, token: ExecutionToken, *, now: float, ttl=30):
+    def heartbeat(self, token: ExecutionToken, *, now: float | None = None, ttl=30, clock=None):
         if not math.isfinite(ttl) or not 0 < ttl <= 300:
             raise ValueError("执行租期必须在 0—300 秒内")
         with self.store.write() as records:
+            if now is None:
+                if clock is None:
+                    raise ValueError("缺少续约时钟")
+                now = clock()
             run = execution_record(records, token, now)
             meter_execution(records, run, now)
             records.change(
